@@ -136,3 +136,50 @@ test "scale: negative factor keeps lo <= hi invariant" {
     try std.testing.expectEqual(@as(f64, 1.0), s.lo);
     try std.testing.expectEqual(@as(f64, 3.0), s.hi);
 }
+
+test "expand: positive margin widens both ends" {
+    const e = Interval.init(1.0, 3.0).expand(1.0);
+    try std.testing.expectEqual(@as(f64, 0.0), e.lo);
+    try std.testing.expectEqual(@as(f64, 4.0), e.hi);
+}
+
+test "expand: zero margin is identity" {
+    const e = Interval.init(1.0, 3.0).expand(0.0);
+    try std.testing.expectEqual(@as(f64, 1.0), e.lo);
+    try std.testing.expectEqual(@as(f64, 3.0), e.hi);
+}
+
+test "expand: negative margin shrinks both ends" {
+    const e = Interval.init(1.0, 3.0).expand(-0.5);
+    try std.testing.expectEqual(@as(f64, 1.5), e.lo);
+    try std.testing.expectEqual(@as(f64, 2.5), e.hi);
+}
+
+test "distanceTo: zero inside the interval" {
+    const i = Interval.init(1.0, 3.0);
+    try std.testing.expectEqual(@as(f64, 0.0), i.distanceTo(2.0));
+}
+
+test "distanceTo: zero at the endpoints" {
+    const i = Interval.init(1.0, 3.0);
+    try std.testing.expectEqual(@as(f64, 0.0), i.distanceTo(1.0));
+    try std.testing.expectEqual(@as(f64, 0.0), i.distanceTo(3.0));
+}
+
+test "distanceTo: below lo returns distance to lo" {
+    const i = Interval.init(1.0, 3.0);
+    try std.testing.expectEqual(@as(f64, 1.0), i.distanceTo(0.0));
+    try std.testing.expectEqual(@as(f64, 2.0), i.distanceTo(-1.0));
+}
+
+test "distanceTo: above hi returns distance to hi" {
+    const i = Interval.init(1.0, 3.0);
+    try std.testing.expectEqual(@as(f64, 2.0), i.distanceTo(5.0));
+    try std.testing.expectEqual(@as(f64, 0.5), i.distanceTo(3.5));
+}
+
+test "distanceTo: negative interval" {
+    try std.testing.expectEqual(@as(f64, 2.0), Interval.init(-3.0, -1.0).distanceTo(-5.0));
+    try std.testing.expectEqual(@as(f64, 0.0), Interval.init(-3.0, -1.0).distanceTo(-2.0));
+    try std.testing.expectEqual(@as(f64, 1.0), Interval.init(-3.0, -1.0).distanceTo(0.0));
+}
