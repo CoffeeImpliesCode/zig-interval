@@ -1,23 +1,23 @@
 ---
 id: 0004
-status: in-progress
+status: merged
 severity: medium
 labels: []
 depends-on: []
 parent: 
-assigned: /tmp/vibe-wt/zig-interval-fix-0004
+assigned: 
 branch: fix-0004
-change-id: 
+change-id: nknwkwwsnovy
 scope: [src/interval.zig, tests/interval_test.zig]
 created: 2026-08-15
-updated: 2026-08-15T00:27:36
-verdict: 
+updated: 2026-08-15T00:36:15
+verdict: approve
 confidence: 
 revisions: 
 test-cmd: zig 0.16.0 build test
 testable: 
 spec: 
-sessions: research:2026-08-14T22-24-25-695Z_01a00260-605f-7000-9586-abb016e6e354.jsonl
+sessions: research:2026-08-14T22-24-25-695Z_01a00260-605f-7000-9586-abb016e6e354.jsonl,reviewer:2026-08-14T22-34-29-005Z_01a00269-950d-7000-af6e-1d1e4005a5bb.jsonl
 ---
 
 # add Interval expand and distanceTo
@@ -48,3 +48,6 @@ TEST: zig 0.16.0 build test
 - **Suspect/failing tests**: none currently fail (scaffold passes). New tests must cover: `distanceTo` below / inside / above, at exact endpoints (returns 0); `expand` positive margin widens both ends, margin 0 is identity.
 
 `Spec: adequate` — core semantics (distance-to-nearest-endpoint, widen-both-ends) are standard and unambiguous; caveats above (two formula typos, dead empty clause) are resolvable from the function name alone, not blocking.
+
+## Review log
+- 2026-08-15T00:36:12 approve:

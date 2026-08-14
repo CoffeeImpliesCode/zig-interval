@@ -1,0 +1,8 @@
+{"ts": "2026-08-15T00:36:48", "event": "created", "by": "triage", "title": "add Interval hullOf and intersectionOf", "severity": "medium", "test_cmd": "zig 0.16.0 build test", "parent": ""}
+{"ts": "2026-08-15T00:39:33", "event": "researched", "by": "research"}
+{"ts": "2026-08-15T00:39:54", "event": "note", "by": "agent", "text": "Per research: return ?Interval (null on empty slice / disjoint intersection), matching the existing intersect() -> ?Interval convention. There is no empty-interval representation (lo <= hi always)."}
+{"ts": "2026-08-15T00:39:54", "event": "claimed", "by": "manager", "worktree": "/tmp/vibe-wt/zig-interval-fix-0005", "branch": "fix-0005"}
+{"ts": "2026-08-15T00:49:45", "event": "rework", "by": "vf", "resumed": ""}
+{"ts": "2026-08-15T00:50:04", "event": "review", "by": "vf", "branch": "fix-0005", "change": "lknrrmnnttpz"}
+{"ts": "2026-08-15T00:52:08", "event": "approve", "by": "reviewer", "confidence": ""}
+{"ts": "2026-08-15T00:52:14", "event": "merged", "by": "merge", "change": "woqqynzlxomr"}

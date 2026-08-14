@@ -1,0 +1,62 @@
+$ zig 0.16.0 build test  (at test commit wuvkkrxzotno, exit 1)
+test
++- run test
+   +- compile test Debug native 8 errors
+tests/interval_test.zig:189:36: error: struct 'interval.Interval' has no member named 'hullOf'
+    try std.testing.expect(Interval.hullOf(items) == null);
+                           ~~~~~~~~^~~~~~~
+src/interval.zig:4:22: note: struct declared here
+pub const Interval = struct {
+                     ^~~~~~
+tests/interval_test.zig:194:23: error: struct 'interval.Interval' has no member named 'hullOf'
+    const h = Interval.hullOf(&items).?;
+              ~~~~~~~~^~~~~~~
+src/interval.zig:4:22: note: struct declared here
+pub const Interval = struct {
+                     ^~~~~~
+tests/interval_test.zig:205:23: error: struct 'interval.Interval' has no member named 'hullOf'
+    const h = Interval.hullOf(&items).?;
+              ~~~~~~~~^~~~~~~
+src/interval.zig:4:22: note: struct declared here
+pub const Interval = struct {
+                     ^~~~~~
+tests/interval_test.zig:212:36: error: struct 'interval.Interval' has no member named 'intersectionOf'
+    try std.testing.expect(Interval.intersectionOf(items) == null);
+                           ~~~~~~~~^~~~~~~~~~~~~~~
+src/interval.zig:4:22: note: struct declared here
+pub const Interval = struct {
+                     ^~~~~~
+tests/interval_test.zig:217:23: error: struct 'interval.Interval' has no member named 'intersectionOf'
+    const x = Interval.intersectionOf(&items).?;
+              ~~~~~~~~^~~~~~~~~~~~~~~
+src/interval.zig:4:22: note: struct declared here
+pub const Interval = struct {
+                     ^~~~~~
+tests/interval_test.zig:228:23: error: struct 'interval.Interval' has no member named 'intersectionOf'
+    const x = Interval.intersectionOf(&items).?;
+              ~~~~~~~~^~~~~~~~~~~~~~~
+src/interval.zig:4:22: note: struct declared here
+pub const Interval = struct {
+                     ^~~~~~
+tests/interval_test.zig:238:36: error: struct 'interval.Interval' has no member named 'intersectionOf'
+    try std.testing.expect(Interval.intersectionOf(&items) == null);
+                           ~~~~~~~~^~~~~~~~~~~~~~~
+src/interval.zig:4:22: note: struct declared here
+pub const Interval = struct {
+                     ^~~~~~
+tests/interval_test.zig:246:23: error: struct 'interval.Interval' has no member named 'intersectionOf'
+    const x = Interval.intersectionOf(&items).?;
+              ~~~~~~~~^~~~~~~~~~~~~~~
+src/interval.zig:4:22: note: struct declared here
+pub const Interval = struct {
+                     ^~~~~~
+error: 8 compilation errors
+failed command: ~/.cache/zig/p/N-V-__8AAFFSVRWqblwBIcA-Yqv-u7sbjsJoww8K0mWaHbmJ/zig test -ODebug --dep interval -Mroot=/tmp/tmps7m6inne/red/tests/interval_test.zig -ODebug -Minterval=/tmp/tmps7m6inne/red/src/interval.zig --cache-dir .zig-cache --global-cache-dir ~/.cache/zig --name test --zig-lib-dir ~/.cache/zig/p/N-V-__8AAFFSVRWqblwBIcA-Yqv-u7sbjsJoww8K0mWaHbmJ/lib/ --listen=-
+
+Build Summary: 0/3 steps succeeded (1 failed)
+test transitive failure
++- run test transitive failure
+   +- compile test Debug native 8 errors
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/741e86bf429c5dda9a4f0ef489a82647/build ~/.cache/zig/p/N-V-__8AAFFSVRWqblwBIcA-Yqv-u7sbjsJoww8K0mWaHbmJ/zig ~/.cache/zig/p/N-V-__8AAFFSVRWqblwBIcA-Yqv-u7sbjsJoww8K0mWaHbmJ/lib /tmp/tmps7m6inne/red .zig-cache ~/.cache/zig --seed 0x6fc90000 -Z90d4f4c095f28817 test

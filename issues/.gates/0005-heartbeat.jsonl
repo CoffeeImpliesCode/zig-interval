@@ -1,0 +1,15 @@
+{"ts":"2026-08-14T22:36:58.529Z","event":"agent_start","session":"","cwd":"~/projects/zig-interval"}
+{"ts":"2026-08-14T22:36:59.302Z","event":"agent_end","session":"","cwd":"~/projects/zig-interval"}
+{"ts":"2026-08-14T22:36:59.304Z","event":"agent_start","session":"","cwd":"~/projects/zig-interval"}
+{"ts":"2026-08-14T22:39:05.299Z","event":"agent_end","session":"","cwd":"~/projects/zig-interval"}
+{"ts":"2026-08-14T22:40:05.591Z","event":"agent_start","session":"","cwd":"/tmp/vibe-wt/zig-interval-fix-0005"}
+{"ts":"2026-08-14T22:40:06.055Z","event":"agent_end","session":"","cwd":"/tmp/vibe-wt/zig-interval-fix-0005"}
+{"ts":"2026-08-14T22:40:06.060Z","event":"agent_start","session":"","cwd":"/tmp/vibe-wt/zig-interval-fix-0005"}
+{"ts":"2026-08-14T22:43:09.973Z","event":"agent_start","session":"","cwd":"/tmp/vibe-wt/zig-interval-fix-0005"}
+{"ts":"2026-08-14T22:43:10.666Z","event":"agent_end","session":"","cwd":"/tmp/vibe-wt/zig-interval-fix-0005"}
+{"ts":"2026-08-14T22:43:10.668Z","event":"agent_start","session":"","cwd":"/tmp/vibe-wt/zig-interval-fix-0005"}
+{"ts":"2026-08-14T22:47:44.399Z","event":"agent_end","session":"","cwd":"/tmp/vibe-wt/zig-interval-fix-0005"}
+{"ts":"2026-08-14T22:50:17.918Z","event":"agent_start","session":"","cwd":"~/projects/zig-interval"}
+{"ts":"2026-08-14T22:50:18.723Z","event":"agent_end","session":"","cwd":"~/projects/zig-interval"}
+{"ts":"2026-08-14T22:50:18.725Z","event":"agent_start","session":"","cwd":"~/projects/zig-interval"}
+{"ts":"2026-08-14T22:52:04.092Z","event":"agent_end","session":"","cwd":"~/projects/zig-interval"}

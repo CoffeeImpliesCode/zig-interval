@@ -67,4 +67,15 @@ pub const Interval = struct {
         const half = self.width() * @abs(factor) / 2.0;
         return .{ .lo = m - half, .hi = m + half };
     }
+    /// Widen both ends by margin: lo -= margin, hi += margin.
+    pub fn expand(self: Interval, margin: f64) Interval {
+        return .{ .lo = self.lo - margin, .hi = self.hi + margin };
+    }
+    /// Distance from x to the interval: 0 inside [lo, hi], otherwise the
+    /// distance to the nearest endpoint.
+    pub fn distanceTo(self: Interval, x: f64) f64 {
+        if (x < self.lo) return self.lo - x;
+        if (x > self.hi) return x - self.hi;
+        return 0.0;
+    }
 };
