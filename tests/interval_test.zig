@@ -87,3 +87,52 @@ test "clamp: endpoints inclusive" {
     try std.testing.expectEqual(@as(f64, 1.0), i.clamp(1.0));
     try std.testing.expectEqual(@as(f64, 3.0), i.clamp(3.0));
 }
+
+test "translate: shifts lo and hi by delta" {
+    const t = Interval.init(1.0, 3.0).translate(5.0);
+    try std.testing.expectEqual(@as(f64, 6.0), t.lo);
+    try std.testing.expectEqual(@as(f64, 8.0), t.hi);
+}
+
+test "translate: negative and zero delta" {
+    const neg = Interval.init(1.0, 3.0).translate(-5.0);
+    try std.testing.expectEqual(@as(f64, -4.0), neg.lo);
+    try std.testing.expectEqual(@as(f64, -2.0), neg.hi);
+
+    const zero = Interval.init(1.0, 3.0).translate(0.0);
+    try std.testing.expectEqual(@as(f64, 1.0), zero.lo);
+    try std.testing.expectEqual(@as(f64, 3.0), zero.hi);
+}
+
+test "scale: factor 1 is identity" {
+    const s = Interval.init(1.0, 3.0).scale(1.0);
+    try std.testing.expectEqual(@as(f64, 1.0), s.lo);
+    try std.testing.expectEqual(@as(f64, 3.0), s.hi);
+}
+
+test "scale: factor 2 doubles width about midpoint" {
+    const s = Interval.init(1.0, 3.0).scale(2.0);
+    try std.testing.expectEqual(@as(f64, 0.0), s.lo);
+    try std.testing.expectEqual(@as(f64, 4.0), s.hi);
+}
+
+test "scale: midpoint preserved and width scaled" {
+    const s = Interval.init(1.0, 3.0).scale(0.5);
+    try std.testing.expectEqual(@as(f64, 1.5), s.lo);
+    try std.testing.expectEqual(@as(f64, 2.5), s.hi);
+    try std.testing.expectEqual(@as(f64, 2.0), s.midpoint());
+    try std.testing.expectEqual(@as(f64, 1.0), s.width());
+}
+
+test "scale: factor 0 collapses to midpoint" {
+    const s = Interval.init(1.0, 3.0).scale(0.0);
+    try std.testing.expectEqual(@as(f64, 2.0), s.lo);
+    try std.testing.expectEqual(@as(f64, 2.0), s.hi);
+}
+
+test "scale: negative factor keeps lo <= hi invariant" {
+    const s = Interval.init(1.0, 3.0).scale(-1.0);
+    try std.testing.expect(s.lo <= s.hi);
+    try std.testing.expectEqual(@as(f64, 1.0), s.lo);
+    try std.testing.expectEqual(@as(f64, 3.0), s.hi);
+}
