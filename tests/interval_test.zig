@@ -65,3 +65,25 @@ test "subset: containment of intervals" {
     try std.testing.expect(!Interval.init(-1.0, 2.0).subsetOf(outer));
     try std.testing.expect(!Interval.init(1.0, 6.0).subsetOf(outer));
 }
+
+test "midpoint: center of interval" {
+    try std.testing.expectEqual(@as(f64, 2.0), Interval.init(1.0, 3.0).midpoint());
+    try std.testing.expectEqual(@as(f64, -0.5), Interval.init(-2.0, 1.0).midpoint());
+}
+
+test "midpoint: degenerate interval is that value" {
+    try std.testing.expectEqual(@as(f64, 2.0), Interval.init(2.0, 2.0).midpoint());
+}
+
+test "clamp: values below, inside, and above" {
+    const i = Interval.init(1.0, 3.0);
+    try std.testing.expectEqual(@as(f64, 1.0), i.clamp(0.0));
+    try std.testing.expectEqual(@as(f64, 2.0), i.clamp(2.0));
+    try std.testing.expectEqual(@as(f64, 3.0), i.clamp(5.0));
+}
+
+test "clamp: endpoints inclusive" {
+    const i = Interval.init(1.0, 3.0);
+    try std.testing.expectEqual(@as(f64, 1.0), i.clamp(1.0));
+    try std.testing.expectEqual(@as(f64, 3.0), i.clamp(3.0));
+}
