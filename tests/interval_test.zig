@@ -13,14 +13,14 @@ test "contains: endpoint-inclusive membership" {
 test "union: smallest interval covering both" {
     const a = Interval.init(1.0, 3.0);
     const b = Interval.init(2.0, 5.0);
-    const u = a.union(b);
+    const u = a.hull(b);
     try std.testing.expectEqual(@as(f64, 1.0), u.lo);
     try std.testing.expectEqual(@as(f64, 5.0), u.hi);
 
     const c = Interval.init(4.0, 6.0);
-    const u2 = Interval.init(1.0, 2.0).union(c);
-    try std.testing.expectEqual(@as(f64, 1.0), u2.lo);
-    try std.testing.expectEqual(@as(f64, 6.0), u2.hi);
+    const res = Interval.init(1.0, 2.0).hull(c);
+    try std.testing.expectEqual(@as(f64, 1.0), res.lo);
+    try std.testing.expectEqual(@as(f64, 6.0), res.hi);
 }
 
 test "intersect: overlapping core" {
