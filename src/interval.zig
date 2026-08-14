@@ -44,4 +44,14 @@ pub const Interval = struct {
     pub fn subsetOf(self: Interval, other: Interval) bool {
         return other.lo <= self.lo and self.hi <= other.hi;
     }
+
+    /// Center of the interval, (lo + hi) / 2.
+    pub fn midpoint(self: Interval) f64 {
+        return (self.lo + self.hi) / 2.0;
+    }
+
+    /// Clamp x into [lo, hi]. Values below lo map to lo, above hi to hi.
+    pub fn clamp(self: Interval, x: f64) f64 {
+        return @min(@max(x, self.lo), self.hi);
+    }
 };
