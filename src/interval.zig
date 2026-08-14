@@ -54,4 +54,17 @@ pub const Interval = struct {
     pub fn clamp(self: Interval, x: f64) f64 {
         return @min(@max(x, self.lo), self.hi);
     }
+
+    /// Shift lo and hi by delta, preserving the width.
+    pub fn translate(self: Interval, delta: f64) Interval {
+        return .{ .lo = self.lo + delta, .hi = self.hi + delta };
+    }
+
+    /// Scale about the midpoint, preserving lo <= hi by using |factor|
+    /// for the width.
+    pub fn scale(self: Interval, factor: f64) Interval {
+        const m = self.midpoint();
+        const half = self.width() * @abs(factor) / 2.0;
+        return .{ .lo = m - half, .hi = m + half };
+    }
 };
