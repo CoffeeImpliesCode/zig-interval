@@ -183,3 +183,67 @@ test "distanceTo: negative interval" {
     try std.testing.expectEqual(@as(f64, 0.0), Interval.init(-3.0, -1.0).distanceTo(-2.0));
     try std.testing.expectEqual(@as(f64, 1.0), Interval.init(-3.0, -1.0).distanceTo(0.0));
 }
+
+test "hullOf: empty slice returns null" {
+    const items: []const Interval = &.{};
+    try std.testing.expect(Interval.hullOf(items) == null);
+}
+
+test "hullOf: single input returns that interval" {
+    const items = [_]Interval{Interval.init(2.0, 5.0)};
+    const h = Interval.hullOf(&items).?;
+    try std.testing.expectEqual(@as(f64, 2.0), h.lo);
+    try std.testing.expectEqual(@as(f64, 5.0), h.hi);
+}
+
+test "hullOf: spans min lo and max hi across inputs" {
+    const items = [_]Interval{
+        Interval.init(4.0, 7.0),
+        Interval.init(1.0, 3.0),
+        Interval.init(2.0, 9.0),
+    };
+    const h = Interval.hullOf(&items).?;
+    try std.testing.expectEqual(@as(f64, 1.0), h.lo);
+    try std.testing.expectEqual(@as(f64, 9.0), h.hi);
+}
+
+test "intersectionOf: empty slice returns null" {
+    const items: []const Interval = &.{};
+    try std.testing.expect(Interval.intersectionOf(items) == null);
+}
+
+test "intersectionOf: single input returns that interval" {
+    const items = [_]Interval{Interval.init(2.0, 5.0)};
+    const x = Interval.intersectionOf(&items).?;
+    try std.testing.expectEqual(@as(f64, 2.0), x.lo);
+    try std.testing.expectEqual(@as(f64, 5.0), x.hi);
+}
+
+test "intersectionOf: common core of overlapping inputs" {
+    const items = [_]Interval{
+        Interval.init(1.0, 5.0),
+        Interval.init(2.0, 6.0),
+        Interval.init(3.0, 4.0),
+    };
+    const x = Interval.intersectionOf(&items).?;
+    try std.testing.expectEqual(@as(f64, 3.0), x.lo);
+    try std.testing.expectEqual(@as(f64, 4.0), x.hi);
+}
+
+test "intersectionOf: disjoint slice returns null" {
+    const items = [_]Interval{
+        Interval.init(0.0, 1.0),
+        Interval.init(2.0, 3.0),
+    };
+    try std.testing.expect(Interval.intersectionOf(&items) == null);
+}
+
+test "intersectionOf: touching endpoints overlap at a point" {
+    const items = [_]Interval{
+        Interval.init(0.0, 2.0),
+        Interval.init(2.0, 4.0),
+    };
+    const x = Interval.intersectionOf(&items).?;
+    try std.testing.expectEqual(@as(f64, 2.0), x.lo);
+    try std.testing.expectEqual(@as(f64, 2.0), x.hi);
+}
