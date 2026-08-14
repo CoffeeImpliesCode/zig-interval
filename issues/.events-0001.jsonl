@@ -1,0 +1,7 @@
+{"ts": "2026-08-14T23:13:01", "event": "created", "by": "triage", "title": "implement interval arithmetic core", "severity": "medium", "test_cmd": "zig 0.16.0 build test", "parent": ""}
+{"ts": "2026-08-14T23:13:07", "event": "claimed", "by": "manager", "worktree": "/tmp/vibe-wt/zig-interval-fix-0001", "branch": "fix-0001"}
+{"ts": "2026-08-14T23:15:46", "event": "abandoned", "by": "vf", "reason": "stale"}
+{"ts": "2026-08-14T23:16:16", "event": "claimed", "by": "manager", "worktree": "/tmp/vibe-wt/zig-interval-fix-0001", "branch": "fix-0001"}
+{"ts": "2026-08-14T23:21:44", "event": "review", "by": "vf", "branch": "fix-0001", "change": "ozkspvotwkuq"}
+{"ts": "2026-08-14T23:25:29", "event": "approve", "by": "reviewer", "confidence": "0.97"}
+{"ts": "2026-08-14T23:25:43", "event": "merged", "by": "merge", "change": "yrlvzzuwmtvn"}

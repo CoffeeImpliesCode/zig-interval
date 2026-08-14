@@ -1,0 +1,10 @@
+{"ts": "2026-08-15T00:01:41", "event": "created", "by": "triage", "title": "add Interval scale and translate", "severity": "medium", "test_cmd": "zig 0.16.0 build test", "parent": ""}
+{"ts": "2026-08-15T00:05:17", "event": "researched", "by": "research"}
+{"ts": "2026-08-15T00:05:41", "event": "claimed", "by": "manager", "worktree": "/tmp/vibe-wt/zig-interval-fix-0003", "branch": "fix-0003"}
+{"ts": "2026-08-15T00:07:34", "event": "researched", "by": "research"}
+{"ts": "2026-08-15T00:08:26", "event": "review", "by": "vf", "branch": "fix-0003", "change": "ktpukklyqqpr"}
+{"ts": "2026-08-15T00:08:33", "event": "request-changes", "by": "review", "revisions": 1, "reason": "red/green re-run failed:\n- target command FAILED at the fix tip (expected PASS): zig 0.16.0 build test (exit 1)"}
+{"ts": "2026-08-15T00:20:08", "event": "review", "by": "vf", "branch": "fix-0003", "change": "mlmousuommrs"}
+{"ts": "2026-08-15T00:22:02", "event": "approve", "by": "reviewer", "confidence": "0.95"}
+{"ts": "2026-08-15T00:22:14", "event": "merged", "by": "merge", "change": "ttzlupsyyspu"}
+{"ts": "2026-08-15T00:22:54", "event": "rework", "by": "vf", "resumed": ""}

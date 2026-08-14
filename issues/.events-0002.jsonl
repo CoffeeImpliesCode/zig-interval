@@ -1,0 +1,6 @@
+{"ts": "2026-08-14T23:27:22", "event": "created", "by": "triage", "title": "add Interval midpoint and clamp", "severity": "medium", "test_cmd": "zig 0.16.0 build test", "parent": ""}
+{"ts": "2026-08-14T23:29:57", "event": "researched", "by": "research"}
+{"ts": "2026-08-14T23:30:51", "event": "claimed", "by": "manager", "worktree": "/tmp/vibe-wt/zig-interval-fix-0002", "branch": "fix-0002"}
+{"ts": "2026-08-14T23:34:49", "event": "review", "by": "vf", "branch": "fix-0002", "change": "zknovmtxvqqv"}
+{"ts": "2026-08-14T23:37:59", "event": "approve", "by": "reviewer", "confidence": "0.95"}
+{"ts": "2026-08-14T23:38:25", "event": "merged", "by": "merge", "change": "wouypmvpuvrm"}
