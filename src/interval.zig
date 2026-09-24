@@ -22,6 +22,31 @@ pub const Interval = struct {
         };
     }
 
+    /// Smallest interval covering all of items, or null when empty.
+    pub fn hullOf(items: []const Interval) ?Interval {
+        if (items.len == 0) return null;
+        var lo = items[0].lo;
+        var hi = items[0].hi;
+        for (items[1..]) |it| {
+            lo = @min(lo, it.lo);
+            hi = @max(hi, it.hi);
+        }
+        return .{ .lo = lo, .hi = hi };
+    }
+
+    /// Common intersection of all of items, or null when empty or disjoint.
+    pub fn intersectionOf(items: []const Interval) ?Interval {
+        if (items.len == 0) return null;
+        var lo = items[0].lo;
+        var hi = items[0].hi;
+        for (items[1..]) |it| {
+            lo = @max(lo, it.lo);
+            hi = @min(hi, it.hi);
+        }
+        if (lo > hi) return null;
+        return .{ .lo = lo, .hi = hi };
+    }
+
     /// Shared region, or null when the intervals are disjoint.
     pub fn intersect(self: Interval, other: Interval) ?Interval {
         const lo = @max(self.lo, other.lo);
@@ -67,10 +92,12 @@ pub const Interval = struct {
         const half = self.width() * @abs(factor) / 2.0;
         return .{ .lo = m - half, .hi = m + half };
     }
+
     /// Widen both ends by margin: lo -= margin, hi += margin.
     pub fn expand(self: Interval, margin: f64) Interval {
         return .{ .lo = self.lo - margin, .hi = self.hi + margin };
     }
+
     /// Distance from x to the interval: 0 inside [lo, hi], otherwise the
     /// distance to the nearest endpoint.
     pub fn distanceTo(self: Interval, x: f64) f64 {
