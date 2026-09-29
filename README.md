@@ -70,18 +70,38 @@ enough. The free function is widened by two anyway, so that everything reached
 through `interval.ext` answers under one rule. That extra width is the price of
 uniformity, not a risk.
 
-**The elementary functions widen by two ULP, and that is a measured margin.**
-The `std.math` primitives behind `exp`, `log`, the trigonometric functions, the
-hyperbolic functions and the rest are not correctly rounded and carry no
-documented error bound. Measured against exact arithmetic over 300 arguments per
-function at magnitudes from 1e-8 to 1e8, every one of them landed within about
-1.1 ULP, with `tanh` the worst at 1.07 — past what a single step absorbs. Those
-results are therefore widened by two steps.
+**The elementary functions widen by two ULP, and that is a measured margin, not
+a proof.** The `std.math` primitives behind `exp`, `log`, the trigonometric
+functions, the hyperbolic functions and the rest are not correctly rounded and
+carry no documented error bound. Measured against exact arithmetic over 300
+arguments per function at magnitudes from 1e-8 to 1e8, the point primitives the
+library calls landed within about 1.1 ULP, with `tanh` the worst at 1.07 — past
+what a single step absorbs. That is a sample of those primitives rather than a
+bound on them, and it does not hold for all of them: `std.math.pow` measured
+1.52 ULP. Those results are therefore widened by two steps, and two is where the
+measurement stopped, with headroom. A rigorous guarantee there would need a
+correctly rounded or formally verified implementation of each function, which
+this library does not provide.
 
-`powf` gets both treatments. `std.math.pow` builds the fractional part of its
-exponent as `exp(y * log(x))`, so its relative error grows with the size of that
-product and is unbounded in the exponent, and the result carries a relative
-margin of about 2⁻³⁸ on top of the two ULP steps.
+`powf` is the one operation whose underlying primitive has no usable error bound
+at all, and it is now handled by composition rather than by a constant.
+`std.math.pow` reaches the integer part of the exponent by repeated squaring,
+whose relative error doubles at every squaring, so its error grows with that
+integer part and no fixed margin can cover it — under a margin of 2⁻³⁸ the value
+`1.0000000001^1e8` came back excluding the true answer. `powf` does not call it.
+It evaluates each base endpoint as `exp(log(base) * y)` using this library's own
+`log`, `mul` and `exp`, each of which carries its own enclosure, and hulls the
+two endpoints. The result is a hull of enclosures rather than four points read
+off a primitive that cannot bound its own error.
+
+**The geometry operations widen too, and `scale` widens by a different route.**
+`translate` and `expand` are one correctly rounded addition or subtraction per
+side, so like `add` they take exactly one step per endpoint. `scale` is not a
+single operation: its exact image is `[M - W, M + W]`, and neither `M` nor `W` is
+an `f64` — each is a chain of rounded steps, and the error of a chain is not the
+error of its last step. So `scale` encloses its two intermediates first and
+composes the answer out of `add`, `sub`, `mul` and `div`, each of which widens
+in its own right, rather than taking a fixed number of steps from the outside.
 
 `sin` and `cos` are the two functions that cannot simply take the value at each
 end, because the range may turn inside the argument. They read it off the
@@ -97,7 +117,7 @@ Read this before trusting `tanh` in a verification pipeline.
 | --- | --- | --- |
 | `add`, `sub`, `mul`, `div`, `recip`, `sqr` | IEEE 754 correct rounding, half a ULP | **Proven.** One ULP of outward widening is sufficient. |
 | `sqrt` | IEEE 754 correct rounding, half a ULP | **Proven.** Widened by two ULP anyway, for uniformity. |
-| `exp`, `log`, the trigonometric and hyperbolic functions, and the rest | Measured worst case ≈ 1.1 ULP | **Empirically bounded.** Two ULP of outward widening. |
+| `exp`, `log`, the trigonometric and hyperbolic functions, and the rest | Sampled at ≈ 1.1 ULP over the point primitives; `std.math.pow` measured 1.52 ULP | **Empirically bounded.** Two ULP of outward widening. |
 
 This library does not implement correctly rounded or formally verified
 elementary functions. For those, the two-ULP figure is a margin chosen from
@@ -108,17 +128,23 @@ verified implementation of those functions rather than this one.
 
 ### The cost
 
-One extra ULP of width per endpoint for arithmetic and square root, two for the
-elementary functions. The results are therefore **slightly wider than
-mathematically necessary**. That is the price of soundness and it is deliberate:
-a result one ULP too wide is safe and costs a little accuracy, while a result
-one ULP too narrow is silently wrong and nothing downstream can detect it. If
-you have a choice between a result that is marginally too wide and a result that
-is marginally too narrow, take the wide one.
+One extra ULP of width per endpoint for arithmetic, square root and the
+single-step geometry operations, two for the elementary functions, and a few
+more for `scale`, which composes several of them. The results are therefore
+**slightly wider than mathematically necessary**. That is the price of soundness
+and it is deliberate: a result one ULP too wide is safe and costs a little
+accuracy, while a result one ULP too narrow is silently wrong and nothing
+downstream can detect it. If you have a choice between a result that is
+marginally too wide and a result that is marginally too narrow, take the wide one.
 
 Because enclosures compose soundly — each operation accounts for its inputs'
 error instead of trusting them — accumulated width grows roughly linearly with
-the number of operations composed, not exponentially.
+the number of operations composed, not exponentially. The one operation that
+breaks that pattern is integer `pow`, which reaches its exponent by repeated
+squaring: each squaring **doubles** the interval's relative width, so the width
+after exponent `n` grows with the binary length of `n` rather than staying at
+one step per squaring. `powf` is not that operation — going through
+`exp(y * log x)`, it composes linearly like everything else.
 
 `nextUp` and `prevDown` are exported, so you can apply the same widening to your
 own arithmetic when a value of yours feeds an `Interval`:
@@ -234,13 +260,19 @@ whenever the result set can be empty.
 | `distanceTo(self: Interval, x: f64) f64` | `0` inside the interval, else the distance to the nearest endpoint. |
 
 `scale` uses `|factor|` for the width, so a negative factor mirrors the width
-without inverting the endpoints and the `lo <= hi` invariant still holds.
+without inverting the endpoints and the `lo <= hi` invariant still holds. It is
+also the one operation here that is not a single rounded step: it encloses its
+midpoint and its half-width and composes the answer out of `add`, `sub`, `mul`
+and `div`, so it runs a few ULP wider than the exact image.
 
-The set and geometry operations do no arithmetic, so their endpoints are exact
-and the results need no widening. The algebraic operations pay one ULP per
-endpoint, with two exceptions worth knowing: `neg` is exact, and `abs` and
-`sqr` of an interval straddling zero return a lower bound of exactly `0.0`,
-which is already exact.
+The **set** operations — `hull`, `hullOf`, `intersect`, `intersectionOf` — do
+no arithmetic, so their endpoints are exact and the results need no widening.
+The **geometry** operations do arithmetic and do widen: `translate` and `expand`
+are one correctly rounded addition or subtraction per side, so they pay one ULP
+per endpoint exactly as `add` does, and `scale` pays whatever its composition
+pays. The algebraic operations pay one ULP per endpoint, with two exceptions
+worth knowing: `neg` is exact, and `abs` and `sqr` of an interval straddling
+zero return a lower bound of exactly `0.0`, which is already exact.
 
 ### Elementary functions — free functions
 
@@ -251,7 +283,7 @@ All are reachable as `interval.<name>` and again as `interval.ext.<name>`.
 | `sqrt(x: Interval) ?Interval` | `[√lo, √hi]`. **`null` when `hi < 0`.** |
 | `cbrt(x: Interval) Interval` | `[∛lo, ∛hi]`. Monotone and real on all of ℝ, so it never fails. |
 | `pow(x: Interval, n: i32) Interval` | `x^n` for a **plain integer** exponent, by squaring. Never `null`; `pow(x, 0)` is exactly `[1, 1]`. **`[-inf, inf]` when `n < 0` and `x` contains zero.** |
-| `powf(x: Interval, y: Interval) ?Interval` | `x^y` with an **interval** exponent, which needs real analysis rather than repeated squaring. **`null` when `x.lo < 0`**: a negative base raised to a general exponent has no real value. **`[-inf, inf]` when the base contains zero and the exponent reaches below `-1`.** |
+| `powf(x: Interval, y: Interval) ?Interval` | `x^y` with an **interval** exponent, which needs real analysis rather than repeated squaring. Each base endpoint is evaluated as `exp(log(base) * y)` with this library's own `log`, `mul` and `exp`, and the two endpoints are hulled. **`null` when `x.lo < 0`**: a negative base raised to a general exponent has no real value. **`[0, +inf]` when the base reaches zero and the exponent reaches down to zero** — the trigger is reaching down to zero, not passing any particular value, and the lower bound is `0` rather than `-inf` because a positive base has a positive power. A base of exactly zero under an exponent that stays positive is `[0, 0]`, gaining the value `1` when the exponent reaches exactly zero. No path returns a negative bound. |
 | `exp(x: Interval) Interval` | `[e^lo, e^hi]`. Increasing, total, unbounded. |
 | `exp2(x: Interval) Interval` | `[2^lo, 2^hi]`. |
 | `expm1(x: Interval) Interval` | `[e^lo − 1, e^hi − 1]`; keeps precision where `exp(x) - 1` would cancel. |
@@ -277,9 +309,13 @@ All are reachable as `interval.<name>` and again as `interval.ext.<name>`.
 | `trunc(x: Interval) Interval` | Same construction, toward zero. |
 | `round(x: Interval) Interval` | Same construction with `@round`'s rule, which breaks ties away from zero: `round([-0.5, 0.5])` brackets `[-1, 1]`. |
 
-The relative margin `powf` applies to each corner before the ULP steps is
-published as `interval.ext.pow_margin`, so a caller reasoning about how tight a
-`powf` result can be reads the one value instead of guessing at it.
+`powf` publishes no constant to read. How tight a `powf` result can be is
+answered by the composition it is built from, not by a number: the width is
+whatever this library's own `log`, `mul` and `exp` produce for that argument,
+and it grows with the argument rather than sitting at a fixed figure. The
+margin that used to be published here, `interval.ext.pow_margin`, was deleted
+along with the `std.math.pow` call it belonged to, because it was a guess at a
+primitive's error that the primitive could not keep to.
 
 #### Critical points, and why `sin` and `cos` are special
 
@@ -350,10 +386,12 @@ the empty folds `hullOf` / `intersectionOf` of an empty slice. The question
 
 **Unbounded → an infinite interval.** `div` and `recip` when the divisor
 contains zero (including a divisor that merely *touches* zero, such as
-`[0, 1]`); `tan` across a pole; and `pow` with a negative integer exponent, or
-`powf` whose exponent interval reaches below `-1`, applied to a base that
-contains zero. The question "what is `1 / x` for `x ∈ [-1, 1]`?" has a
-perfectly good answer — all of ℝ — so the result is `[-inf, inf]`, not `null`.
+`[0, 1]`); `tan` across a pole; `pow` with a negative integer exponent applied to
+a base that contains zero; and `powf` whose exponent interval reaches down to
+zero, applied to a base that reaches zero. The question "what is `1 / x` for
+`x ∈ [-1, 1]`?" has a perfectly good answer — all of ℝ — so the result is
+`[-inf, inf]`, not `null`. `powf` is the one-sided case among these: a positive
+base has a positive power, so it answers `[0, +inf]` rather than all of ℝ.
 
 ```zig
 // Unbounded: a real answer, just not a finite one.
@@ -398,8 +436,15 @@ dimension is worth treating in two different ways.
 | Storage | Inline in the struct, stack-allocated | A slice, heap-allocated |
 | Specialisation | Monomorphised per `n` | One compiled body |
 | Allocator | None | Required at construction, stored in the value |
-| Bounds checks | None | None |
+| Bounds checks | On `get` and `set`, in Debug and ReleaseSafe | On `get` and `set`, in Debug and ReleaseSafe |
 | Best for | Small fixed dimensions in hot code | Data-driven dimensions |
+
+`get` and `set` bounds-check their index, on both types. `Vec(n)` indexes a
+`[n]Interval` field and `DynVec` indexes a slice, and Zig checks a runtime index
+into either one in Debug and ReleaseSafe. As with every `std.debug` assertion,
+the check is compiled out in ReleaseFast, so a ReleaseFast build is the only
+mode in which an out-of-range index goes unchecked, and the caller is
+responsible there.
 
 Use `Vec(n)` when the dimension is a constant in your program — 2 for a
 rectangle, 3 for a bounding box, 7 for a state vector. It has no allocator in
@@ -503,9 +548,14 @@ const roots = try interval.mapResult(box, interval.sqrt);
 This is the reason the elementary functions are plain functions of an
 `Interval` rather than methods: with that shape, applying one across a vector
 is a single generic, rather than 28 hand-written per-function wrappers whose
-only difference is which function pointer they pass along. Every function
-listed in the table above works here, and so does any function of your own with
-the same signature.
+only difference is which function pointer they pass along. The cost of that
+shape is that **not every function in the table above works here**. The
+parameter type is `fn (Interval) ?Interval`, and only the ten functions that
+can report an empty result are coercible to it: `sqrt`, `log`, `log2`, `log10`,
+`log1p`, `asin`, `acos`, `acosh`, `atanh` and `powf`. The other eighteen return
+a plain `Interval`, which is not a `?Interval` and will not compile at this call
+site; to apply one of those across a box, call it on each component and build
+the box yourself. Any function of your own with the matching signature works.
 
 ## Fourier-Motzkin solver — `interval.lp`
 
@@ -547,13 +597,23 @@ for feeding an interval-arithmetic computation that must stay sound.
 | `Lin` | One linear inequality: `struct { coeffs: []Interval, op: Cmp, rhs: Interval }` — `sum(coeffs[i] * x_i) op rhs`. |
 | `System` | A mutable collection of `Lin` plus the variable count. |
 
-`Lin` **borrows**: the slice returned by `at(i)` and the slices inside it point
+A coefficient is **universal** and a right-hand side is **existential**. A row
+is a claim that `sum(coeffs[i] * x_i) op rhs` holds for *every* realisation of
+the coefficient intervals, so the solver may only derive constraints true in all
+of them, and it widens a derived row outward rather than picking the convenient
+value. The right-hand side is not a family of bounds to be quantified over:
+`rhs` encloses *one* unknown bound value, and an enclosure of it bounds that one
+value. Reading the right-hand side as a universal constraint instead is the
+mistake that makes a projection come back too small, which is the one failure
+this solver must never produce.
+
+`Lin` **borrows**: the slice returned by `try at(i)` and the slices inside it
 into the system's own storage. They are invalidated by the next `add` or
 `eliminate`, and freed by `deinit`. Hold a copy of the data, not of the `Lin`.
 
 Every row is **normalised to `<=` on insertion**: `eq` splits into a `<=` and a
 `>=`, and `ge`/`gt` are multiplied through by `-1` and stored as `<=` too. So
-`at(i).op` is always `.le`, and an `eq` you add shows up as two rows.
+`(try sys.at(i)).op` is always `.le`, and an `eq` you add shows up as two rows.
 
 Strict comparisons are additionally **relaxed** on the way in, because
 strictness is not representable in a closed interval: `gt` becomes `ge` and
@@ -570,8 +630,8 @@ strictly bounded has its bound widen, never tighten.
 | `varCount(self) usize` | The number of variables, fixed at `init`. |
 | `count(self) usize` | The number of rows currently stored. |
 | `add(self, coeffs: []const Interval, op: Cmp, rhs: Interval) !void` | Insert a constraint, copying `coeffs`. `coeffs.len` must equal `varCount()`, else `error.BadVariableCount`. An `eq` inserts two rows. |
-| `at(self, i: usize) Lin` | Row `i`, borrowed. |
-| `isUnsat(self) bool` | True when the system provably has no solution. |
+| `at(self, i: usize) !Lin` | Row `i`, borrowed. `error.BadRow` for an index at or above `count()`. |
+| `isUnsat(self) bool` | True once the system holds a derived row with an all-zero coefficient vector and a strictly negative right-hand side. Only an `eliminate` derives one, so this is `false` on a system that merely holds conflicting rows. |
 | `eliminate(self, k: usize) !void` | Eliminate variable `k` exactly. `error.BadVariable` for an out-of-range index, `error.VariableEliminated` for one already gone. |
 | `eliminateAll(self, count_out: *bool) !void` | Eliminate every variable in turn. Writes `false` into `*count_out` and returns early if it proves the system unsatisfiable. |
 | `eliminationOrder(self) ![]usize` | The order the solver would pick. Caller-owned; free it with the system's allocator. |
@@ -635,7 +695,7 @@ pub fn main() !void {
     defer sys.deinit();
 
     // x + y <= 10
-    try sys.add(&.{ interval.Interval.init(1, 1) }, .le, interval.Interval.init(10, 10));
+    try sys.add(&.{ interval.Interval.init(1, 1), interval.Interval.init(1, 1) }, .le, interval.Interval.init(10, 10));
     // x - y <= 2
     try sys.add(&.{ interval.Interval.init(1, 1), interval.Interval.init(1, -1) }, .le, interval.Interval.init(2, 2));
     // -x + y <= 4
@@ -650,7 +710,8 @@ pub fn main() !void {
         std.debug.print("x in [{d}, {d}], y in [{d}, {d}]\n", .{
             derived[0].lo, derived[0].hi, derived[1].lo, derived[1].hi,
         });
-        // x in [-5, 6], y in [-4, 7]
+        // x in [-5, 6], y in [-4, 7] — the exact corners, each printed a hair
+        // outside, because a derived bound is an enclosure and not the corner.
     } else {
         std.debug.print("no finite box\n", .{});
     }
@@ -668,21 +729,44 @@ its two lower bounds (`y >= x - 2`, `y >= -6 - x`), giving four rows in `x`
 alone. Two of them are trivially true constants; the other two are
 `2x <= 12` and `2x >= -10`, so `x ∈ [-5, 6]`. The same reasoning in the other
 direction gives `y ∈ [-4, 7]`. The true feasible region is a parallelogram, and
-the box is the tightest one containing it.
+the box is the tightest one containing it. Those two ranges are the exact
+corners of that box; what the code prints sits a few ULP outside them, because
+every bound it derives is an enclosure rather than a corner.
 
-An unsatisfiable system, detected before any elimination:
+An unsatisfiable system, and where the unsatisfiability is reported. Note that
+**adding the two conflicting rows is not enough** for `isUnsat` to say so:
 
 ```zig
-var sys = lp.System.init(std.heap.page_allocator, 1);
-defer sys.deinit();
+const std = @import("std");
+const interval = @import("interval");
+const lp = interval.lp;
 
-// x <= 1
-try sys.add(&.{Interval.init(1, 1)}, .le, Interval.init(1, 1));
-// x >= 2, stored normalised as -x <= -2
-try sys.add(&.{Interval.init(1, 1)}, .ge, Interval.init(2, 2));
+pub fn main() !void {
+    var sys = lp.System.init(std.heap.page_allocator, 1);
+    defer sys.deinit();
 
-sys.isUnsat(); // true
+    // x <= 1
+    try sys.add(&.{interval.Interval.init(1, 1)}, .le, interval.Interval.init(1, 1));
+    // x >= 2, stored normalised as -x <= -2
+    try sys.add(&.{interval.Interval.init(1, 1)}, .ge, interval.Interval.init(2, 2));
+
+    std.debug.print("before: {}\n", .{sys.isUnsat()}); // false
+
+    try sys.eliminate(0);
+
+    std.debug.print("after: {}\n", .{sys.isUnsat()});  // true
+}
 ```
+
+`isUnsat` is true only once the system holds a row whose coefficient vector is
+**entirely zero** and whose right-hand side is strictly negative: a row stating
+`0 <= -1`, which no variable can rescue. Neither row above is that, because both
+mention `x`. It is the elimination that derives it, pairing `x <= 1` against
+`x >= 2` and cancelling the `x` terms. So the flag is only meaningful after an
+elimination has run, and a test of `isUnsat` on a freshly built system is testing
+nothing. `bounds` and `box` do not set it either: each runs its elimination on a
+private clone, so read their return value, which is `null` when the system is
+unsatisfiable.
 
 ## Build steps
 
