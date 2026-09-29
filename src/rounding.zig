@@ -1,17 +1,34 @@
 //! Outward-directed rounding for rigorous interval arithmetic.
 //!
-//! Every operation computes with IEEE round-to-nearest and then widens each
-//! endpoint by one ULP outward: `prevDown` on a computed lower bound,
-//! `nextUp` on a computed upper bound. The true mathematical result lies
-//! within half a ULP of the round-to-nearest result, so a full ULP
-//! overshoots that error and the widened interval is guaranteed to contain
-//! it. The price is at most one extra ULP of width per endpoint.
-//!
 //! Zig 0.16 has no directed rounding: `@round` is round-to-nearest, and
 //! `@floor`, `@ceil`, `@trunc` snap to a representable value rather than to
-//! its neighbour. These two primitives are therefore the only way an
-//! operation can round outward, and every operation widens its result with
-//! them and nothing else.
+//! its neighbour. `nextUp` and `prevDown` are therefore the only way an
+//! operation can round outward, and every operation in the library widens
+//! its result with them and nothing else.
+//!
+//! How far it widens is not the same everywhere, because what computed the
+//! endpoint is not the same everywhere, and the two cases are not equally
+//! established.
+//!
+//! For the operations IEEE 754 defines as correctly rounded — addition,
+//! subtraction, multiplication, division and square root — the computed
+//! result is the nearest representable one to the exact result, so it lies
+//! within half a ULP of it. A single outward step strictly overshoots that
+//! error and the widened bound is a guarantee. That is the case the
+//! arithmetic in `interval.zig` is in.
+//!
+//! For the elementary functions the premise fails: the `std.math`
+//! primitives behind them carry no documented error bound. Measured
+//! against exact arithmetic, every one of them landed within roughly
+//! 1.1 ULP, with `tanh` the worst at 1.07, which is past what one step
+//! absorbs. Those results are widened by two steps instead, so a primitive
+//! would have to be more than a full ULP out to escape the bound.
+//!
+//! That second figure is a margin chosen from measurement, not a proof of
+//! it. A rigorous guarantee for the elementary functions would need a
+//! correctly rounded or formally verified implementation of each one,
+//! which this library does not provide. `interval_ext.zig` records the
+//! measurement.
 
 const std = @import("std");
 

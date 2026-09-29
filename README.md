@@ -21,9 +21,9 @@ write a concrete stanza for you.
 
 ## The guarantee
 
-**Every operation in this library returns an interval that is guaranteed to
-contain the true mathematical answer.** Not "the answer rounded to the nearest
-float" — a guaranteed enclosure of it.
+**Every operation in this library returns an interval that contains the true
+mathematical answer.** Not "the answer rounded to the nearest float" — an
+enclosure of it.
 
 Write `X` for a set of reals and `X op Y` for the exact mathematical result of
 an operation on sets. For every real `v` belonging to `X op Y`:
@@ -32,10 +32,16 @@ an operation on sets. For every real `v` belonging to `X op Y`:
 result.lo <= v <= result.hi
 ```
 
-holds exactly, not approximately. A result is a fact about the reals, not a
-guess about a machine. The same guarantee holds for the n-dimensional boxes and
-for the linear-inequality solver, which propagates intervals for the same
-reason.
+holds for every real `v` in the set, not approximately for a rounded copy of it.
+A result is a claim about the reals, not a guess about a machine. The same
+holds for the n-dimensional boxes and for the linear-inequality solver, which
+propagates intervals for the same reason.
+
+What backs that claim is not the same everywhere. For arithmetic and square root
+it is a proof; for the elementary functions it is a measured error bound with
+headroom. [What is proved and what is measured](#what-is-proved-and-what-is-measured)
+below says which is which, and this page does not claim the stronger of the two
+for the whole library.
 
 ### How the guarantee is obtained
 
@@ -46,25 +52,69 @@ double at or above `x`". Without directed rounding, an operation computed in
 ordinary floating point can land one ULP on the wrong side of the true answer.
 
 So each operation widens instead. It computes its endpoints with ordinary IEEE
-round-to-nearest arithmetic and then moves each endpoint outward by exactly
-one ULP: `prevDown` on a computed lower bound, `nextUp` on a computed upper
-bound. Round-to-nearest errs by at most half a ULP, so a full ULP of outward
-slack strictly exceeds the worst-case error and the widened interval cannot
-exclude the true value.
+round-to-nearest arithmetic and then moves each endpoint outward: `prevDown` on
+a computed lower bound, `nextUp` on a computed upper bound. **How many steps it
+moves depends on what computed the endpoint, and the two cases are not equally
+well established.**
 
-`sin` and `cos` widen twice, because their range reduction uses a certified
-interval for π, so the reduced argument carries its own error as well as the
-one from `sin` or `cos` itself.
+**Arithmetic widens by one ULP, and that is a proof.** IEEE 754 defines
+addition, subtraction, multiplication, division and square root as correctly
+rounded, so the computed result is the double nearest the exact one and lies
+within half a ULP of it. A full ULP of outward slack strictly exceeds that
+error, so the widened bound cannot exclude the true value. This is why the
+algebraic operations on `Interval` — `add`, `sub`, `mul`, `div`, `recip`, `sqr` —
+widen by exactly one step and owe nothing more.
+
+`sqrt` stands in the same position: correctly rounded, so one step would be
+enough. The free function is widened by two anyway, so that everything reached
+through `interval.ext` answers under one rule. That extra width is the price of
+uniformity, not a risk.
+
+**The elementary functions widen by two ULP, and that is a measured margin.**
+The `std.math` primitives behind `exp`, `log`, the trigonometric functions, the
+hyperbolic functions and the rest are not correctly rounded and carry no
+documented error bound. Measured against exact arithmetic over 300 arguments per
+function at magnitudes from 1e-8 to 1e8, every one of them landed within about
+1.1 ULP, with `tanh` the worst at 1.07 — past what a single step absorbs. Those
+results are therefore widened by two steps.
+
+`powf` gets both treatments. `std.math.pow` builds the fractional part of its
+exponent as `exp(y * log(x))`, so its relative error grows with the size of that
+product and is unbounded in the exponent, and the result carries a relative
+margin of about 2⁻³⁸ on top of the two ULP steps.
+
+`sin` and `cos` are the two functions that cannot simply take the value at each
+end, because the range may turn inside the argument. They read it off the
+endpoints and the critical points it covers, and the endpoints take the same two
+steps as everything else; the critical values are exactly ±1 and carry no error
+of their own.
+
+### What is proved and what is measured
+
+Read this before trusting `tanh` in a verification pipeline.
+
+| | Basis | Status |
+| --- | --- | --- |
+| `add`, `sub`, `mul`, `div`, `recip`, `sqr` | IEEE 754 correct rounding, half a ULP | **Proven.** One ULP of outward widening is sufficient. |
+| `sqrt` | IEEE 754 correct rounding, half a ULP | **Proven.** Widened by two ULP anyway, for uniformity. |
+| `exp`, `log`, the trigonometric and hyperbolic functions, and the rest | Measured worst case ≈ 1.1 ULP | **Empirically bounded.** Two ULP of outward widening. |
+
+This library does not implement correctly rounded or formally verified
+elementary functions. For those, the two-ULP figure is a margin chosen from
+measurement, not a proof of it: it is where the measurement stopped, with
+headroom. It is stated here rather than left for a reader to infer. If you need
+a *proof* that an `exp`, `log`, trigonometric or hyperbolic bound holds, use a
+verified implementation of those functions rather than this one.
 
 ### The cost
 
-At most one extra ULP of width per endpoint, per operation. The results are
-therefore **very slightly wider than mathematically necessary**. That is the
-price of soundness and it is deliberate: a result one ULP too wide is safe and
-costs a little accuracy, while a result one ULP too narrow is silently wrong and
-nothing downstream can detect it. If you have a choice between a result that is
-marginally too wide and a result that is marginally too narrow, take the wide
-one.
+One extra ULP of width per endpoint for arithmetic and square root, two for the
+elementary functions. The results are therefore **slightly wider than
+mathematically necessary**. That is the price of soundness and it is deliberate:
+a result one ULP too wide is safe and costs a little accuracy, while a result
+one ULP too narrow is silently wrong and nothing downstream can detect it. If
+you have a choice between a result that is marginally too wide and a result that
+is marginally too narrow, take the wide one.
 
 Because enclosures compose soundly — each operation accounts for its inputs'
 error instead of trusting them — accumulated width grows roughly linearly with
@@ -227,18 +277,31 @@ All are reachable as `interval.<name>` and again as `interval.ext.<name>`.
 | `trunc(x: Interval) Interval` | Same construction, toward zero. |
 | `round(x: Interval) Interval` | Same construction with `@round`'s rule, which breaks ties away from zero: `round([-0.5, 0.5])` brackets `[-1, 1]`. |
 
-#### Range reduction, and why `sin` and `cos` are special
+The relative margin `powf` applies to each corner before the ULP steps is
+published as `interval.ext.pow_margin`, so a caller reasoning about how tight a
+`powf` result can be reads the one value instead of guessing at it.
+
+#### Critical points, and why `sin` and `cos` are special
 
 `sin` and `cos` are computed by locating the **critical points** of the function
 that fall inside the argument interval, and evaluating there — not by reducing
 the argument modulo `2π`. Reduction loses precision: it subtracts large
 quantities to obtain a small remainder, and the error in that subtraction
-grows with the size of the argument. Here the reduction is done against a
-certified interval for π, so the error is bounded rather than merely small, and
-it is accounted for by the usual one-ULP widening on top.
+grows with the size of the argument.
 
-The payoff is that when an interval spans a full period the answer is exactly
-`[-1, 1]`, with no accumulated reduction error at all.
+Locating the points subtracts nothing at run time. It only decides which
+integers `k` fall inside the argument, by dividing the ends of the argument by a
+certified interval for π and taking the integers between. A decision that is
+wrong in either direction is harmless: a critical point that is not really
+there contributes a ±1 that the range already contains, and a pole that is not
+really there reports an unbounded tangent that still contains the finite one.
+The one failure that is not harmless is missing a point that is there, which is
+why the quotients are biased outward rather than inward.
+
+The endpoints of the argument are evaluated directly and widened by the same two
+ULP steps as every other computed bound. The payoff is that when an interval
+spans a full period the answer is exactly `[-1, 1]`, with no accumulated
+reduction error at all.
 
 ### Comparisons — certain, not existential
 

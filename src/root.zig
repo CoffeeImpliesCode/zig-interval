@@ -3,12 +3,25 @@
 //! `@import("interval")`; nothing outside `src/` has to know how the files
 //! behind it are laid out.
 //!
-//! The guarantee is one guarantee, and every operation here makes it: the
-//! returned interval encloses the true mathematical value of the expression
-//! it was asked about. Rounding is directed outward, never inward, so a
-//! result is an enclosure rather than an estimate. Width is a quality
-//! measure, not a correctness one. A wider result is still correct; a
-//! narrower one that misses the true value is not.
+//! Every operation here returns an enclosure: the interval contains the
+//! true mathematical value of the expression it was asked about. Rounding
+//! is directed outward, never inward, so a result is an enclosure rather
+//! than an estimate. Width is a quality measure, not a correctness one. A
+//! wider result is still correct; a narrower one that misses the true value
+//! is not.
+//!
+//! How much outward rounding it takes to get there is not the same
+//! everywhere, and the two are not equally established. The algebraic
+//! operations rest on the operations IEEE 754 defines as correctly
+//! rounded, so the computed endpoint is within half a ULP of the true
+//! one and a single outward step is a guarantee. The elementary
+//! functions rest on primitives with no documented error bound; all of
+//! them measured within about 1.1 ULP, so those results are widened by
+//! two steps. That second figure is a margin taken from measurement, not
+//! a proof of it — a rigorous guarantee there would need a correctly
+//! rounded or verified implementation of each function, which this
+//! library does not provide. `rounding.zig` and `interval_ext.zig` spell
+//! both cases out.
 //!
 //! An elementary function whose domain is a proper part of the reals —
 //! `sqrt`, `log`, `asin`, `powf` and the rest — returns `?Interval`, and a

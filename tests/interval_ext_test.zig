@@ -3,10 +3,16 @@
 //! A transcendental value is not a number the test can write down, so
 //! these assert that the result reaches past it rather than that it
 //! equals it. Asserting equality against a rounded literal would pin
-//! the width of the enclosure instead of its correctness, and would
-//! start failing the day the enclosure got one ULP tighter. Only the
+//! the width of the enclosure instead of its correctness. Only the
 //! values that are exact in binary floating point, the integers and the
 //! infinities, are compared for equality.
+//!
+//! Two of the tests below do reach into the width, and deliberately. The
+//! enclosure is the whole point of the library, and the elementary
+//! functions are widened by two ULP rather than one because a measured
+//! worst case of 1.07 ULP no longer fits in one. A test that quietly
+//! stopped caring about that would let the margin be narrowed away by
+//! someone tidying up, so the width is pinned as well as the containment.
 
 const std = @import("std");
 const interval = @import("interval");
@@ -34,9 +40,10 @@ test "sqrt: the roots of a positive interval sit inside the result" {
     const s = try answer(ext.sqrt(Interval.init(4.0, 9.0)));
     try std.testing.expect(s.lo <= 2.0);
     try std.testing.expect(s.hi >= 3.0);
-    // One ULP out at each end, which is all the widening rule costs.
-    try std.testing.expect(s.lo >= interval.prevDown(2.0));
-    try std.testing.expect(s.hi <= interval.nextUp(3.0));
+    // Two ULP out at each end, which is what the widening rule costs an
+    // elementary function.
+    try std.testing.expect(s.lo >= interval.prevDown(interval.prevDown(2.0)));
+    try std.testing.expect(s.hi <= interval.nextUp(interval.nextUp(3.0)));
 }
 
 test "sqrt: a lower end below zero contributes only the bound at zero" {
@@ -295,6 +302,101 @@ test "tanh: rising across the origin, from one sign to the other" {
     try std.testing.expect(t.hi > 0.0);
 }
 
+test "tanh: the result encloses the true value across a spread of arguments" {
+    // The true value of tanh at each argument, written out to twenty
+    // significant decimal digits. The literal in a test is itself an f64,
+    // so it is not the true value: parsed, it is the f64 nearest to the
+    // decimal written, and that sits within half a ULP of the true value.
+    // A sound enclosure must therefore cover the whole band
+    // [ref - tol, ref + tol], and that band is what the two assertions
+    // below check. `tol` is measured in ULPs through the library's own
+    // `nextUp`, so it tracks the magnitude of the value rather than a
+    // fixed decimal scale.
+    //
+    // tanh is the function the two-ULP widening was chosen for: it is
+    // the worst of the measured primitives at 1.07 ULP, which a single
+    // step does not absorb.
+    const cases = [_]struct { x: f64, ref: f64 }{
+        .{ .x = 0.1, .ref = 0.09966799462495582261 },
+        .{ .x = 0.5, .ref = 0.46211715726000975850 },
+        .{ .x = 1.0, .ref = 0.76159415595576488812 },
+        .{ .x = 2.0, .ref = 0.96402758007581688395 },
+        .{ .x = 10.0, .ref = 0.99999999587769276362 },
+    };
+    for (cases) |c| {
+        const t = try answer(ext.tanh(Interval.init(c.x, c.x)));
+        const tol = 0.5 * (interval.nextUp(c.ref) - c.ref);
+        try std.testing.expect(t.lo <= c.ref - tol);
+        try std.testing.expect(t.hi >= c.ref + tol);
+    }
+}
+
+test "tanh: the result reaches past a one-ULP step, so a narrower one fails" {
+    // The argument is read out of a table rather than written as a
+    // literal because the `std.math` primitives have no comptime path:
+    // a compile-time float would be folded and rejected. What the table
+    // buys is a run-time value the primitive can be asked about, which
+    // is the only way to name the single-step bound to compare against.
+    const cases = [_]f64{ 0.1, 0.5, 1.0, 2.0, 10.0 };
+    for (cases) |x| {
+        const computed = std.math.tanh(x);
+        const t = try answer(ext.tanh(Interval.init(x, x)));
+        try std.testing.expect(t.lo < interval.prevDown(computed));
+        try std.testing.expect(t.hi > interval.nextUp(computed));
+    }
+}
+
+test "sin and cos: the endpoint evaluation widens two ULP, not one" {
+    // These two do not go through the shared envelope, so the margin
+    // they carry is pinned on its own here.
+    const cases = [_]f64{ 0.1, 0.5, 1.0, 2.0, 10.0 };
+    for (cases) |x| {
+        const s = try answer(ext.sin(Interval.init(x, x)));
+        const sine = @sin(x);
+        try std.testing.expect(s.lo < interval.prevDown(sine));
+        try std.testing.expect(s.hi > interval.nextUp(sine));
+
+        const c = try answer(ext.cos(Interval.init(x, x)));
+        const cosine = @cos(x);
+        try std.testing.expect(c.lo < interval.prevDown(cosine));
+        try std.testing.expect(c.hi > interval.nextUp(cosine));
+    }
+}
+
+test "log: the one-sided bound widens two ULP, not one" {
+    // The unbounded side of a logarithm is exact, and only the far end
+    // is computed, so it takes the same two steps as everything else.
+    // The logarithm of one is zero, and two steps up from zero are two
+    // representable subnormals, so this pins the exact count.
+    const l = try answer(ext.log(Interval.init(-1.0, 1.0)));
+    try std.testing.expectEqual(-inf, l.lo);
+    try std.testing.expectEqual(interval.nextUp(interval.nextUp(0.0)), l.hi);
+}
+
+test "powf: the margin and the two ULP steps are both applied" {
+    // Two layers, and both have to survive: the relative margin covers
+    // the error of `std.math.pow` itself, and the two ULP steps on top of
+    // it cover the rounding of the division and multiplication which
+    // apply the margin. The bounds are measured against the margin the
+    // implementation uses, read from it rather than copied here, so
+    // dropping either layer fails instead of passing quietly.
+    const cases = [_]struct { base: f64, exponent: f64 }{
+        .{ .base = 2.0, .exponent = 3.0 },
+        .{ .base = 1.5, .exponent = 7.25 },
+    };
+    for (cases) |c| {
+        const corner = std.math.pow(f64, c.base, c.exponent);
+        const p = try answer(ext.powf(
+            Interval.init(c.base, c.base),
+            Interval.init(c.exponent, c.exponent),
+        ));
+        try std.testing.expect(p.lo <= corner);
+        try std.testing.expect(p.hi >= corner);
+        try std.testing.expect(p.lo < corner / ext.pow_margin);
+        try std.testing.expect(p.hi > corner * ext.pow_margin);
+    }
+}
+
 test "floor: the ends go down, then outward" {
     // 1.5 and 2.5 both floor to their own integer.
     const f = try answer(ext.floor(Interval.init(1.5, 2.5)));
@@ -508,5 +610,5 @@ test "invariant: an unbounded answer is still an interval, not a null" {
     // The far end is the logarithm of 1, which is zero, so only the
     // lower side of this answer runs off.
     try std.testing.expect(vanishing.hi > 0.0);
-    try std.testing.expect(vanishing.hi <= interval.nextUp(0.0));
+    try std.testing.expect(vanishing.hi <= interval.nextUp(interval.nextUp(0.0)));
 }

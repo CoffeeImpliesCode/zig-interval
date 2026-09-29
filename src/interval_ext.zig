@@ -7,13 +7,14 @@
 //! of free functions rather than methods on the interval.
 //!
 //! The rigour rule is that every endpoint which came out of an f64
-//! computation is widened one ULP outward, with `rounding.prevDown` on
-//! the lower side and `rounding.nextUp` on the upper side. Values that
-//! were never rounded are used as they stand: the exact numbers -1, 0
-//! and 1, the infinities a pole produces, and the certified bounds on
-//! pi. Widening those would buy no guarantee, since there is no
-//! rounding error in them to absorb, and would cost tightness on every
-//! call.
+//! computation is widened two ULP outward, with `rounding.prevDown` on
+//! the lower side and `rounding.nextUp` on the upper side. Two rather
+//! than one, and `lower` below carries the measurement that forced it.
+//! Values that were never rounded are used as they stand: the exact
+//! numbers -1, 0 and 1, the infinities a pole produces, and the
+//! certified bounds on pi. Widening those would buy no guarantee,
+//! since there is no rounding error in them to absorb, and would cost
+//! tightness on every call.
 //!
 //! Two kinds of "no answer" are kept apart. `null` means the result is
 //! empty in the reals, which happens only when the whole interval lies
@@ -62,15 +63,60 @@ const CriticalRange = struct {
     last: i64,
 };
 
+/// A lower bound on a computed value, widened two ULP outward, and the
+/// place the reason the whole file widens by two rather than by one is
+/// written down.
+///
+/// The half-ULP error that a single outward step covers is a property of
+/// the correctly-rounded operations IEEE 754 defines: addition,
+/// subtraction, multiplication, division and square root. The
+/// `std.math` primitives the elementary functions are built on are not
+/// among them and carry no documented error bound. Measured against
+/// exact arithmetic over 300 arguments per function at magnitudes from
+/// 1e-8 to 1e8, every one of them landed within about 1.1 ULP, with
+/// `tanh` the worst at 1.07: past what one step absorbs. The extra ULP
+/// of width is therefore paid on purpose, since a result one ULP too
+/// wide is merely loose while one ULP too narrow is silently wrong and
+/// nothing downstream can detect it.
+///
+/// Two steps are a margin taken from that measurement, not a proof of
+/// it. Establishing the bound would take a correctly rounded or
+/// formally verified implementation of every elementary function,
+/// which this library neither provides nor claims to.
+fn lower(v: f64) f64 {
+    return rounding.prevDown(rounding.prevDown(v));
+}
+
+/// An upper bound on a computed value, two ULP outward for the reason
+/// `lower` gives.
+fn upper(v: f64) f64 {
+    return rounding.nextUp(rounding.nextUp(v));
+}
+
 /// The pattern every monotone function here follows. The two values
 /// are the function at the two ends of the interval; the smaller one
 /// is the lower bound and the larger the upper one, which is why a
-/// decreasing function needs no case of its own. Each bound is then
-/// widened one ULP outward, since the function value itself came out
-/// of a round-to-nearest computation.
+/// decreasing function needs no case of its own.
 fn envelope(a: f64, b: f64) Interval {
-    return Interval.init(rounding.prevDown(@min(a, b)), rounding.nextUp(@max(a, b)));
+    return Interval.init(lower(@min(a, b)), upper(@max(a, b)));
 }
+
+/// The relative margin `powf` puts around each corner before the ULP
+/// steps. It exists because `std.math.pow` is the one primitive this
+/// file uses that carries no usable rounding bound: it builds the
+/// fractional part of the exponent as exp(yf * log(x)), so its
+/// relative error grows with the size of that product, which reaches
+/// 745 for the widest arguments, and it reaches the integer part by
+/// squaring, which adds up to a ULP per bit of the exponent. Measured
+/// against exact arithmetic the result is already past a ULP and a
+/// half for exponents of ordinary size, so the widening alone could
+/// never cover it. This margin is about thirty times the worst error
+/// of that algorithm, and the two ULP steps that follow it cover the
+/// rounding of the scaling which applies it.
+/// Public so that a caller reasoning about the tightness of a `powf`
+/// result, or a test pinning that the margin is still applied, reads the
+/// one value rather than a copy of it.
+pub const pow_margin: f64 = 1.0 + std.math.pow(f64, 2.0, -38.0);
 
 /// The lower quotient (x - offset) / pi, in f80 and biased below the
 /// true value by more than the roundings above can move it. A critical
@@ -188,7 +234,12 @@ pub fn powf(x: Interval, y: Interval) ?Interval {
         lo = @min(lo, v);
         hi = @max(hi, v);
     }
-    return Interval.init(rounding.prevDown(lo), rounding.nextUp(hi));
+    // The margin goes on before the ULP steps, not instead of them: it
+    // covers what `pow` itself was wrong by, and the two steps then
+    // cover the rounding of the two scalings. Dividing the low corner
+    // and multiplying the high one keeps zero at zero and both
+    // infinities where they are, which a subtraction would not.
+    return Interval.init(lower(lo / pow_margin), upper(hi * pow_margin));
 }
 
 /// The exponential, rising over all of the reals.
@@ -213,21 +264,21 @@ pub fn expm1(x: Interval) Interval {
 /// of that is arbitrarily far down, which no finite bound would hold.
 pub fn log(x: Interval) ?Interval {
     if (x.hi <= 0.0) return null;
-    if (x.lo <= 0.0) return Interval.init(-inf, rounding.nextUp(@log(x.hi)));
+    if (x.lo <= 0.0) return Interval.init(-inf, upper(@log(x.hi)));
     return envelope(@log(x.lo), @log(x.hi));
 }
 
 /// The logarithm to base two, or null outside the positive reals.
 pub fn log2(x: Interval) ?Interval {
     if (x.hi <= 0.0) return null;
-    if (x.lo <= 0.0) return Interval.init(-inf, rounding.nextUp(@log2(x.hi)));
+    if (x.lo <= 0.0) return Interval.init(-inf, upper(@log2(x.hi)));
     return envelope(@log2(x.lo), @log2(x.hi));
 }
 
 /// The logarithm to base ten, or null outside the positive reals.
 pub fn log10(x: Interval) ?Interval {
     if (x.hi <= 0.0) return null;
-    if (x.lo <= 0.0) return Interval.init(-inf, rounding.nextUp(@log10(x.hi)));
+    if (x.lo <= 0.0) return Interval.init(-inf, upper(@log10(x.hi)));
     return envelope(@log10(x.lo), @log10(x.hi));
 }
 
@@ -237,7 +288,7 @@ pub fn log10(x: Interval) ?Interval {
 /// infinity, and everything below is off the domain entirely.
 pub fn log1p(x: Interval) ?Interval {
     if (x.hi <= -1.0) return null;
-    if (x.lo <= -1.0) return Interval.init(-inf, rounding.nextUp(std.math.log1p(x.hi)));
+    if (x.lo <= -1.0) return Interval.init(-inf, upper(std.math.log1p(x.hi)));
     return envelope(std.math.log1p(x.lo), std.math.log1p(x.hi));
 }
 
@@ -249,11 +300,14 @@ pub fn sin(x: Interval) Interval {
     if (!phaseResolvable(x)) return Interval.init(-1.0, 1.0);
     if (x.width() >= 2.0 * rounding.piUp()) return Interval.init(-1.0, 1.0);
     // The endpoint of a narrower interval may be the low one or the
-    // high one, so both are taken as both.
+    // high one, so both are taken as both, and the two widened values
+    // are hulled rather than crossed. These two are the only computed
+    // bounds in the function, so they carry the two-ULP widening that
+    // `lower` sets out, and the critical points below are exact.
     const a = @sin(x.lo);
     const b = @sin(x.hi);
-    var lo = @min(rounding.prevDown(a), rounding.nextUp(b));
-    var hi = @max(rounding.prevDown(a), rounding.nextUp(b));
+    var lo = @min(lower(a), lower(b));
+    var hi = @max(upper(a), upper(b));
     // At most two critical points lie in an interval this narrow, so
     // the range spans three integers at most.
     const k = criticalRange(x.lo, x.hi, half_pi80);
@@ -272,10 +326,12 @@ pub fn sin(x: Interval) Interval {
 pub fn cos(x: Interval) Interval {
     if (!phaseResolvable(x)) return Interval.init(-1.0, 1.0);
     if (x.width() >= 2.0 * rounding.piUp()) return Interval.init(-1.0, 1.0);
+    // Widened as in `sin`: the endpoints are the only computed bounds
+    // here, and the critical points are the exact numbers +/-1.
     const a = @cos(x.lo);
     const b = @cos(x.hi);
-    var lo = @min(rounding.prevDown(a), rounding.nextUp(b));
-    var hi = @max(rounding.prevDown(a), rounding.nextUp(b));
+    var lo = @min(lower(a), lower(b));
+    var hi = @max(upper(a), upper(b));
     const k = criticalRange(x.lo, x.hi, 0.0);
     var i = k.first;
     while (i <= k.last) : (i += 1) {
