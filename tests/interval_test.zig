@@ -1,6 +1,12 @@
 const std = @import("std");
 const Interval = @import("interval").Interval;
 
+/// Assert that an interval returned by the public API respects the
+/// lo <= hi invariant.
+fn expectOrdered(i: Interval) !void {
+    try std.testing.expect(i.lo <= i.hi);
+}
+
 test "contains: endpoint-inclusive membership" {
     const i = Interval.init(1.0, 3.0);
     try std.testing.expect(i.contains(1.0));
@@ -155,6 +161,26 @@ test "expand: negative margin shrinks both ends" {
     try std.testing.expectEqual(@as(f64, 2.5), e.hi);
 }
 
+test "expand: negative margin at half the width degenerates to a point" {
+    const at_bound = Interval.init(1.0, 3.0).expand(-1.0);
+    try std.testing.expectEqual(@as(f64, 2.0), at_bound.lo);
+    try std.testing.expectEqual(@as(f64, 2.0), at_bound.hi);
+
+    const interior = Interval.init(1.0, 3.0).expand(-0.25);
+    try std.testing.expectEqual(@as(f64, 1.25), interior.lo);
+    try std.testing.expectEqual(@as(f64, 2.75), interior.hi);
+}
+
+test "expand: negative margin on an asymmetric interval" {
+    const at_bound = Interval.init(0.0, 10.0).expand(-5.0);
+    try std.testing.expectEqual(@as(f64, 5.0), at_bound.lo);
+    try std.testing.expectEqual(@as(f64, 5.0), at_bound.hi);
+
+    const interior = Interval.init(0.0, 10.0).expand(-2.5);
+    try std.testing.expectEqual(@as(f64, 2.5), interior.lo);
+    try std.testing.expectEqual(@as(f64, 7.5), interior.hi);
+}
+
 test "distanceTo: zero inside the interval" {
     const i = Interval.init(1.0, 3.0);
     try std.testing.expectEqual(@as(f64, 0.0), i.distanceTo(2.0));
@@ -246,4 +272,40 @@ test "intersectionOf: touching endpoints overlap at a point" {
     const x = Interval.intersectionOf(&items).?;
     try std.testing.expectEqual(@as(f64, 2.0), x.lo);
     try std.testing.expectEqual(@as(f64, 2.0), x.hi);
+}
+
+test "init: degenerate lo == hi is accepted" {
+    const d = Interval.init(2.0, 2.0);
+    try std.testing.expectEqual(@as(f64, 2.0), d.lo);
+    try std.testing.expectEqual(@as(f64, 2.0), d.hi);
+    try std.testing.expectEqual(@as(f64, 0.0), d.width());
+    try std.testing.expectEqual(@as(f64, 2.0), d.midpoint());
+}
+
+test "scale: negative factor maps the interval onto itself" {
+    const a = Interval.init(1.0, 3.0).scale(-1.0);
+    try std.testing.expectEqual(@as(f64, 1.0), a.lo);
+    try std.testing.expectEqual(@as(f64, 3.0), a.hi);
+
+    const b = Interval.init(-3.0, -1.0).scale(-1.0);
+    try std.testing.expectEqual(@as(f64, -3.0), b.lo);
+    try std.testing.expectEqual(@as(f64, -1.0), b.hi);
+}
+
+test "invariant: every interval-returning operation yields lo <= hi" {
+    const base = Interval.init(1.0, 3.0);
+    const other = Interval.init(2.0, 5.0);
+    const items = [_]Interval{ base, other, Interval.init(0.0, 4.0) };
+
+    try expectOrdered(base);
+    try expectOrdered(base.hull(other));
+    try expectOrdered(Interval.hullOf(&items).?);
+    try expectOrdered(base.intersect(other).?);
+    try expectOrdered(Interval.intersectionOf(&items).?);
+    try expectOrdered(base.translate(-5.0));
+    try expectOrdered(base.scale(2.0));
+    try expectOrdered(base.scale(-1.0));
+    try expectOrdered(base.scale(0.0));
+    try expectOrdered(base.expand(1.0));
+    try expectOrdered(base.expand(-0.5));
 }

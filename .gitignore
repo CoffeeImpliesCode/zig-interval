@@ -4,3 +4,7 @@ zig-pkg/
 
 # Jujutsu VCS
 .jj
+
+# External consumer fixture build artifacts
+fixture/.zig-cache/
+fixture/zig-out/

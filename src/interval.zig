@@ -5,7 +5,10 @@ pub const Interval = struct {
     lo: f64,
     hi: f64,
 
+    /// Build [lo, hi]. Callers must pass lo <= hi; a violation traps in
+    /// Debug and ReleaseSafe, and the check is elided in ReleaseFast.
     pub fn init(lo: f64, hi: f64) Interval {
+        std.debug.assert(lo <= hi);
         return .{ .lo = lo, .hi = hi };
     }
 
@@ -93,9 +96,11 @@ pub const Interval = struct {
         return .{ .lo = m - half, .hi = m + half };
     }
 
-    /// Widen both ends by margin: lo -= margin, hi += margin.
+    /// Widen both ends by margin when positive, shrink both when negative.
+    /// Requires margin >= -(hi - lo) / 2; a more negative margin inverts the
+    /// interval and traps in Debug and ReleaseSafe.
     pub fn expand(self: Interval, margin: f64) Interval {
-        return .{ .lo = self.lo - margin, .hi = self.hi + margin };
+        return Interval.init(self.lo - margin, self.hi + margin);
     }
 
     /// Distance from x to the interval: 0 inside [lo, hi], otherwise the
