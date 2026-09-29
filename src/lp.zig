@@ -127,7 +127,13 @@ pub const System = struct {
     }
 
     /// Borrowed view of row `i`. Invalidated by the next mutation.
-    pub fn at(self: System, i: usize) Lin {
+    ///
+    /// `i` must be below `count()`, and anything else is `error.BadRow`. The
+    /// check is not decoration: the slice below is built by arithmetic, so an
+    /// unchecked `i` reads whatever the allocator left past the rows, and
+    /// ReleaseFast elides the slicing assertion that would otherwise stop it.
+    pub fn at(self: System, i: usize) !Lin {
+        if (i >= self.rhs.items.len) return error.BadRow;
         const start = i * self.var_count;
         return .{
             .coeffs = self.coeffs.items[start..][0..self.var_count],
@@ -192,7 +198,7 @@ pub const System = struct {
         errdefer rhs.deinit(gpa);
 
         for (0..n) |i| {
-            const row = self.at(i);
+            const row = try self.at(i);
             const a = row.coeffs[k];
             switch (signOf(a)) {
                 .zero => {
@@ -238,7 +244,7 @@ pub const System = struct {
         self.coeffs = coeffs;
         self.rhs = rhs;
         self.alive[k] = false;
-        self.noteContradiction();
+        try self.noteContradiction();
     }
 
     /// The elimination order Tupper's heuristic chooses, as a caller-owned
@@ -262,7 +268,7 @@ pub const System = struct {
 
         var order: std.ArrayList(usize) = .empty;
         errdefer order.deinit(self.gpa);
-        while (scratch.chooseNext()) |k| {
+        while (try scratch.chooseNext()) |k| {
             try order.append(self.gpa, k);
             try scratch.eliminate(k);
         }
@@ -273,7 +279,7 @@ pub const System = struct {
     /// `eliminationOrder` reports. Returns false as soon as a contradiction
     /// proves the system unsatisfiable, and stops early there.
     pub fn eliminateInOrderOfChoice(self: *System) !bool {
-        while (self.chooseNext()) |k| {
+        while (try self.chooseNext()) |k| {
             try self.eliminate(k);
             if (self.unsat) return false;
         }
@@ -304,6 +310,16 @@ pub const System = struct {
     /// Returns null when `k` is unbounded in either direction, when the
     /// system is unsatisfiable, or when the derived bounds come out disjoint.
     /// `self` is taken by value and left untouched.
+    ///
+    /// The two emptiness tests are what make the answer trustworthy. A
+    /// lower bound above an upper bound is a proof that no `x_k` satisfies
+    /// the rows, because each side is a necessary condition; and a
+    /// contradiction among the rows themselves is a proof that no point
+    /// satisfies the system at all. Neither fires unless it can be shown
+    /// from an enclosure, so a satisfiable system is never reported
+    /// infeasible. Both are needed, and neither subsumes the other: the
+    /// disjoint test needs a readable bound on each side, and the
+    /// contradiction test sees rows the reader ignores.
     pub fn bounds(self: System, k: usize) !?Interval {
         if (k >= self.var_count) return error.BadVariable;
         if (self.unsat) return null;
@@ -327,7 +343,7 @@ pub const System = struct {
         var lower: ?f64 = null;
         var upper: ?f64 = null;
         for (0..scratch.count()) |i| {
-            const row = scratch.at(i);
+            const row = try scratch.at(i);
             const a = row.coeffs[k];
             switch (signOf(a)) {
                 .zero => {},
@@ -340,17 +356,37 @@ pub const System = struct {
                     upper = if (upper) |v| @min(v, q.hi) else q.hi;
                 },
                 .straddle => {
-                    // The coefficient may be zero, and then the row says
-                    // nothing at all, so a part that reaches zero yields no
-                    // bound. Dividing by [0, 0] would be meaningless anyway.
-                    const neg_part = Interval.init(a.lo, @min(a.hi, 0.0));
-                    if (neg_part.hi < 0) {
-                        const q = row.rhs.div(neg_part);
+                    // A coefficient that reaches zero still bounds the
+                    // variable, and it bounds it from both sides. The row
+                    // must hold for every realisation, so the binding one is
+                    // the endpoint farthest from zero: `x_k` has one sign,
+                    // and the coefficient sitting on the other side of it is
+                    // the one that makes `a * x_k` largest. Dividing by that
+                    // endpoint as a point is what makes the reading
+                    // possible at all. The part itself cannot be the divisor,
+                    // because the part reaches zero and `Interval.div`
+                    // answers a zero-touching divisor with the unbounded
+                    // interval, which is not a bound in either direction.
+                    //
+                    // The guards this replaces - `neg_part.hi < 0` and
+                    // `pos_part.lo > 0` - were not merely narrow, they were
+                    // unsatisfiable. A straddle has `lo <= 0 <= hi`, so
+                    // `min(hi, 0) < 0` and `max(lo, 0) > 0` can both never
+                    // hold, and this arm contributed nothing whatsoever. One
+                    // round of elimination with an uncertain coefficient is
+                    // enough to put a zero-touching endpoint in almost every
+                    // derived coefficient, so almost every bounded variable
+                    // read as unbounded. `eliminate` is happy with the same
+                    // part, because there only the sign of the multiplier
+                    // matters and a part that touches zero is still
+                    // non-negative; this arm is the same one-sided reading,
+                    // asked of the same object.
+                    if (a.lo < 0) {
+                        const q = row.rhs.div(Interval.init(a.lo, a.lo));
                         lower = if (lower) |v| @max(v, q.lo) else q.lo;
                     }
-                    const pos_part = Interval.init(@max(a.lo, 0.0), a.hi);
-                    if (pos_part.lo > 0) {
-                        const q = row.rhs.div(pos_part);
+                    if (a.hi > 0) {
+                        const q = row.rhs.div(Interval.init(a.hi, a.hi));
                         upper = if (upper) |v| @min(v, q.hi) else q.hi;
                     }
                 },
@@ -360,6 +396,20 @@ pub const System = struct {
         const lo = lower orelse return null;
         const hi = upper orelse return null;
         if (lo > hi) return null;
+
+        // The sweep above keeps `k` alive on purpose, because that is what
+        // leaves a row to read a bound from, and it is also why
+        // `noteContradiction` has nothing to fire on: a contradiction is a
+        // row with every coefficient exactly zero, and while `k` is alive no
+        // derived row is that. Dropping `k` as well costs one more round and
+        // is the only way a contradiction among the rows becomes visible
+        // here, so it runs before the answer is handed back. The bounds are
+        // already read off by this point, and eliminating `k` discards the
+        // rows they came from.
+        if (scratch.alive[k]) {
+            try scratch.eliminate(k);
+            if (scratch.unsat) return null;
+        }
         return Interval.init(lo, hi);
     }
 
@@ -404,7 +454,7 @@ pub const System = struct {
         try self.rhs.append(self.gpa, rhs);
         errdefer _ = self.rhs.pop();
         try self.coeffs.appendSlice(self.gpa, coeffs);
-        self.noteContradiction();
+        try self.noteContradiction();
     }
 
     /// Caller-freed copy of `coeffs` with every coefficient negated, used by
@@ -418,12 +468,12 @@ pub const System = struct {
     /// The live variable with the smallest Tupper cost, or null when none is
     /// left. Ties go to the lowest index, which keeps the order a function of
     /// the system alone.
-    fn chooseNext(self: System) ?usize {
+    fn chooseNext(self: System) !?usize {
         var best: ?usize = null;
         var best_cost: usize = std.math.maxInt(usize);
         for (0..self.var_count) |k| {
             if (!self.alive[k]) continue;
-            const cost = self.pairCount(k);
+            const cost = try self.pairCount(k);
             if (cost < best_cost) {
                 best_cost = cost;
                 best = k;
@@ -435,11 +485,11 @@ pub const System = struct {
     /// `num_lower(k) * num_upper(k)`: how many rows eliminating `k` would
     /// generate. A straddling coefficient counts in both, because it is
     /// paired from both sides.
-    fn pairCount(self: System, k: usize) usize {
+    fn pairCount(self: System, k: usize) !usize {
         var lower: usize = 0;
         var upper: usize = 0;
         for (0..self.count()) |i| {
-            switch (signOf(self.at(i).coeffs[k])) {
+            switch (signOf((try self.at(i)).coeffs[k])) {
                 .negative => lower += 1,
                 .positive => upper += 1,
                 .straddle => {
@@ -465,9 +515,9 @@ pub const System = struct {
     /// system as unsatisfiable, which cuts the feasible set and is the one
     /// failure this library must never produce. Claiming infeasibility is the
     /// expensive direction, so it waits for an enclosure that rules it out.
-    fn noteContradiction(self: *System) void {
+    fn noteContradiction(self: *System) !void {
         for (0..self.count()) |i| {
-            const row = self.at(i);
+            const row = try self.at(i);
             if (!isAllZero(row.coeffs)) continue;
             if (row.rhs.hi < 0) {
                 self.unsat = true;

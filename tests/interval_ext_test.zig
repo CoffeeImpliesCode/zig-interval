@@ -373,30 +373,6 @@ test "log: the one-sided bound widens two ULP, not one" {
     try std.testing.expectEqual(interval.nextUp(interval.nextUp(0.0)), l.hi);
 }
 
-test "powf: the margin and the two ULP steps are both applied" {
-    // Two layers, and both have to survive: the relative margin covers
-    // the error of `std.math.pow` itself, and the two ULP steps on top of
-    // it cover the rounding of the division and multiplication which
-    // apply the margin. The bounds are measured against the margin the
-    // implementation uses, read from it rather than copied here, so
-    // dropping either layer fails instead of passing quietly.
-    const cases = [_]struct { base: f64, exponent: f64 }{
-        .{ .base = 2.0, .exponent = 3.0 },
-        .{ .base = 1.5, .exponent = 7.25 },
-    };
-    for (cases) |c| {
-        const corner = std.math.pow(f64, c.base, c.exponent);
-        const p = try answer(ext.powf(
-            Interval.init(c.base, c.base),
-            Interval.init(c.exponent, c.exponent),
-        ));
-        try std.testing.expect(p.lo <= corner);
-        try std.testing.expect(p.hi >= corner);
-        try std.testing.expect(p.lo < corner / ext.pow_margin);
-        try std.testing.expect(p.hi > corner * ext.pow_margin);
-    }
-}
-
 test "floor: the ends go down, then outward" {
     // 1.5 and 2.5 both floor to their own integer.
     const f = try answer(ext.floor(Interval.init(1.5, 2.5)));

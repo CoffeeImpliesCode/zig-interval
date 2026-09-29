@@ -582,11 +582,31 @@ test "DynVec: mismatched widths are rejected" {
     try std.testing.expectError(error.DimensionMismatch, a.idiv(b));
 
     // Widths that disagree are not comparable at all, so the
-    // predicates say false rather than trap.
+    // predicates say false rather than trap. a is exactly the
+    // two-component prefix of b, so a walk over the components that
+    // ignored the widths would call the two boxes equal, in both
+    // directions.
     try std.testing.expect(!a.overlaps(b));
     try std.testing.expect(!a.subsetOf(b));
     try std.testing.expect(a.overlaps(a));
     try std.testing.expect(a.subsetOf(a));
+    try std.testing.expect(!a.eql(b));
+    try std.testing.expect(!b.eql(a));
+    try std.testing.expect(a.eql(a));
+
+    // Equal widths still fall through to the components, so the check
+    // is not just refusing every comparison.
+    var c = try interval.DynVec.init(gpa, 2, I(0.0, 2.0));
+    defer c.deinit();
+    try std.testing.expect(!a.eql(c));
+    try std.testing.expect(!c.eql(a));
+    try std.testing.expect(c.eql(c));
+    // A separate box of the same width and the same components is
+    // equal, so the width check is not all the comparison does.
+    var twin = try interval.DynVec.fromArray(gpa, a.slice());
+    defer twin.deinit();
+    try std.testing.expect(a.eql(twin));
+    try std.testing.expect(twin.eql(a));
 }
 
 test "DynVec: iadd overwrites the receiver, add does not" {
@@ -717,6 +737,53 @@ test "DynVec: contains and distance match the fixed box" {
     try std.testing.expectEqual(@as(f64, 0.0), v.distance(&.{ 0.5, 0.5, 0.5 }));
     try std.testing.expectEqual(3.0 * @sqrt(3.0), v.distance(&.{ 4.0, 4.0, 4.0 }));
     try std.testing.expect(!v.isEmpty());
+}
+
+test "DynVec: contains is false for a point of the wrong length" {
+    const gpa = std.testing.allocator;
+    var v = try interval.DynVec.fromArray(gpa, &[_]Interval{ I(0.0, 1.0), I(0.0, 1.0), I(0.0, 1.0) });
+    defer v.deinit();
+
+    // Every coordinate given below lies inside the matching component,
+    // so a comparison that stopped at the length of the point would
+    // call all of them contained. These pin the length check itself,
+    // not the arithmetic behind it.
+    try std.testing.expect(!v.contains(&.{ 0.5, 0.5 }));
+    try std.testing.expect(!v.contains(&.{ 0.5, 0.5, 0.5, 0.5 }));
+    try std.testing.expect(!v.contains(&.{ 1.0, 1.0, 1.0, 9.0 }));
+    try std.testing.expect(!v.contains(&.{}));
+
+    // A matching length answers the question it always did, so the
+    // check is not simply refusing every point.
+    try std.testing.expect(v.contains(&.{ 0.5, 0.5, 0.5 }));
+    try std.testing.expect(!v.contains(&.{ 0.5, 0.5, 1.5 }));
+
+    // Dimension zero is the one width the empty point matches.
+    var e = try interval.DynVec.init(gpa, 0, I(0.0, 1.0));
+    defer e.deinit();
+    try std.testing.expect(e.contains(&.{}));
+    try std.testing.expect(!e.contains(&.{0.5}));
+}
+
+test "DynVec: distance to a point of the wrong length is +infinity" {
+    const gpa = std.testing.allocator;
+    const inf: f64 = std.math.inf(f64);
+    var v = try interval.DynVec.fromArray(gpa, &[_]Interval{ I(0.0, 1.0), I(0.0, 1.0), I(0.0, 1.0) });
+    defer v.deinit();
+
+    // A point of another dimension is in no box of this width, and
+    // contains has already said it is not in this one, so the distance
+    // is not zero. It is read no further than the point goes, so the
+    // result is +infinity rather than a norm over a partial pair.
+    try std.testing.expectEqual(inf, v.distance(&.{ 0.5, 0.5 }));
+    try std.testing.expectEqual(inf, v.distance(&.{ 0.5, 0.5, 0.5, 0.5 }));
+    try std.testing.expectEqual(inf, v.distance(&.{ 1.0, 1.0, 1.0, 9.0 }));
+    try std.testing.expectEqual(inf, v.distance(&.{9.0}));
+    try std.testing.expectEqual(inf, v.distance(&.{}));
+
+    // A matching length is measured exactly as before.
+    try std.testing.expectEqual(@as(f64, 0.0), v.distance(&.{ 0.5, 0.5, 0.5 }));
+    try std.testing.expectEqual(3.0 * @sqrt(3.0), v.distance(&.{ 4.0, 4.0, 4.0 }));
 }
 
 /// Doubles an interval. Doubling is domain-total, so the mapped box

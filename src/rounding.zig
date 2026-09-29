@@ -2,9 +2,33 @@
 //!
 //! Zig 0.16 has no directed rounding: `@round` is round-to-nearest, and
 //! `@floor`, `@ceil`, `@trunc` snap to a representable value rather than to
-//! its neighbour. `nextUp` and `prevDown` are therefore the only way an
-//! operation can round outward, and every operation in the library widens
-//! its result with them and nothing else.
+//! its neighbour. Stepping to an adjacent representable value is therefore
+//! the only way an operation can round outward, and every operation in the
+//! library widens its result with a step and nothing else.
+//!
+//! Two pairs of steps exist, and they answer different questions.
+//! `roundUp` and `roundDown` bound a value outward: the smallest f64 at or
+//! above the argument, the largest f64 at or below it. Those are what a
+//! computed interval endpoint needs. `nextUp` and `prevDown` are the strict
+//! neighbours, and they answer the question a caller who wants the adjacent
+//! value is asking.
+//!
+//! The two pairs differ only at the pair of signed zeros, where the
+//! non-strict form keeps the sign it was handed because the argument is
+//! already its own bound: a step upward from -0.0 crosses zero and comes
+//! back as +0.0, which is a different number than the one that was
+//! bounded.
+//!
+//! At the infinities the two agree, and the agreement is load-bearing
+//! rather than incidental. A computed infinity is usually not a value at
+//! all: an f64 operation reaches one only by overflowing, and what it
+//! stands for is a finite real past the end of the range. An upper bound
+//! of -inf is then below the very value it is meant to enclose, and a
+//! lower bound of +inf is above it, so the step at those two ends goes
+//! outward to -floatMax and +floatMax, which are outside both the real
+//! past the range and the infinity itself. Reading an infinity as a value
+//! to be stepped inward from is the mistake, and it is a silent one: the
+//! result still looks like a bound.
 //!
 //! How far it widens is not the same everywhere, because what computed the
 //! endpoint is not the same everywhere, and the two cases are not equally
@@ -79,6 +103,55 @@ pub fn prevDown(x: f64) f64 {
 
     const stepped: u64 = if (bits & sign_bit != 0) bits + 1 else bits - 1;
     return @bitCast(stepped);
+}
+
+/// The outward-rounding UPPER bound on a value that computed to x: the
+/// smallest f64 that is >= x, widened at the two infinities.
+///
+/// At every finite nonzero value this is nextUp. At the two zeros it is x
+/// instead, because a zero is already its own smallest bound and the step
+/// would cross it: roundUp(-0.0) is -0.0, not +0.0.
+///
+/// At -inf the step is outward, not inward, and that is the whole reason
+/// this function exists beside nextUp. An f64 computation only reaches
+/// -inf by overflowing, and the exact result it stands for is then a
+/// finite real below -floatMax, not a real infinity at all. -inf is below
+/// every real, so it is not an upper bound of any of them, and a bound of
+/// [-inf, -inf] excludes the value that overflowed into it. -floatMax is
+/// above every real past the end of the range, and it is also above -inf
+/// itself, so it bounds both cases and is the tightest f64 that does.
+/// +inf needs no such care: it is an upper bound of everything.
+///
+/// NaN propagates unchanged, the pattern and all.
+pub fn roundUp(x: f64) f64 {
+    if (x == -std.math.inf(f64)) return -std.math.floatMax(f64);
+    if (x == std.math.inf(f64)) return x;
+    // Either zero: -0.0 is >= itself, and +0.0 is the pattern nextUp
+    // returns, whose successor is a step wider than the bound needs.
+    if (x == 0.0) return x;
+    return nextUp(x);
+}
+
+/// The outward-rounding LOWER bound on a value that computed to x: the
+/// largest f64 that is <= x, widened at the two infinities.
+///
+/// At every finite nonzero value this is prevDown. At the two zeros it is
+/// x instead: roundDown(+0.0) is +0.0, not -0.0, for the same reason
+/// roundUp(-0.0) is -0.0.
+///
+/// At +inf the step is outward, for the mirror of roundUp's reason: a
+/// computed +inf stands for a finite real above +floatMax, and +inf is
+/// above every real and so is not a lower bound of any of them, while
+/// +floatMax is below both that real and +inf itself. -inf needs no care.
+///
+/// NaN propagates unchanged, the pattern and all.
+pub fn roundDown(x: f64) f64 {
+    if (x == -std.math.inf(f64)) return x;
+    if (x == std.math.inf(f64)) return std.math.floatMax(f64);
+    // Either zero: +0.0 is <= itself, and -0.0 is the pattern prevDown
+    // returns, whose predecessor is a step wider than the bound needs.
+    if (x == 0.0) return x;
+    return prevDown(x);
 }
 
 /// Lower bound on pi, certified for interval range reduction: the f64

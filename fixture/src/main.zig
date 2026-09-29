@@ -114,6 +114,58 @@ fn expectWidenedEnclosure(
     );
 }
 
+/// How much wider than the exact image a returned interval may be, as a
+/// fraction of the image's magnitude. Every widening the library applies is
+/// a rounding-order effect of order 1e-16, so this is a sanity bound rather
+/// than a measure of the step: it fails a runaway result, the whole line or
+/// a percent of slack, and leaves a few steps of tightening or widening
+/// free.
+const width_slack: f64 = 1e-9;
+
+/// Assert the library's promise for an image of the form [0, exact_hi].
+///
+/// The lower end is a zero, and a zero is attained exactly and is its own
+/// bound, so no step is demanded there: a result sitting on it is already
+/// correct, and demanding a step would be demanding a wider answer than
+/// correctness requires. The upper end is a real value the computation
+/// could have missed, so it must come back at least one representable step
+/// outside `exact_hi`: that step is the outward rounding, and a caller
+/// handed the round-to-nearest answer could not tell a bound from an
+/// estimate. Containment is the soundness claim and is checked on both
+/// ends; the width bound keeps a result that merely overshoots from
+/// passing.
+fn expectEnclosesFromZero(
+    what: []const u8,
+    got: Interval,
+    exact_hi: f64,
+) CheckError!void {
+    if (got.lo > 0.0 or got.hi < exact_hi) {
+        std.debug.print(
+            "FAIL {s}: [{d}, {d}] does not enclose [0, {d}]\n",
+            .{ what, got.lo, got.hi, exact_hi },
+        );
+        return CheckError.UnexpectedIntervalValue;
+    }
+    if (got.hi <= exact_hi) {
+        std.debug.print(
+            "FAIL {s}: upper bound {d} is not widened past {d}\n",
+            .{ what, got.hi, exact_hi },
+        );
+        return CheckError.UnexpectedIntervalValue;
+    }
+    if (got.hi - got.lo - exact_hi > width_slack * (exact_hi + 1.0)) {
+        std.debug.print(
+            "FAIL {s}: [{d}, {d}] is far wider than [0, {d}]\n",
+            .{ what, got.lo, got.hi, exact_hi },
+        );
+        return CheckError.UnexpectedIntervalValue;
+    }
+    std.debug.print(
+        "ok {s}: [{d}, {d}] encloses [0, {d}] and is widened at the top\n",
+        .{ what, got.lo, got.hi, exact_hi },
+    );
+}
+
 /// Check a whole vector in one shot: the dimension, then every component.
 /// One vector is one behavioural check, so it reports on one line.
 fn expectVecExact(what: []const u8, got: anytype, want: []const Interval) CheckError!void {
@@ -209,18 +261,6 @@ pub fn main() !void {
 
     try expectFloat("distanceTo", Interval.init(1.0, 3.0).distanceTo(0.0), 1.0);
 
-    try expectInterval(
-        "scale",
-        Interval.init(1.0, 3.0).scale(2.0),
-        Interval.init(0.0, 4.0),
-    );
-
-    try expectInterval(
-        "expand",
-        Interval.init(1.0, 3.0).expand(1.0),
-        Interval.init(0.0, 4.0),
-    );
-
     try expectFloat("clamp", Interval.init(1.0, 3.0).clamp(5.0), 3.0);
 
     // --- Algebraic operations: every result is an enclosure, so the
@@ -256,11 +296,14 @@ pub fn main() !void {
         9.0,
     );
 
-    // Sign change: the smallest product is 2*(-2) = -4, the largest 3*3 = 9.
+    // Sign change: the four products are -4, 6, -6 and 9, so the image is
+    // [-6, 9]. The minimum is 3*(-2), NOT 2*(-2): pairing the two lo ends
+    // gives -4, and a check written against -4 would accept exactly that
+    // mistake, so the lower corner is stated where a wrong one fails.
     try expectEncloses(
         "mul-mixed-sign",
         Interval.init(2.0, 3.0).mul(Interval.init(-2.0, 3.0)),
-        -4.0,
+        -6.0,
         9.0,
     );
 
@@ -272,6 +315,16 @@ pub fn main() !void {
         1.0,
         4.0,
     );
+
+    // The two affine operations. Neither returns the interval it was handed
+    // any more: `scale` and `expand` widen their result outward, so an
+    // equality check against the pre-widening interval was checking the old
+    // output rather than the guarantee. The image of each is [0, 4] here.
+    // Zero is attained exactly and is its own bound, so no step is asked
+    // for at the bottom; 4 is a real value the arithmetic could have
+    // missed, so a step at the top is required and is checked.
+    try expectEnclosesFromZero("scale", Interval.init(1.0, 3.0).scale(2.0), 4.0);
+    try expectEnclosesFromZero("expand", Interval.init(1.0, 3.0).expand(1.0), 4.0);
 
     // The image of |x| over [-3, 5] is [0, 5], not [3, 5]: the minimum of
     // |x| is 0, reached at x = 0 inside the interval.

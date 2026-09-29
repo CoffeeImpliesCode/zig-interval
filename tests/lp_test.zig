@@ -45,22 +45,79 @@ test "normalisation: eq splits in two, ge flips, at() always reports le" {
     // One row for `le`, one for `ge`, two for the `eq` pair.
     try std.testing.expectEqual(@as(usize, 4), sys.count());
     for (0..sys.count()) |i| {
-        try std.testing.expectEqual(lp.Cmp.le, sys.at(i).op);
+        try std.testing.expectEqual(lp.Cmp.le, (try sys.at(i)).op);
     }
 
     // `x + 2y >= 1` is stored as `-x - 2y <= -1`.
-    const flipped = sys.at(1);
+    const flipped = try sys.at(1);
     try std.testing.expectEqual(@as(f64, -1.0), flipped.coeffs[0].lo);
     try std.testing.expectEqual(@as(f64, -2.0), flipped.coeffs[1].lo);
     try std.testing.expectEqual(@as(f64, -1.0), flipped.rhs.lo);
 
     // `eq` becomes the pair (a, <=, r) and (-a, <=, -r).
-    const eq_lo = sys.at(2);
+    const eq_lo = try sys.at(2);
     try std.testing.expectEqual(@as(f64, 1.0), eq_lo.coeffs[0].lo);
     try std.testing.expectEqual(@as(f64, 3.0), eq_lo.rhs.lo);
-    const eq_hi = sys.at(3);
+    const eq_hi = try sys.at(3);
     try std.testing.expectEqual(@as(f64, -1.0), eq_hi.coeffs[0].lo);
     try std.testing.expectEqual(@as(f64, -3.0), eq_hi.rhs.lo);
+}
+
+test "at rejects a row index past the end of the system" {
+    var sys = lp.System.init(gpa, 2);
+    defer sys.deinit();
+    try sys.add(&[_]Interval{ pt(1), pt(0) }, .le, pt(1));
+    try std.testing.expectEqual(@as(usize, 1), sys.count());
+
+    // One past the end is the ordinary mistake. The wild index is the
+    // dangerous one, because the row slice is built by arithmetic: without a
+    // check, an out-of-range `i` reads whatever the allocator left past the
+    // rows and reports it as a constraint.
+    try std.testing.expectError(error.BadRow, sys.at(1));
+    // The variable count is not the row count, and a caller reaching for the
+    // wrong one of the two is the likely mistake.
+    try std.testing.expectError(error.BadRow, sys.at(sys.varCount()));
+    try std.testing.expectError(error.BadRow, sys.at(1 << 20));
+    try std.testing.expectError(error.BadRow, sys.at(std.math.maxInt(usize)));
+
+    // An empty system has no row to return either.
+    var empty = lp.System.init(gpa, 1);
+    defer empty.deinit();
+    try std.testing.expectError(error.BadRow, empty.at(0));
+
+    // A rejected read leaves the system alone.
+    try std.testing.expectEqual(@as(usize, 1), sys.count());
+    try std.testing.expectEqual(@as(f64, 1.0), (try sys.at(0)).rhs.lo);
+}
+
+test "lt and gt relax outward, never inward" {
+    // `x < 3` and `x > 1` describe the open range (1, 3) over the reals. A
+    // closed interval cannot represent an open range, so both comparisons
+    // are relaxed to their non-strict form, and the relaxation has to go
+    // outward: the answer must admit the two endpoints the strict system
+    // excludes, because a tighter answer would cut the feasible set.
+    const one = [_]Interval{pt(1)};
+    var strict = lp.System.init(gpa, 1);
+    defer strict.deinit();
+    try strict.add(&one, .lt, pt(3));
+    try strict.add(&one, .gt, pt(1));
+
+    const relaxed = (try strict.bounds(0)).?;
+    try std.testing.expect(relaxed.contains(1.0));
+    try std.testing.expect(relaxed.contains(3.0));
+    try std.testing.expect(relaxed.lo <= 1.0);
+    try std.testing.expect(relaxed.hi >= 3.0);
+    try expectRange(relaxed, 1.0, 3.0, 1e-9);
+
+    // The same system written non-strict. Its true range is the closed
+    // [1, 3], so the relaxed reading may not come back tighter than that.
+    var closed = lp.System.init(gpa, 1);
+    defer closed.deinit();
+    try closed.add(&one, .le, pt(3));
+    try closed.add(&one, .ge, pt(1));
+    const exact = (try closed.bounds(0)).?;
+    try std.testing.expect(relaxed.lo <= exact.lo + 1e-9);
+    try std.testing.expect(relaxed.hi + 1e-9 >= exact.hi);
 }
 
 test "add rejects a coefficient vector of the wrong length" {
@@ -123,7 +180,7 @@ test "unsatisfiable by contradiction, reported through isUnsat" {
     // Eliminating the only variable leaves `0 <= -1` with every coefficient
     // exactly zero.
     try std.testing.expectEqual(@as(usize, 1), sys.count());
-    const row = sys.at(0);
+    const row = try sys.at(0);
     try std.testing.expectEqual(@as(usize, 1), row.coeffs.len);
     for (row.coeffs) |iv| {
         try std.testing.expectEqual(@as(f64, 0.0), iv.lo);
@@ -134,6 +191,54 @@ test "unsatisfiable by contradiction, reported through isUnsat" {
     // A proven-unsatisfiable system projects to nothing.
     try std.testing.expect((try sys.bounds(0)) == null);
     try std.testing.expect((try sys.box()) == null);
+}
+
+test "a system whose straddling row contradicts another one projects to nothing" {
+    var sys = lp.System.init(gpa, 2);
+    defer sys.deinit();
+
+    // Five rows, two of which say something about x and three about y:
+    //   [-1, 1] * x <= 1        x is in [-1, 1]
+    //        1 * x <= -3        x is at most -3
+    //       -x <= 5            x is at least -5
+    //   [-1, -1] * y <= 2       y is at least -2
+    //        1 * y <= 2        y is at most 2
+    // Every row but the first is satisfiable on its own, and the y rows are
+    // satisfiable together, so the emptiness comes from the first row
+    // meeting the second: a coefficient of -1 is a realisation of [-1, 1],
+    // and it reads -x <= 1, so x is at least -1, which the second row denies.
+    try sys.add(&[_]Interval{ Interval.init(-1.0, 1.0), pt(0) }, .le, pt(1));
+    try sys.add(&[_]Interval{ pt(1), pt(0) }, .le, pt(-3));
+    try sys.add(&[_]Interval{ pt(-1), pt(0) }, .le, pt(5));
+    try sys.add(&[_]Interval{ pt(0), pt(-1) }, .le, pt(2));
+    try sys.add(&[_]Interval{ pt(0), pt(1) }, .le, pt(2));
+
+    // Nothing about the storage is wrong here, so `isUnsat` still says no
+    // and the caller's system is untouched: the emptiness is the projection's
+    // to find, and a non-null answer is the only signal a caller has that
+    // solutions exist.
+    try std.testing.expect(!sys.isUnsat());
+    try std.testing.expect((try sys.bounds(0)) == null);
+    try std.testing.expect((try sys.box()) == null);
+
+    // y is still bounded on its own. Emptiness is a property of the system,
+    // not of the variable asked about, and the y rows never touch x, so this
+    // is the honest answer for the projection onto y alone.
+    try expectRange((try sys.bounds(1)).?, -2.0, 2.0, 1e-9);
+
+    // Reading only the second row back, with the first one dropped, leaves an
+    // ordinary satisfiable system with the same shape, so the null above
+    // comes from the straddling row and not from the layout.
+    var fine = lp.System.init(gpa, 2);
+    defer fine.deinit();
+    try fine.add(&[_]Interval{ pt(1), pt(0) }, .le, pt(-3));
+    try fine.add(&[_]Interval{ pt(-1), pt(0) }, .le, pt(5));
+    try fine.add(&[_]Interval{ pt(0), pt(-1) }, .le, pt(2));
+    try fine.add(&[_]Interval{ pt(0), pt(1) }, .le, pt(2));
+    try expectRange((try fine.bounds(0)).?, -5.0, -3.0, 1e-9);
+    const fine_box = (try fine.box()).?;
+    defer gpa.free(fine_box);
+    try std.testing.expectEqual(@as(usize, 2), fine_box.len);
 }
 
 test "a variable pinned from both sides collapses to a point" {
@@ -190,7 +295,12 @@ test "a coefficient interval straddling zero stays a sound superset" {
     // row is kept and never dropped.
     const wide = (try sys.bounds(0)).?;
     const wide_y = (try sys.bounds(1)).?;
-    try expectRange(wide, -1.0, 5.0, 1e-9);
+    // The true range of x is [-1, 4]: the straddling row reads |x| + y <= 4
+    // and y reaches 0, so x stops at 4 and the x <= 5 row never binds. The
+    // looser [-1, 5] this test used to pin was the answer from a coefficient
+    // that reached zero and was therefore read as no bound at all, not the
+    // shape of the feasible set.
+    try expectRange(wide, -1.0, 4.0, 1e-9);
     try expectRange(wide_y, 0.0, 3.0, 1e-9);
 
     // The same system with the straddling coefficient pinned to its largest
@@ -205,13 +315,96 @@ test "a coefficient interval straddling zero stays a sound superset" {
     try tight.add(&[_]Interval{ pt(-1), pt(0) }, .le, pt(1));
 
     const narrow = (try tight.bounds(0)).?;
-    try std.testing.expect(wide.lo <= narrow.lo);
-    try std.testing.expect(wide.hi >= narrow.hi);
+    // The two true ranges are the same interval, [-1, 4], so this compares
+    // two roundings of the same two numbers rather than two nested sets, and
+    // the outward widening leaves them a couple of ULPs apart in whichever
+    // direction the arithmetic happened to accumulate them. Comparing them
+    // exactly would be a test of which path rounds wider.
+    try std.testing.expect(wide.lo <= narrow.lo + 1e-9);
+    try std.testing.expect(wide.hi + 1e-9 >= narrow.hi);
     try expectRange(narrow, -1.0, 4.0, 1e-9);
 
     var satisfiable = true;
     try sys.eliminateAll(&satisfiable);
     try std.testing.expect(satisfiable);
+    try std.testing.expect(!sys.isUnsat());
+}
+
+test "a coefficient that only reaches zero still bounds the variable" {
+    var sys = lp.System.init(gpa, 2);
+    defer sys.deinit();
+
+    // [-2, 2] * x + y <= 3 and [-2, 2] * x - y <= -1. Each row has to hold
+    // for every coefficient in [-2, 2], so the worst realisation of each is
+    // the one on the far side of zero from x, and the pair reads
+    // y <= 3 - 2 * |x| and y >= 1 + 2 * |x|. Adding them gives 4 * |x| <= 2,
+    // so x is in [-0.5, 0.5] and, from the same two rows, y is in [1, 3].
+    try sys.add(&[_]Interval{ Interval.init(-2.0, 2.0), pt(1) }, .le, pt(3));
+    try sys.add(&[_]Interval{ Interval.init(-2.0, 2.0), pt(-1) }, .le, pt(-1));
+
+    // One elimination round leaves a coefficient on x that straddles zero,
+    // which is the case that used to read as no bound at all. Both sides are
+    // now read, each off the endpoint of the coefficient farthest from zero,
+    // and the answer for x is the true range.
+    const bx = (try sys.bounds(0)).?;
+    try expectRange(bx, -0.5, 0.5, 1e-9);
+    try std.testing.expect(bx.contains(0.0));
+
+    // The projection onto y comes back looser on the low side, which is
+    // allowed and expected: a box must contain the true range, not equal it.
+    // What it may not do is clip either end of it.
+    const by = (try sys.bounds(1)).?;
+    try std.testing.expect(by.lo <= 1.0);
+    try std.testing.expect(by.hi >= 3.0);
+    try std.testing.expect(by.lo >= -1.0);
+    try std.testing.expect(by.hi <= 3.0 + 1e-9);
+
+    const boxed = (try sys.box()).?;
+    defer gpa.free(boxed);
+    try std.testing.expectEqual(@as(usize, 2), boxed.len);
+    try expectRange(boxed[0], -0.5, 0.5, 1e-9);
+    try std.testing.expect(boxed[1].lo <= 1.0);
+    try std.testing.expect(boxed[1].hi >= 3.0);
+}
+
+test "an uncertain coefficient does not make a satisfiable system look empty" {
+    var sys = lp.System.init(gpa, 2);
+    defer sys.deinit();
+
+    // The four rows of the infeasibility report, unchanged:
+    //   [-2, 2] * x                <= [0, 3]
+    //   [-2, 1] * x + [-2, -1] * y <= [0, 1]
+    //            [1, 2] * y         <= [3, 3]
+    //    [1, 2] * x + [-1,  0] * y <= [-3, 3]
+    // A coefficient interval is a universal quantifier: the row has to hold
+    // for every realisation of it. The right-hand side is not. It encloses
+    // one unknown bound, and the row has to hold for that single value, so
+    // the test is whether some value in the right-hand side interval is at
+    // least the worst case the coefficients can force on the left.
+    //
+    // At (0, 1) that worst case is 0, -1, 2 and 0, one per row, and every
+    // one of them is inside its right-hand side. So this system has a
+    // solution, a box is the right answer, and calling it infeasible would
+    // be the false positive a solver like this must never produce: reading
+    // the right-hand side as universal as well is what makes the reported
+    // contradiction come out, and it is not the contract.
+    try sys.add(&[_]Interval{ Interval.init(-2.0, 2.0), pt(0) }, .le, Interval.init(0.0, 3.0));
+    try sys.add(&[_]Interval{ Interval.init(-2.0, 1.0), Interval.init(-2.0, -1.0) }, .le, Interval.init(0.0, 1.0));
+    try sys.add(&[_]Interval{ pt(0), Interval.init(1.0, 2.0) }, .le, pt(3));
+    try sys.add(&[_]Interval{ Interval.init(1.0, 2.0), Interval.init(-1.0, 0.0) }, .le, Interval.init(-3.0, 3.0));
+
+    // The projection contains the witness, so it is not the empty answer
+    // dressed up as a narrow one, and it stays a rigorous superset of the
+    // true ranges: x really does span [-1.5, 1.5] and y spans [-0.5, 1.5].
+    const bx = (try sys.bounds(0)).?;
+    const by = (try sys.bounds(1)).?;
+    try std.testing.expect(bx.contains(0.0));
+    try std.testing.expect(by.contains(1.0));
+    try expectRange(bx, -1.5, 1.5, 1e-9);
+    try std.testing.expect(by.lo <= -0.5);
+    try std.testing.expect(by.hi >= 1.5);
+    const reported = (try sys.box()).?;
+    defer gpa.free(reported);
     try std.testing.expect(!sys.isUnsat());
 }
 
@@ -250,7 +443,7 @@ test "eliminationOrder is a permutation with no repeats" {
     try std.testing.expect(satisfiable);
     try std.testing.expect(sys.count() > 0);
     for (0..sys.count()) |i| {
-        const row = sys.at(i);
+        const row = try sys.at(i);
         for (row.coeffs) |iv| {
             try std.testing.expectEqual(@as(f64, 0.0), iv.lo);
             try std.testing.expectEqual(@as(f64, 0.0), iv.hi);
@@ -294,7 +487,7 @@ test "a well-posed three-variable system projects [0, 6] in every slot" {
     // Every interval the solver produces keeps lo <= hi, both the surviving
     // rows and the projections.
     for (0..sys.count()) |i| {
-        const row = sys.at(i);
+        const row = try sys.at(i);
         for (row.coeffs) |iv| try std.testing.expect(iv.lo <= iv.hi);
         try std.testing.expect(row.rhs.lo <= row.rhs.hi);
     }
@@ -303,7 +496,7 @@ test "a well-posed three-variable system projects [0, 6] in every slot" {
     try sys.eliminateAll(&satisfiable);
     try std.testing.expect(satisfiable);
     for (0..sys.count()) |i| {
-        const row = sys.at(i);
+        const row = try sys.at(i);
         for (row.coeffs) |iv| try std.testing.expect(iv.lo <= iv.hi);
         try std.testing.expect(row.rhs.lo <= row.rhs.hi);
     }

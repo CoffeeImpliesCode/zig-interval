@@ -7,14 +7,19 @@
 //! of free functions rather than methods on the interval.
 //!
 //! The rigour rule is that every endpoint which came out of an f64
-//! computation is widened two ULP outward, with `rounding.prevDown` on
-//! the lower side and `rounding.nextUp` on the upper side. Two rather
+//! computation is widened two ULP outward, with `rounding.roundDown` on
+//! the lower side and `rounding.roundUp` on the upper side. Two rather
 //! than one, and `lower` below carries the measurement that forced it.
-//! Values that were never rounded are used as they stand: the exact
-//! numbers -1, 0 and 1, the infinities a pole produces, and the
-//! certified bounds on pi. Widening those would buy no guarantee,
-//! since there is no rounding error in them to absorb, and would cost
-//! tightness on every call.
+//! The steps are the non-strict ones, which is what makes them bounds:
+//! the strict pair steps inward where a bound has to step outward, and
+//! it answers a zero with a wider one, which a primitive that underflowed
+//! to that zero does not deserve. So a computed zero steps past the pair
+//! of zeros here as well, since a primitive whose true value is too
+//! small to hold answers with a signed zero. Values that were never
+//! rounded are used as they stand: the exact numbers -1, 0 and 1, the
+//! infinities a pole produces, and the certified bounds on pi. Widening
+//! those would buy no guarantee, since there is no rounding error in
+//! them to absorb, and would cost tightness on every call.
 //!
 //! Two kinds of "no answer" are kept apart. `null` means the result is
 //! empty in the reals, which happens only when the whole interval lies
@@ -63,60 +68,75 @@ const CriticalRange = struct {
     last: i64,
 };
 
+/// The smallest positive subnormal f64, bit pattern 1. A computed zero
+/// is not always an exact zero: a primitive whose true value is a number
+/// too small to hold answers with a signed zero, and a bound stopping on
+/// that zero leaves the value out. Two subnormals is the width the
+/// strict pair gave at the zeros, so nothing that was an answer before
+/// this repair changes.
+const min_subnormal: f64 = @bitCast(@as(u64, 1));
+
+/// Two subnormals, the width the zero case takes, kept as one value so
+/// the two sides of the pair cannot drift apart.
+const zero_slack: f64 = 2 * min_subnormal;
+
 /// A lower bound on a computed value, widened two ULP outward, and the
 /// place the reason the whole file widens by two rather than by one is
 /// written down.
 ///
-/// The half-ULP error that a single outward step covers is a property of
-/// the correctly-rounded operations IEEE 754 defines: addition,
-/// subtraction, multiplication, division and square root. The
-/// `std.math` primitives the elementary functions are built on are not
-/// among them and carry no documented error bound. Measured against
-/// exact arithmetic over 300 arguments per function at magnitudes from
-/// 1e-8 to 1e8, every one of them landed within about 1.1 ULP, with
-/// `tanh` the worst at 1.07: past what one step absorbs. The extra ULP
-/// of width is therefore paid on purpose, since a result one ULP too
-/// wide is merely loose while one ULP too narrow is silently wrong and
-/// nothing downstream can detect it.
+/// The steps are the non-strict ones, which is what makes this a bound
+/// and not a neighbour. `rounding.prevDown` answers a different question,
+/// the largest f64 strictly below its argument, and it answers -inf with
+/// -floatMax. -floatMax is above -inf and above every real past the end
+/// of the range, so a lower bound built from it stops short of the truth
+/// and drops the value that overflowed into -inf along with every real
+/// below -floatMax. `rounding.roundDown` is the largest f64 at or below
+/// its argument, and steps outward at the ends of the range where that
+/// one steps inward, which is the whole difference between the pairs
+/// there.
 ///
-/// Two steps are a margin taken from that measurement, not a proof of
-/// it. Establishing the bound would take a correctly rounded or
-/// formally verified implementation of every elementary function,
-/// which this library neither provides nor claims to.
+/// They differ at the two zeros too, and there the non-strict form hands
+/// the zero back unchanged: right for a zero that is exact, wrong for one
+/// that is an underflow, which is what the `min_subnormal` case above
+/// settles.
+///
+/// Two steps rather than one, because the `std.math` primitives the
+/// elementary functions are built on are not among the operations IEEE
+/// 754 defines as correctly rounded and carry no documented error
+/// bound. Measured against exact arithmetic over 300 arguments per
+/// function at magnitudes from 1e-8 to 1e8, the point primitives this
+/// file calls landed within about 1.1 ULP, with `tanh` the worst at
+/// 1.07: past what one step absorbs. That is a sample of those
+/// primitives, not a bound on them, and it does not hold for all of
+/// them: `std.math.pow` measured 1.52 ULP, and its error is proportional
+/// to the integer part of the exponent and so grows without limit there,
+/// which is why `powf` no longer goes through it. The extra ULP of width
+/// is paid on purpose, since a result one ULP too wide is merely loose
+/// while one ULP too narrow is silently wrong and nothing downstream can
+/// detect it.
+///
+/// Two steps are still a margin taken from that measurement, not a proof
+/// of it. Establishing the bound would take a correctly rounded or
+/// formally verified implementation of every elementary function, which
+/// this library neither provides nor claims to.
 fn lower(v: f64) f64 {
-    return rounding.prevDown(rounding.prevDown(v));
+    if (v == 0.0) return -zero_slack;
+    return rounding.roundDown(rounding.roundDown(v));
 }
 
 /// An upper bound on a computed value, two ULP outward for the reason
-/// `lower` gives.
+/// `lower` gives, and out past the pair of zeros for the same one.
 fn upper(v: f64) f64 {
-    return rounding.nextUp(rounding.nextUp(v));
+    if (v == 0.0) return zero_slack;
+    return rounding.roundUp(rounding.roundUp(v));
 }
 
 /// The pattern every monotone function here follows. The two values
 /// are the function at the two ends of the interval; the smaller one
 /// is the lower bound and the larger the upper one, which is why a
-/// decreasing function needs no case of its own.
 fn envelope(a: f64, b: f64) Interval {
     return Interval.init(lower(@min(a, b)), upper(@max(a, b)));
 }
-
-/// The relative margin `powf` puts around each corner before the ULP
-/// steps. It exists because `std.math.pow` is the one primitive this
-/// file uses that carries no usable rounding bound: it builds the
-/// fractional part of the exponent as exp(yf * log(x)), so its
-/// relative error grows with the size of that product, which reaches
-/// 745 for the widest arguments, and it reaches the integer part by
-/// squaring, which adds up to a ULP per bit of the exponent. Measured
-/// against exact arithmetic the result is already past a ULP and a
-/// half for exponents of ordinary size, so the widening alone could
-/// never cover it. This margin is about thirty times the worst error
-/// of that algorithm, and the two ULP steps that follow it cover the
-/// rounding of the scaling which applies it.
-/// Public so that a caller reasoning about the tightness of a `powf`
-/// result, or a test pinning that the margin is still applied, reads the
-/// one value rather than a copy of it.
-pub const pow_margin: f64 = 1.0 + std.math.pow(f64, 2.0, -38.0);
 
 /// The lower quotient (x - offset) / pi, in f80 and biased below the
 /// true value by more than the roundings above can move it. A critical
@@ -203,13 +223,38 @@ fn intPow(x: Interval, e: u32) Interval {
 /// no real power under a general exponent, so it is refused rather
 /// than guessed at; the split of the real line into a positive and a
 /// negative base is exactly the split between a real value and none.
+///
+/// A base that reaches zero is answered from the exponent alone. An
+/// exponent interval that reaches down to zero gives `[0, +inf]`: one
+/// part of the image is a base approaching zero raised to an exponent at
+/// or below zero, and that part runs to +inf, which is unbounded but
+/// real rather than empty. A base of exactly zero under an exponent
+/// interval that stays above zero is `[0, 0]`, and gains the value 1
+/// when the exponent interval reaches exactly zero, since 0^0 is 1.
+/// Every other base goes through `powerCorner`, which evaluates it with
+/// this file's own `log`, `mul` and `exp`.
 pub fn powf(x: Interval, y: Interval) ?Interval {
     if (x.lo < 0.0) return null;
+    // The one rule for a base that reaches zero, in one place, so the
+    // paths through it cannot disagree: a base reaching zero under an
+    // exponent interval reaching down to zero has an image running to
+    // +inf. It says so about a base that is exactly zero, a base that
+    // reaches zero and stops there, and a base straddling zero, which is
+    // the answer `pow` gives a negative integer exponent of a base
+    // containing zero. What triggers it is the exponent reaching down to
+    // zero, not any particular value it passes, and the bound at zero
+    // rather than -inf that comes back is the one the image really has,
+    // since a positive base has a positive power. Answering an exactly
+    // zero base under a negative exponent from the exponent alone used
+    // to give [0, 1] here while the two neighbouring paths gave
+    // [0, +inf], which let a vanishingly small positive base report a
+    // larger range than a zero one.
+    if (x.lo == 0.0 and y.lo < 0.0) return Interval.init(0.0, inf);
     if (x.lo == 0.0 and x.hi == 0.0) {
-        // Zero to a negative power is not a finite number, and zero to
-        // a non-negative one sweeps everything from 1 down to 0.
-        if (y.hi < 0.0) return Interval.init(0.0, inf);
-        if (y.lo <= 0.0) return Interval.init(0.0, 1.0);
+        // The base is exactly zero and no exponent is negative, so the
+        // image is zero raised to a positive exponent, which is zero,
+        // and possibly 0^0, which is one.
+        if (y.lo == 0.0) return Interval.init(0.0, 1.0);
         return Interval.init(0.0, 0.0);
     }
     if (x.lo <= 0.0 and y.lo <= 0.0) {
@@ -219,27 +264,55 @@ pub fn powf(x: Interval, y: Interval) ?Interval {
     }
     // The power rises with the exponent at every base, and with the
     // base wherever the exponent is positive and falls with the base
-    // wherever it is negative, so the two extreme corners of the box
-    // carry the range. A base of negative zero goes in as positive
+    // wherever it is negative, so the two extreme base endpoints carry
+    // the range. Each is raised to the whole of y rather than to a
+    // corner of it, which is the same hull reached in one enclosure
+    // instead of four. A base of negative zero goes in as positive
     // zero, since pow(-0.0, 0.5) is not a real number everywhere.
-    const corners = [4]f64{
-        std.math.pow(f64, @abs(x.lo), y.lo),
-        std.math.pow(f64, @abs(x.lo), y.hi),
-        std.math.pow(f64, x.hi, y.lo),
-        std.math.pow(f64, x.hi, y.hi),
-    };
-    var lo = corners[0];
-    var hi = corners[0];
-    for (corners[1..]) |v| {
-        lo = @min(lo, v);
-        hi = @max(hi, v);
-    }
-    // The margin goes on before the ULP steps, not instead of them: it
-    // covers what `pow` itself was wrong by, and the two steps then
-    // cover the rounding of the two scalings. Dividing the low corner
-    // and multiplying the high one keeps zero at zero and both
-    // infinities where they are, which a subtraction would not.
-    return Interval.init(lower(lo / pow_margin), upper(hi * pow_margin));
+    return powerCorner(@abs(x.lo), y).hull(powerCorner(x.hi, y));
+}
+
+/// One base endpoint raised to a whole exponent interval, as the hull of
+/// a rigorous `exp(y * log x)`.
+///
+/// The identity is the point. For a strictly positive base `x^y` is
+/// `exp(y * log x)`, and each of the three operations is one of this
+/// file's, so the rounding of all three is absorbed by the arithmetic
+/// rather than by a margin. `std.math.pow` is no longer on this path at
+/// all: it reached the integer part of the exponent by repeated
+/// squaring, and each squaring doubles the relative error, so its error
+/// grows with that integer part and no fixed relative margin can cover
+/// it. 1.0000000001^1e8 came back as 1.01005016788679320 against a true
+/// 1.0100501679193823, and the fixed 2^-38 this function used to apply
+/// sat inside that gap rather than over it.
+///
+/// What the answer rests on instead is the premise the rest of the file
+/// rests on, applied in series: `log` widens the rounding of its own
+/// primitive by two ULP, `mul` widens the correctly rounded product by
+/// one, `exp` widens two and rises, and the image of a rising function
+/// over an enclosure is the enclosure of its two ends. So an enclosure
+/// of `y * log x` encloses `x^y` for every y in the interval, and the
+/// result is a hull of enclosures rather than four points read off a
+/// primitive that has no bound of its own. Three elementary evaluations
+/// where there used to be one is the right trade for a library whose
+/// only claim is that a result can be trusted.
+///
+/// The cases the identity does not reach are exact. A base of zero is
+/// zero under every exponent already settled as non-negative, and one
+/// to any power is one, which also settles the one place the product
+/// below is undefined, since the logarithm of one is exactly zero and
+/// zero times an infinite exponent is the indeterminate form that would
+/// carry a NaN into the hull.
+fn powerCorner(base: f64, y: Interval) Interval {
+    if (base == 1.0) return Interval.init(1.0, 1.0);
+    if (base == 0.0) return Interval.init(0.0, 0.0);
+    // A strictly positive base is never outside the domain of the
+    // logarithm, so that null cannot be reached. The whole line stands
+    // in for a trap, and it bounds anything the corner could hold, which
+    // is what a release build without the assertion in `init` needs in
+    // order to go on answering.
+    const lg = log(Interval.init(base, base)) orelse return Interval.init(-inf, inf);
+    return exp(lg.mul(y));
 }
 
 /// The exponential, rising over all of the reals.

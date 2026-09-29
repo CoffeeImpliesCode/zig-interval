@@ -35,6 +35,20 @@ const UnaryOpt = *const fn (Interval) ?Interval;
 // Core: every operation, written once against a component slice.
 // ---------------------------------------------------------------------------
 
+// The length assertion in map2, map2Opt, map1, zipInPlace, all2 and
+// mapOpt is a contract check on a call site that has already fixed the
+// lengths, not a check on caller input. All six are private, and every
+// call site passes lengths that cannot differ: a `Vec(n)` hands them
+// arrays of the comptime length n, and a `DynVec` hands them output
+// allocated to `self.comps.len` beside operands `sameWidth` has
+// already compared, or behind a length comparison of its own that
+// short-circuits before the fold. Dropping the assertion in a release
+// build therefore drops a redundant compare, not a check.
+//
+// The two helpers that take a point are the exception: the point comes
+// from the caller and the receiver does not fix its length, so they
+// compare lengths for real, in every build mode.
+
 /// out[i] = a[i] op b[i].
 fn map2(out: []Interval, a: []const Interval, b: []const Interval, op: Binary) void {
     std.debug.assert(out.len == a.len and a.len == b.len);
@@ -89,9 +103,14 @@ fn mapOpt(out: []Interval, a: []const Interval, f: UnaryOpt) bool {
     return true;
 }
 
-/// True when every component interval contains the point's coordinate.
+/// True when every component interval contains the point's
+/// coordinate. A point of another length is a point of another space,
+/// so it lies in no box of this width and the result is false. The
+/// lengths are compared for real, so this holds in ReleaseFast and
+/// ReleaseSmall too, where an assertion would be elided and the fold
+/// would run off the end of the shorter of the two.
 fn allContains(comps: []const Interval, p: []const f64) bool {
-    std.debug.assert(comps.len == p.len);
+    if (comps.len != p.len) return false;
     for (comps, p) |c, x| {
         if (!c.contains(x)) return false;
     }
@@ -101,8 +120,14 @@ fn allContains(comps: []const Interval, p: []const f64) bool {
 /// Euclidean norm of the per-component distances from the point to the
 /// box. The infinity norm, the max of the component distances, is the
 /// other natural box metric; this is not it.
+///
+/// A point of another length has no distance to this box, and the
+/// result is the positive infinity. That is the one value that keeps
+/// the promise that the distance is zero exactly for a point in the
+/// box, which the length check rules out, and it never reports a
+/// distance below the true one.
 fn normDistance(comps: []const Interval, p: []const f64) f64 {
-    std.debug.assert(comps.len == p.len);
+    if (comps.len != p.len) return std.math.inf(f64);
     var squares: f64 = 0.0;
     for (comps, p) |c, x| {
         const d = c.distanceTo(x);
@@ -145,21 +170,26 @@ pub fn Vec(comptime n: usize) type {
             return &self.comps;
         }
 
-        /// Component i. An out-of-range i trips the runtime bounds
-        /// check in Debug and ReleaseSafe rather than reading past the
-        /// array.
+        /// Component i. The index is part of the caller's contract: an
+        /// i outside `0..n` trips the bounds check the language
+        /// inserts in Debug and ReleaseSafe, and reads past the array
+        /// in ReleaseFast and ReleaseSmall, where that check is
+        /// elided. The caller keeps the index in range; nothing here
+        /// checks it in every build mode.
         pub fn get(self: Self, i: usize) Interval {
             return self.comps[i];
         }
 
-        /// Replace component i. Same bounds check as `get`.
+        /// Replace component i. The same index contract as `get`, and
+        /// the same reach into the array when it is broken.
         pub fn set(self: *Self, i: usize, v: Interval) void {
             self.comps[i] = v;
         }
 
         /// Componentwise equality of the endpoints, delegated to
         /// `Interval.eql` so both levels agree on what set equality of
-        /// enclosures means.
+        /// enclosures means. Both operands are the same `Vec(n)`, so
+        /// their widths agree by type and no width check is needed.
         pub fn eql(self: Self, other: Self) bool {
             for (self.comps, other.comps) |x, y| {
                 if (!x.eql(y)) return false;
@@ -257,6 +287,9 @@ pub fn Vec(comptime n: usize) type {
         }
 
         /// True when every component contains the matching coordinate.
+        /// The point is an array of the box's own dimension, so its
+        /// length always matches the width and the fold cannot run off
+        /// the end of either.
         pub fn contains(self: Self, p: [n]f64) bool {
             return allContains(&self.comps, &p);
         }
@@ -264,6 +297,8 @@ pub fn Vec(comptime n: usize) type {
         /// Euclidean distance from the point to the box: the norm of the
         /// per-component `Interval.distanceTo` values, not their
         /// maximum. It is zero exactly when the point is in the box.
+        /// The point is an array of the box's own dimension, so its
+        /// length always matches the width.
         pub fn distance(self: Self, p: [n]f64) f64 {
             return normDistance(&self.comps, &p);
         }
@@ -338,20 +373,30 @@ pub const DynVec = struct {
         return self.comps;
     }
 
-    /// Component i, bounds-checked in Debug and ReleaseSafe.
+    /// Component i. The index is part of the caller's contract: an
+    /// i outside `0..dim()` trips the bounds check the language
+    /// inserts in Debug and ReleaseSafe, and reads past the allocation
+    /// in ReleaseFast and ReleaseSmall, where that check is elided.
+    /// The caller keeps the index in range.
     pub fn get(self: Self, i: usize) Interval {
         return self.comps[i];
     }
 
-    /// Replace component i. Same bounds check as `get`.
+    /// Replace component i. The same index contract as `get`.
     pub fn set(self: *Self, i: usize, v: Interval) void {
         self.comps[i] = v;
     }
 
     /// Componentwise equality of the endpoints, delegated to
     /// `Interval.eql` so both levels agree on what set equality of
-    /// enclosures means.
+    /// enclosures means. Widths that disagree are not comparable, so
+    /// that is false, as it is for `overlaps` and `subsetOf`. The
+    /// widths are compared for real, because a componentwise walk
+    /// alone would decide equality over the prefix the two boxes
+    /// share, and in a release build that check is not there to stop
+    /// it.
     pub fn eql(self: Self, other: Self) bool {
+        if (self.comps.len != other.comps.len) return false;
         for (self.comps, other.comps) |x, y| {
             if (!x.eql(y)) return false;
         }
@@ -499,15 +544,25 @@ pub const DynVec = struct {
             all2(self.comps, other.comps, Interval.subsetOf);
     }
 
-    /// True when every component contains the matching coordinate.
-    /// A point of the wrong length trips the length check of the core.
+    /// True when every component contains the matching coordinate. A
+    /// point whose length is not the width of the box is a point of
+    /// another space, so it lies in no box of this width and the
+    /// result is false, the answer the sibling predicates give for
+    /// widths that disagree. The length is compared for real, so this
+    /// holds in ReleaseFast and ReleaseSmall too, where an assertion
+    /// would be elided and the fold would read past the shorter of the
+    /// two.
     pub fn contains(self: Self, p: []const f64) bool {
         return allContains(self.comps, p);
     }
 
     /// Euclidean distance from the point to the box: the norm of the
     /// per-component `Interval.distanceTo` values, not their maximum.
-    /// It is zero exactly when the point is in the box.
+    /// It is zero exactly when the point is in the box. A point whose
+    /// length is not the width of the box is in no box of this width,
+    /// so it is not in this one, and the distance is the positive
+    /// infinity: the one value that keeps the zero-if-and-only-if
+    /// promise and never under-reports.
     pub fn distance(self: Self, p: []const f64) f64 {
         return normDistance(self.comps, p);
     }

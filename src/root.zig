@@ -92,6 +92,18 @@ pub const piDown = rounding_mod.piDown;
 /// Upper bound on pi, for certified range reduction.
 pub const piUp = rounding_mod.piUp;
 
+/// Smallest `f64` greater than or equal to the argument. This is the
+/// outward-rounding upper bound: use it for every computed upper bound of
+/// an interval result. Unlike `nextUp` it does not cut inward at the
+/// infinities, where `nextUp(-inf)` would return `-floatMax`.
+pub const roundUp = rounding_mod.roundUp;
+
+/// Largest `f64` less than or equal to the argument. This is the
+/// outward-rounding lower bound: use it for every computed lower bound of
+/// an interval result. Unlike `prevDown` it does not cut inward at the
+/// infinities.
+pub const roundDown = rounding_mod.roundDown;
+
 /// The elementary functions, as a namespace. Every member is also
 /// re-exported at the top level of this module.
 pub const ext = ext_mod;

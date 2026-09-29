@@ -91,6 +91,20 @@ pub fn build(b: *std.Build) void {
     const run_lp_tests = b.addRunArtifact(lp_tests);
     test_step.dependOn(&run_lp_tests.step);
 
+    // The soundness oracle imports the same public `interval` module the
+    // other tests do, for the reason given above: a second registration of
+    // any file under `src/` is a hard "file exists in modules" error.
+    const soundness_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/soundness_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    soundness_tests.root_module.addImport("interval", interval);
+    const run_soundness_tests = b.addRunArtifact(soundness_tests);
+    test_step.dependOn(&run_soundness_tests.step);
+
     // The fixture is a real external package: it declares this one as a
     // dependency and resolves `interval` through the module graph, which the
     // internal test above cannot exercise because it is handed the module
