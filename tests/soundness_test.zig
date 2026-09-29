@@ -919,3 +919,119 @@ test "fuzz: expand" {
     const t = fuzz(.expand);
     try std.testing.expectEqual(@as(usize, 0), t.failures);
 }
+
+// ---------------------------------------------------------------------------
+// The NaN-scalar trap, seen from outside the process
+// ---------------------------------------------------------------------------
+
+/// Where `build.zig` put the built `nan_probe`. `tests/nan_probe.zig` and
+/// that file's build wiring both say why the observation has to happen in a
+/// child: a trap is an abort, an abort inside a test binary takes the other
+/// tests with it, and the exit status is the only signal that survives.
+const nan_probe = @import("nan_probe_options");
+
+/// The operations the NaN contract names. The test walks this list and not
+/// the probe's own, so that an operation the probe fails to dispatch shows
+/// up as a failed control below rather than as a pass that quietly has an
+/// unrunnable row in it.
+const nan_ops = [_][]const u8{
+    "add",
+    "sub",
+    "mul",
+    "div",
+    "scale",
+    "expand",
+    "translate",
+    "neg",
+};
+
+/// The offending scalar, as text. `parseFloat` accepts "nan", so the probe
+/// is handed the same NaN a caller would produce.
+const nan_value = "nan";
+
+/// An ordinary scalar, and what the control run passes where the NaN was.
+/// Every operation above is defined on it, so a control that dies is a
+/// broken probe and not a surprise about the arithmetic.
+const control_value = "2.0";
+
+/// What one probe run reported, reduced to the fact the contract turns on.
+const ProbeVerdict = struct {
+    /// True when the child did not exit cleanly with status zero. A trap
+    /// counts however it arrives, because it arrives as a signal under POSIX
+    /// and as an exit code under Windows, and a contract that noticed only
+    /// one of those would be reporting the platform.
+    died: bool,
+    /// The exit code, or null when the child was signalled or stopped and
+    /// had no code to report.
+    code: ?u8,
+};
+
+/// Run the probe once. A failure to run at all is an error and never a
+/// verdict: a probe that cannot be spawned has reported nothing about the
+/// library, and turning that into "it died" would be the vacuous pass.
+fn runProbe(op: []const u8, value: []const u8) !ProbeVerdict {
+    const argv = [_][]const u8{ nan_probe.probe_path, op, value };
+    var child = try std.process.spawn(std.testing.io, .{
+        .argv = &argv,
+        .stdin = .ignore,
+        // Every trapping row makes the child print a panic message, and a
+        // passing sweep should be quiet. The exit status is the signal.
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    // Idempotent, and a no-op once wait has returned.
+    defer child.kill(std.testing.io);
+    const term = try child.wait(std.testing.io);
+    return switch (term) {
+        .exited => |code| .{ .died = code != 0, .code = code },
+        .signal, .stopped, .unknown => .{ .died = true, .code = null },
+    };
+}
+
+/// One row of the report: which operation, which scalar, and what the child
+/// did about it.
+fn reportVerdict(row: []const u8, op: []const u8, value: []const u8, v: ProbeVerdict) void {
+    if (v.code) |code| {
+        std.debug.print("    {s} {s} with {s} -> exit code {d}\n", .{ row, op, value, code });
+    } else {
+        std.debug.print("    {s} {s} with {s} -> died with no exit code\n", .{ row, op, value });
+    }
+}
+
+test "contract: a NaN scalar traps in every operation named, and in no other" {
+    // Two runs per operation, and the control is what gives the trapping run
+    // its meaning. It is the same probe, the same code path and the same
+    // operation with an ordinary scalar where the NaN was, so a probe that
+    // cannot find its operation, cannot be spawned, or is broken in any other
+    // way fails the control and takes the test down with it.
+    var verdicts: [nan_ops.len]ProbeVerdict = undefined;
+    var controls: [nan_ops.len]ProbeVerdict = undefined;
+
+    std.debug.print("\n  NaN scalar, observed as a child process:\n", .{});
+    for (nan_ops, 0..) |op, i| {
+        controls[i] = try runProbe(op, control_value);
+        verdicts[i] = try runProbe(op, nan_value);
+        reportVerdict("control", op, control_value, controls[i]);
+        reportVerdict("nan    ", op, nan_value, verdicts[i]);
+    }
+
+    // The claim is agreement, so the set is judged as a whole rather than one
+    // row at a time: every named operation must trap, and every control must
+    // come back clean. One survivor means an operation disagrees with the
+    // rest, and the report above already names which one.
+    var trapped: usize = 0;
+    var survived: usize = 0;
+    var control_failed: usize = 0;
+    for (verdicts, controls) |v, c| {
+        if (v.died) trapped += 1 else survived += 1;
+        if (c.died) control_failed += 1;
+    }
+    std.debug.print("    -> {d} of {d} operations trapped on the NaN, {d} well-formed controls failed\n", .{
+        trapped,
+        nan_ops.len,
+        control_failed,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), survived);
+    try std.testing.expectEqual(@as(usize, 0), control_failed);
+}

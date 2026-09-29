@@ -43,10 +43,19 @@
 //!
 //! For the elementary functions the premise fails: the `std.math`
 //! primitives behind them carry no documented error bound. Measured
-//! against exact arithmetic, every one of them landed within roughly
-//! 1.1 ULP, with `tanh` the worst at 1.07, which is past what one step
-//! absorbs. Those results are widened by two steps instead, so a primitive
-//! would have to be more than a full ULP out to escape the bound.
+//! against exact arithmetic, a sample of the point primitives landed
+//! within roughly 1.1 ULP, with `tanh` the worst at 1.07, which is past
+//! what one step absorbs. Those results are widened by two steps
+//! instead, so a primitive would have to be more than a full ULP out to
+//! escape the bound.
+//!
+//! That sample is not a bound on the family, and one primitive is a
+//! standing counterexample: `std.math.pow` reaches the integer part of
+//! its exponent by repeated squaring, whose relative error doubles per
+//! bit, so it is 1.52 ULP at an ordinary exponent and grows without
+//! bound in the exponent. `powf` therefore does not call it at all, and
+//! evaluates its corners through this file's own rigor instead. See
+//! `interval_ext.zig`.
 //!
 //! That second figure is a margin chosen from measurement, not a proof of
 //! it. A rigorous guarantee for the elementary functions would need a

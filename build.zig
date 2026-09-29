@@ -105,6 +105,39 @@ pub fn build(b: *std.Build) void {
     const run_soundness_tests = b.addRunArtifact(soundness_tests);
     test_step.dependOn(&run_soundness_tests.step);
 
+    // The NaN-trap probe is a separate executable rather than a test,
+    // because the contract it pins is that a NaN scalar operand ABORTS, and
+    // an abort inside a test binary takes every other test down with it. As
+    // a child process the exit status is the signal and the abort stays
+    // contained; `tests/nan_probe.zig` spells out why in full.
+    //
+    // Its mode is pinned to Debug whatever `-Doptimize` says, because the
+    // contract is about a CHECKED build. ReleaseFast elides the `lo <= hi`
+    // assert in `Interval.init` and hands back a NaN interval, so a probe
+    // built in whatever mode the suite was asked for would report "no trap"
+    // under ReleaseFast and fail the parent test for a reason that has
+    // nothing to do with the library.
+    const nan_probe = b.addExecutable(.{
+        .name = "nan_probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/nan_probe.zig"),
+            .target = target,
+            .optimize = .Debug,
+        }),
+    });
+    // The same public `interval` module the other artifacts take. The probe
+    // adds no file of its own under `src/`, so no registration overlaps.
+    nan_probe.root_module.addImport("interval", interval);
+
+    // The probe's built path, as a compile-time constant the soundness test
+    // hands to `std.process.Child`. An options module rather than a run-step
+    // environment variable, so the path is right however the test binary is
+    // launched, and `addOptionPath` records the dependency: the probe cannot
+    // be missing or stale when the test that runs it executes.
+    const nan_probe_options = b.addOptions();
+    nan_probe_options.addOptionPath("probe_path", nan_probe.getEmittedBin());
+    soundness_tests.root_module.addOptions("nan_probe_options", nan_probe_options);
+
     // The fixture is a real external package: it declares this one as a
     // dependency and resolves `interval` through the module graph, which the
     // internal test above cannot exercise because it is handed the module

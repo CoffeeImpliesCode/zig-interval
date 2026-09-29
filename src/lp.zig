@@ -52,6 +52,20 @@ pub const Cmp = enum { le, lt, ge, gt, eq };
 /// `coeffs` has one entry per variable and points into the system's own
 /// storage: it is invalidated by the next `add` or `eliminate`, and freed by
 /// `deinit`. Every stored row has `op == .le`.
+///
+/// A coefficient is UNIVERSAL and a right-hand side is EXISTENTIAL, and
+/// the difference decides what a projection may legitimately conclude. A
+/// row reads: for EVERY realisation of the coefficient intervals, the
+/// linear form is at most SOME ONE unknown value drawn from `rhs`. So a
+/// derived bound is widened outward rather than taken at the convenient
+/// end of a coefficient, which is why a coefficient that merely REACHES
+/// zero still bounds its variable -- read off the endpoint farthest from
+/// zero. `rhs` is the envelope of a single bound value, not a family, so
+/// only its `hi` can prove a contradiction.
+///
+/// Reading the right-hand side as universal instead is the mistake that
+/// makes a projection come back too small, and a system reported
+/// unsatisfiable that is not.
 pub const Lin = struct {
     coeffs: []Interval,
     op: Cmp,

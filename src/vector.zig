@@ -590,8 +590,12 @@ pub const DynVec = struct {
 /// the fold leaves the domain, so a null costs nothing but the
 /// allocations already made.
 ///
-/// f is a `fn (Interval) ?Interval`, which is the signature the
-/// transcendental functions in `interval_ext` have.
+/// f is a `fn (Interval) ?Interval`, which is the signature of the
+/// elementary functions that can report an EMPTY result: `sqrt`, `log`,
+/// `log2`, `log10`, `log1p`, `asin`, `acos`, `acosh`, `atanh` and
+/// `powf`. The remaining eighteen return a plain `Interval` and are not
+/// coercible here; to fold one of those, wrap it so that its result is
+/// lifted into an optional.
 pub fn mapResult(v: anytype, f: UnaryOpt) !?@TypeOf(v) {
     const V = @TypeOf(v);
     if (comptime V == DynVec) {
