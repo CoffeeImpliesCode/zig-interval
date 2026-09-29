@@ -309,3 +309,219 @@ test "invariant: every interval-returning operation yields lo <= hi" {
     try expectOrdered(base.expand(1.0));
     try expectOrdered(base.expand(-0.5));
 }
+
+/// Assert that got is a sound enclosure of the exact interval
+/// [exact_lo, exact_hi] and that both bounds were moved strictly outward.
+/// The exact bounds are derived by hand in each test, and the library's
+/// own rounding helpers are deliberately not reused here: compared against
+/// themselves they would cancel a bug in the widening direction out. A
+/// bound left sitting exactly on the true value certifies nothing, so the
+/// strict checks fail it.
+fn expectEnclosure(got: Interval, exact_lo: f64, exact_hi: f64) !void {
+    try std.testing.expect(got.lo <= exact_lo);
+    try std.testing.expect(got.hi >= exact_hi);
+    try std.testing.expect(got.lo < exact_lo);
+    try std.testing.expect(got.hi > exact_hi);
+}
+
+/// Assert the shape of an image that contains zero: a lower bound of
+/// exactly 0.0, the tightest available, and an upper bound that encloses
+/// the true maximum with a widening step of its own.
+fn expectZeroBased(got: Interval, exact_hi: f64) !void {
+    try std.testing.expectEqual(@as(f64, 0.0), got.lo);
+    try std.testing.expect(got.hi >= exact_hi);
+    try std.testing.expect(got.hi > exact_hi);
+}
+
+test "add: exact sums widen outward" {
+    try expectEnclosure(Interval.init(1.0, 3.0).add(Interval.init(2.0, 5.0)), 3.0, 8.0);
+    try expectEnclosure(Interval.init(-2.0, 1.0).add(Interval.init(3.0, 4.0)), 1.0, 5.0);
+    try expectEnclosure(Interval.init(0.0, 2.0).add(Interval.init(2.0, 4.0)), 2.0, 6.0);
+}
+
+test "sub: the lower bound pairs lo with the far endpoint of other" {
+    // 1 - 5 = -4, 3 - 2 = 1. Pairing lo with lo would give 1 - 2 = -1.
+    try expectEnclosure(Interval.init(1.0, 3.0).sub(Interval.init(2.0, 5.0)), -4.0, 1.0);
+    try expectEnclosure(Interval.init(5.0, 7.0).sub(Interval.init(2.0, 3.0)), 2.0, 5.0);
+    try expectEnclosure(Interval.init(0.0, 2.0).sub(Interval.init(2.0, 4.0)), -4.0, 0.0);
+}
+
+test "neg: endpoints swap" {
+    const n = Interval.init(1.0, 3.0).neg();
+    try std.testing.expectEqual(@as(f64, -3.0), n.lo);
+    try std.testing.expectEqual(@as(f64, -1.0), n.hi);
+
+    // Negation is exact, so no widening shows up.
+    try std.testing.expect(n.neg().eql(Interval.init(1.0, 3.0)));
+}
+
+test "neg: an interval spanning zero" {
+    const n = Interval.init(-2.0, 3.0).neg();
+    try std.testing.expectEqual(@as(f64, -3.0), n.lo);
+    try std.testing.expectEqual(@as(f64, 2.0), n.hi);
+}
+
+test "neg: a degenerate interval stays degenerate" {
+    const n = Interval.init(2.0, 2.0).neg();
+    try std.testing.expectEqual(@as(f64, -2.0), n.lo);
+    try std.testing.expectEqual(@as(f64, -2.0), n.hi);
+}
+
+test "mul: both operands positive" {
+    try expectEnclosure(Interval.init(1.0, 2.0).mul(Interval.init(3.0, 4.0)), 3.0, 8.0);
+}
+
+test "mul: both operands negative" {
+    try expectEnclosure(Interval.init(-2.0, -1.0).mul(Interval.init(-4.0, -3.0)), 3.0, 8.0);
+}
+
+test "mul: positive times negative" {
+    try expectEnclosure(Interval.init(1.0, 2.0).mul(Interval.init(-4.0, -3.0)), -8.0, -3.0);
+}
+
+test "mul: negative times positive" {
+    try expectEnclosure(Interval.init(-2.0, -1.0).mul(Interval.init(3.0, 4.0)), -8.0, -3.0);
+}
+
+test "mul: an operand spanning zero" {
+    try expectEnclosure(Interval.init(-2.0, 3.0).mul(Interval.init(1.0, 2.0)), -4.0, 6.0);
+}
+
+test "mul: a degenerate operand" {
+    try expectEnclosure(Interval.init(-3.0, -3.0).mul(Interval.init(2.0, 2.0)), -6.0, -6.0);
+}
+
+test "div: positive divisor" {
+    try expectEnclosure(Interval.init(4.0, 12.0).div(Interval.init(2.0, 4.0)), 1.0, 6.0);
+}
+
+test "div: negative divisor" {
+    try expectEnclosure(Interval.init(4.0, 12.0).div(Interval.init(-4.0, -2.0)), -6.0, -1.0);
+}
+
+test "div: divisor containing zero gives the whole line, not an empty range" {
+    const q = Interval.init(1.0, 2.0).div(Interval.init(-1.0, 1.0));
+    try std.testing.expect(q.lo == -std.math.inf(f64));
+    try std.testing.expect(q.hi == std.math.inf(f64));
+
+    // Touching zero from one side still counts as containing zero.
+    const touch = Interval.init(1.0, 2.0).div(Interval.init(0.0, 1.0));
+    try std.testing.expect(touch.lo == -std.math.inf(f64));
+    try std.testing.expect(touch.hi == std.math.inf(f64));
+}
+
+test "div: degenerate dividend" {
+    try expectEnclosure(Interval.init(4.0, 4.0).div(Interval.init(2.0, 4.0)), 1.0, 2.0);
+}
+
+test "recip: reciprocal range" {
+    try expectEnclosure(Interval.init(2.0, 4.0).recip(), 0.25, 0.5);
+    try expectEnclosure(Interval.init(-4.0, -2.0).recip(), -0.5, -0.25);
+}
+
+test "recip: an interval containing zero is unbounded" {
+    const r = Interval.init(-1.0, 1.0).recip();
+    try std.testing.expect(r.lo == -std.math.inf(f64));
+    try std.testing.expect(r.hi == std.math.inf(f64));
+}
+
+test "abs: positive and negative intervals" {
+    try expectEnclosure(Interval.init(1.0, 3.0).abs(), 1.0, 3.0);
+    try expectEnclosure(Interval.init(-3.0, -1.0).abs(), 1.0, 3.0);
+}
+
+test "abs: an interval spanning zero starts at exactly zero" {
+    try expectZeroBased(Interval.init(-2.0, 3.0).abs(), 3.0);
+}
+
+test "sqr: positive and negative intervals" {
+    try expectEnclosure(Interval.init(1.0, 3.0).sqr(), 1.0, 9.0);
+    try expectEnclosure(Interval.init(-3.0, -1.0).sqr(), 1.0, 9.0);
+}
+
+test "sqr: an interval spanning zero starts at exactly zero" {
+    // 9 is the larger square, so this is the case where treating squaring
+    // as monotone would put a lower bound below the smallest real square.
+    try expectZeroBased(Interval.init(-2.0, 3.0).sqr(), 9.0);
+    try expectZeroBased(Interval.init(-1.0, 1.0).sqr(), 1.0);
+}
+
+test "eql: true only when both endpoints match" {
+    try std.testing.expect(Interval.init(1.0, 3.0).eql(Interval.init(1.0, 3.0)));
+    try std.testing.expect(!Interval.init(1.0, 3.0).eql(Interval.init(1.0, 4.0)));
+    try std.testing.expect(!Interval.init(1.0, 3.0).eql(Interval.init(0.0, 3.0)));
+    // Containment is not equality.
+    try std.testing.expect(!Interval.init(1.0, 3.0).eql(Interval.init(0.0, 4.0)));
+}
+
+test "ne: the complement of eql" {
+    try std.testing.expect(Interval.init(1.0, 3.0).ne(Interval.init(1.0, 4.0)));
+    try std.testing.expect(Interval.init(1.0, 3.0).ne(Interval.init(0.0, 3.0)));
+    try std.testing.expect(!Interval.init(1.0, 3.0).ne(Interval.init(1.0, 3.0)));
+}
+
+test "lt: certain strict order, false on overlap" {
+    try std.testing.expect(Interval.init(1.0, 2.0).lt(Interval.init(3.0, 4.0)));
+    // Touching is not strict.
+    try std.testing.expect(!Interval.init(1.0, 2.0).lt(Interval.init(2.0, 4.0)));
+    // Overlap makes the relation merely possible, so it is not reported.
+    try std.testing.expect(!Interval.init(1.0, 3.0).lt(Interval.init(2.0, 5.0)));
+    try std.testing.expect(!Interval.init(1.0, 3.0).lt(Interval.init(1.0, 3.0)));
+}
+
+test "le: certain weak order, false on overlap" {
+    try std.testing.expect(Interval.init(0.0, 2.0).le(Interval.init(2.0, 4.0)));
+    try std.testing.expect(Interval.init(1.0, 2.0).le(Interval.init(3.0, 4.0)));
+    try std.testing.expect(!Interval.init(1.0, 3.0).le(Interval.init(2.0, 5.0)));
+    try std.testing.expect(!Interval.init(1.0, 3.0).le(Interval.init(0.0, 5.0)));
+}
+
+test "gt: certain strict order, false on overlap" {
+    try std.testing.expect(Interval.init(3.0, 4.0).gt(Interval.init(1.0, 2.0)));
+    try std.testing.expect(!Interval.init(2.0, 4.0).gt(Interval.init(1.0, 2.0)));
+    try std.testing.expect(!Interval.init(2.0, 5.0).gt(Interval.init(1.0, 3.0)));
+    try std.testing.expect(!Interval.init(1.0, 3.0).gt(Interval.init(1.0, 3.0)));
+}
+
+test "ge: certain weak order, false on overlap" {
+    try std.testing.expect(Interval.init(2.0, 4.0).ge(Interval.init(1.0, 2.0)));
+    try std.testing.expect(Interval.init(3.0, 4.0).ge(Interval.init(1.0, 2.0)));
+    try std.testing.expect(!Interval.init(2.0, 5.0).ge(Interval.init(1.0, 3.0)));
+    try std.testing.expect(!Interval.init(1.0, 3.0).ge(Interval.init(0.0, 5.0)));
+}
+
+test "invariant: arithmetic results keep lo <= hi, infinities included" {
+    const pairs = [_][2]Interval{
+        .{ Interval.init(1.0, 3.0), Interval.init(-2.0, 2.0) },
+        .{ Interval.init(-1.0, 1.0), Interval.init(1.0, 3.0) },
+        .{ Interval.init(0.0, 0.0), Interval.init(-4.0, 4.0) },
+        .{ Interval.init(1.0, 3.0), Interval.init(std.math.inf(f64), std.math.inf(f64)) },
+        .{ Interval.init(-std.math.inf(f64), -std.math.inf(f64)), Interval.init(1.0, 3.0) },
+        .{ Interval.init(-std.math.inf(f64), 3.0), Interval.init(1.0, 2.0) },
+        .{ Interval.init(1.0, 2.0), Interval.init(-std.math.inf(f64), std.math.inf(f64)) },
+        .{ Interval.init(-std.math.inf(f64), std.math.inf(f64)), Interval.init(-1.0, 1.0) },
+        .{ Interval.init(-std.math.inf(f64), std.math.inf(f64)), Interval.init(2.0, 4.0) },
+        .{ Interval.init(1.0, 2.0), Interval.init(-std.math.inf(f64), -1.0) },
+    };
+    for (pairs) |pair| {
+        const a = pair[0];
+        const b = pair[1];
+        try expectOrdered(a.add(b));
+        try expectOrdered(a.sub(b));
+        try expectOrdered(a.mul(b));
+        try expectOrdered(a.div(b));
+        try expectOrdered(a.abs());
+        try expectOrdered(a.sqr());
+        // A zero-free operand keeps its reciprocal ordered, however
+        // extreme the operand is.
+        if (!a.contains(0.0)) try expectOrdered(a.recip());
+    }
+
+    try expectOrdered(Interval.init(1.0, 2.0).recip());
+    try expectOrdered(Interval.init(-std.math.inf(f64), 3.0).abs());
+    try expectOrdered(Interval.init(-std.math.inf(f64), 3.0).sqr());
+    try expectOrdered(Interval.init(-std.math.inf(f64), -1.0).abs());
+    try expectOrdered(Interval.init(-std.math.inf(f64), -1.0).sqr());
+    const far_divisor = Interval.init(std.math.inf(f64), std.math.inf(f64));
+    try expectOrdered(Interval.init(2.0, 4.0).div(far_divisor));
+}

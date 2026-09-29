@@ -7,13 +7,33 @@ pub fn build(b: *std.Build) void {
     // A public module, so a dependent package can reach it through the
     // dependency module graph with `dep.module("interval")`. `createModule`
     // would only produce a private one that no external build can name.
+    //
+    // The root is `src/root.zig` because a module has exactly one root
+    // file, and that file's directory is the only tree reachable by
+    // relative import. Rooting the package at `src/interval.zig` would
+    // leave every sibling source file invisible to consumers; the root
+    // re-exports the whole surface instead.
     const interval = b.addModule("interval", .{
-        .root_source_file = b.path("src/interval.zig"),
+        .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
     const lib = b.addLibrary(.{ .name = "interval", .root_module = interval });
     b.installArtifact(lib);
+
+    // A file may belong to only one module per compilation, and the public
+    // `interval` module already contains every file that `src/root.zig`
+    // reaches by relative import. Registering `interval_ext.zig`, `vector.zig`
+    // or `lp.zig` a second time would be a hard "file exists in modules"
+    // error, so their tests import `interval` alone and use the re-exports.
+    //
+    // `rounding` is the one exception: its test never imports `interval`, so
+    // that compilation has no overlap and the module is safe to declare.
+    const rounding = b.createModule(.{
+        .root_source_file = b.path("src/rounding.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -34,17 +54,42 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    // A test rooted at tests/ cannot reach ../src/rounding.zig by path: it
-    // lands outside the module root, which is the directory of the root
-    // source file. The import table is the way in, as for interval above.
-    const rounding = b.createModule(.{
-        .root_source_file = b.path("src/rounding.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
     rounding_tests.root_module.addImport("rounding", rounding);
     const run_rounding_tests = b.addRunArtifact(rounding_tests);
     test_step.dependOn(&run_rounding_tests.step);
+
+    const ext_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/interval_ext_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    ext_tests.root_module.addImport("interval", interval);
+    const run_ext_tests = b.addRunArtifact(ext_tests);
+    test_step.dependOn(&run_ext_tests.step);
+
+    const vector_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/vector_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    vector_tests.root_module.addImport("interval", interval);
+    const run_vector_tests = b.addRunArtifact(vector_tests);
+    test_step.dependOn(&run_vector_tests.step);
+
+    const lp_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/lp_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    lp_tests.root_module.addImport("interval", interval);
+    const run_lp_tests = b.addRunArtifact(lp_tests);
+    test_step.dependOn(&run_lp_tests.step);
 
     // The fixture is a real external package: it declares this one as a
     // dependency and resolves `interval` through the module graph, which the
