@@ -169,4 +169,91 @@ pub fn build(b: *std.Build) void {
     });
     const docs_step = b.step("docs", "Generate documentation");
     docs_step.dependOn(&install_docs.step);
+
+    // Benchmarks: one executable per benchmark file, all three run by a
+    // single `bench` step.
+    //
+    // The mode is pinned to ReleaseFast rather than taken from
+    // `-Doptimize`. A figure from a Debug build of a numeric library
+    // whose every operation is wrapped in assertions is mostly a figure
+    // for the assertions and the register spills around them, and a
+    // benchmark whose numbers move when the flag moves cannot be
+    // compared with itself across a change to the library.
+    //
+    // The benchmarks therefore take a SECOND registration of
+    // `src/root.zig`, this one private and this one at ReleaseFast,
+    // because `addModule` fixes the mode at the moment the module is
+    // created and the public `interval` module belongs to a library
+    // built in whatever mode was asked for. Registering a file twice is
+    // the error the comment at the top of this file warns about, and it
+    // is not what is happening here: the constraint is one module per
+    // COMPILATION, and no step in this build compiles both. Each
+    // benchmark executable is its own compilation, containing its own
+    // root file, `bench/timing.zig`, and this one module.
+    const bench_interval = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+
+    // `bench/timing.zig` is reached by a relative import from each
+    // benchmark file and is NOT registered as a module of its own. A
+    // module's root directory is the directory of its root source file,
+    // and all three benchmark files live in `bench/`, so the same
+    // `@import("timing.zig")` resolves from each of them exactly as
+    // `@import("interval.zig")` resolves from `src/root.zig` to a
+    // sibling. Registering it separately would put one file in two
+    // modules of the same compilation, which is the hard error the
+    // comment above is about.
+    const bench_scalar = b.addExecutable(.{
+        .name = "bench-scalar",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    bench_scalar.root_module.addImport("interval", bench_interval);
+
+    const bench_vec = b.addExecutable(.{
+        .name = "bench-vec",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/bench_vec.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    bench_vec.root_module.addImport("interval", bench_interval);
+
+    const bench_lp = b.addExecutable(.{
+        .name = "bench-lp",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/bench_lp.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    bench_lp.root_module.addImport("interval", bench_interval);
+
+    // The step depends on RUNNING all three, not merely on building
+    // them: a benchmark nobody runs has measured nothing. Three
+    // `addRunArtifact` calls and three dependencies, rather than a
+    // system command per file, because a run step carries the
+    // dependency on the artifact it launches and a system command would
+    // have to be a second `zig run` that rebuilds the library to get
+    // there. The run steps are independent, so `zig build bench` runs
+    // the three in parallel.
+    //
+    // Nothing above depends on this step and nothing below does either:
+    // `install` does not build the benchmarks, and `test` does not run
+    // them. A number is not a gate, and a benchmark that took four
+    // seconds would make the test suite take four seconds longer for
+    // every consumer who runs it.
+    const run_bench_scalar = b.addRunArtifact(bench_scalar);
+    const run_bench_vec = b.addRunArtifact(bench_vec);
+    const run_bench_lp = b.addRunArtifact(bench_lp);
+    const bench_step = b.step("bench", "Run the scalar, vector and Fourier-Motzkin benchmarks");
+    bench_step.dependOn(&run_bench_scalar.step);
+    bench_step.dependOn(&run_bench_vec.step);
+    bench_step.dependOn(&run_bench_lp.step);
 }
