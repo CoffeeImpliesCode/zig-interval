@@ -204,7 +204,6 @@ fn VecBench(comptime n: usize) type {
     const pts = comptime makePointTable(n);
 
     return struct {
-
         pub fn add(ctx: *timing.Ctx, i: usize) void {
             keepVec(ctx, n, gen[i & case_mask].add(gen[(i + 1) & case_mask]));
         }
