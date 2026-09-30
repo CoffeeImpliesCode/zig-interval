@@ -1,0 +1,769 @@
+# Next work — defects, plan, features, optimisations, and what is not being done
+
+**Written for the session that picks this up cold.** Everything needed to act is
+below, and nothing below needs a conversation with anyone who wrote it.
+
+The one contract this library sells: over `f64`, **every operation returns a
+result guaranteed to contain the true mathematical answer.** Obtained by
+computing with IEEE round-to-nearest and widening each endpoint outward with
+`rounding.roundDown` on the lower side and `rounding.roundUp` on the upper side
+(`src/rounding.zig:156-185`). Soundness outranks every other consideration in
+this document, including every optimisation in section 4 and every feature in
+section 3.
+
+Seven read-only audits ran over the tree, and three of the four top findings
+were then reproduced by execution rather than argued from source. What follows
+consolidates them. Two more defects were found after them, by the soundness
+oracle rather than by an audit: **D17**, a hole in the one guarantee this
+library sells, and **D18**, the reading of an infinite endpoint, which is
+settled now and is item P8 in section 2. Line numbers were read on 2026-09-30;
+if one has drifted, read the file rather than trusting the citation, and
+correct this document in the same commit that touches the code.
+
+Severity here means:
+
+| Level | Meaning |
+| --- | --- |
+| **S1** | The contract is broken, or a caller is handed a recipe that breaks it. |
+| **S2** | Memory unsafety, or a public entry point that cannot be used safely. |
+| **S3** | A statement in the tree is false and misleads a reader about the guarantee. |
+| **S4** | Coverage or dead weight. Not a wrong answer today; the reason a wrong answer survived. |
+
+---
+
+## 1. Defects, ranked by severity
+
+Every row carries a state. **FIXED** means the repair is in the tree and the
+paragraph under the row says what it bought; **OPEN** means the next session owns
+it. The proof column records whether the behaviour was **executed** — the
+reproducer was run and produced the stated output — or established from
+**code**, which is decisive without running anything.
+
+### 1.1 S1 — the contract
+
+| id | sev | site | one-line statement | proof | state |
+| --- | --- | --- | --- | --- | --- |
+| **D1** | S1 | `src/interval.zig:91` | `div` had no counterpart to `cornerProduct` for `inf / inf`, so a quotient of infinite operands returned `[-nan, -nan]`, an interval that contains nothing. | execution | **FIXED** (P1) |
+| **D2** | S1 | `src/vector.zig:179-186` | `normDistance` accumulated `d * d` in `f64` and returned a bare `@sqrt` with no outward step, undershooting the true distance in 3 % of random 2-D cases. | execution | **FIXED** (P2) |
+| **D3** | S1 | `README.md:156-197` | The documented widening recipe for third-party arithmetic told callers to use `interval.prevDown` / `interval.nextUp`, which cut inward at the infinities. | code | **FIXED** (P3) |
+| **D4** | S1 | `src/lp.zig:916` | The general branch of `combinedColumn` let a cancelling pair of products fall through to the outward widening, so a coefficient whose exact value is zero was stored as a subnormal straddle instead of the structural zero. | execution | **FIXED** (P4) |
+| **D17** | S1 | `src/interval_ext.zig:167` | `tanh` reached 2.14 ULP out on the `std.math` primitive and `envelope` widened by two, so the returned enclosure **excluded** the true value. | execution, against an `f128` reference finer than `f64` | **FIXED** — the elementary step is three ULP |
+| **D18** | S1 | four sites in `src/interval.zig`, two more reported and withdrawn | An operation forms one endpoint from an infinite operand, the result saturates to `floatMax` or to `-inf`, and the saturated value is then used as if it were the endpoint the operand really stands for. | execution, and the oracle's own frontier report | **FIXED** (P8) — the reading is settled and the constructor canonicalises the two overflow rays |
+
+D1 through D4 came out of the audits. D17 and D18 were found afterwards by the
+soundness oracle itself — D17 by a reference finer than `f64`, D18 by a sweep of
+named infinite-endpoint shapes — which is the argument for reading the oracle
+before changing anything. The paragraphs below are the record of why the code
+looks the way it does, which is the only thing a later reader needs from a fixed
+defect.
+
+**D1 — `div` at infinite endpoints. FIXED (P1).** `mul` guards the `0 * inf` case
+with `cornerProduct` (`src/interval.zig:31-38`), which answers an IEEE-invalid
+corner with the sign-xor of the two operands and hands the reduction a real zero.
+`div` applied the same four-corner argument with no such guard: the only NaN
+source it excluded was the one the divisor check removed, and that check only
+excludes a divisor *containing* zero. Two infinities divided to a NaN with no
+zero anywhere, and the reduction reduced four NaNs to a NaN.
+
+```zig
+const inf = std.math.inf(f64);
+const q = Interval.init(inf, inf).div(Interval.init(inf, inf));
+// q.lo == -nan, q.hi == -nan
+// q.contains(1.0) == false, although 1.0 IS in the true image
+```
+
+The repair is `cornerQuotient` (`:91`), called from all four corners (`:707-710`),
+with a corner wider than a point settling the reduction on its own (`:713`). It
+buys the whole line for an indeterminate corner, which is the answer `div`
+already gave a zero divisor and the one its doc already promised. Three tests in
+`tests/interval_test.zig` hold it, among them `div: infinite operands on both
+sides give the whole line, not a NaN`. The test whose comment used to assert the
+opposite of the truth still passes, and now says the right thing: `0 / inf` is a
+defined zero, not an indeterminate, and is still exactly `[0, 0]`. The oracle
+reports `0 skipped precondition` for `div` and `recip` where it used to report
+2,040 and 2,163.
+
+**D2 — `normDistance` undershoots. FIXED (P2).** The body computed
+`squares += d * d` in `f64` and returned a bare `@sqrt`, round-to-nearest at the
+accumulation and at the root, so each step could land half a ULP the wrong way
+and the two errors added. Measured: 119,520 of 4,000,000 random 2-D cases came
+back an `f64` strictly below the true distance, each by exactly 1 ULP. It now
+widens every step with `roundUp` and nothing with `roundDown`, because a distance
+is nonnegative and has no lower end to round (`src/vector.zig:179-186`), with
+`squareBound` (`:133-150`) handling the underflow that the zero-if-and-only-if
+promise depends on. The exact-equality assertions in the existing `distance`
+tests became containment assertions against the `f128` reference, which is the
+point: a test that pins the round-to-nearest value of a function whose contract
+is a bound is pinning the wrong thing.
+
+**D3 — the README widening recipe. FIXED (P3).** The README told callers
+widening their own arithmetic to use `interval.prevDown` / `interval.nextUp`. The
+strict pair is the wrong tool for building a bound: `nextUp(-0.0)` returns
+`+0.0` and `prevDown(+0.0)` returns `-0.0`, so at the two signed zeros it hands
+back a *different number* from the one it was given rather than a value at or
+beyond it. Every endpoint inside `src/` uses the non-strict pair and never the
+strict one. The README now publishes `roundDown` / `roundUp` as the pair,
+demotes `nextUp` / `prevDown` to the strict neighbours they are, and says why in
+one paragraph: the non-strict pair is a bound by definition, the strict pair is
+a neighbour, and the two are bit-identical at the infinities and at every
+finite non-zero value.
+
+**A correction to the reasoning, kept because this kind of thing comes back.**
+An earlier draft justified the recipe by claiming the strict pair "answers
+`-inf` with `-floatMax`". That is false, and it is false of BOTH pairs:
+`nextUp(-inf)` and `roundUp(-inf)` are both `-floatMax`, and `prevDown(+inf)`
+and `roundDown(+inf)` are both `floatMax`. They differ only at the two signed
+zeros, which is D8's fact. The recipe was still wrong to publish and is still
+replaced; the reason was wrong, not the conclusion. `src/interval_ext.zig`
+carried the same false claim in its own comment and no longer does.
+
+**D4 — LP coefficient cancellation. FIXED (P4).** `combinedColumn`
+special-cased an operand that is the *structural* exact zero precisely because
+"letting the general form run on a structural zero would hand it to the outward
+widening, which turns [0, 0] into a subnormal straddle". The general branch had
+the same failure by another route: a cancelling pair of products arrived as two
+widened intervals, their difference was widened again, and a coefficient whose
+exact value is zero was stored as a straddling interval. The reproducer was a
+2-variable system whose derived x coefficient cancels, giving
+`bounds(0) == [-3002399751580332, 10.000000000000002]` where the true range is
+`[0, 10]`: a spurious lower bound of −3.0 × 10¹⁵, a stored coefficient
+contradicting the invariant the function's own doc comment asserts, and a
+cascade — `isExactZero` reads a straddle as a two-sided constraint, so later
+eliminations pair rows that share no variable at all.
+
+The fix decides the cancellation **on the operands in `f128`**, the only sound
+place to decide it: a product of two `f64` needs 106 significand bits, their
+difference at most 107, and `f128` carries 113. `cancelsExactly`
+(`src/lp.zig:916`) is the decision, and round 2 put a cheap `f64` pre-filter in
+front of it so that only pairs which already agree pay for `f128`. Two
+characterisation tests in `tests/lp_test.zig` hold it: a cancelling pair is
+stored as the structural zero, and a cancelled row that constrains nothing
+bounds nothing. The alternative — an operand-level pre-pass that recognises a
+cancelling pattern without `f128` — was never specified and is still not ready
+to implement; the measurement says the filtered version is affordable, so leave
+it there.
+
+**D17 — `tanh` returned an enclosure that excluded the true value. FIXED: the
+elementary step is three ULP.** `std.math.tanh` reaches 2.1385 ULP out, and a
+widening of two brings a bound back to the correctly rounded `f64` of the
+answer and no further. At `x = 0.23139395412799124` the true value is
+`0.227350673456281817160566003736656553566288365188421593478113`; the old `lo`,
+`0x3fcd19d3ad9bf171`, sits **above** it, and the new `lo`, `0x3fcd19d3ad9bf170`,
+below.
+
+The step is three for every elementary function, not three for `tanh` alone,
+because **the count is the auditable artefact**: one number, one place, one
+table to check a new primitive against. A per-function rule would be a second,
+narrower rule resting on the same samples, and one of those samples has just
+been shown wrong about a member of its own family. The measured margins are
+printed in `src/interval_ext.zig` with the argument bands they came from: `tanh`
+2.14, `sinh` 1.75, `log` 1.50, `log10` 1.37, `log2` 1.22, `cosh` 1.10, `exp` 0.87,
+`tan` 0.83, `log1p` 0.78, `sin` 0.77, `atan` 0.76, `cos` 0.74, `exp2` 0.50. Seven
+primitives the file calls are not in that table at all, and saying so is part of
+the claim.
+
+**The trap, stated here because it decides how any future test of an elementary
+function must be written: the nearest `f64` to that true value IS the bound the
+old code returned.** A reference rounded to `f64` compares the defect with
+itself and reports it sound, and will do so forever. A test needs a truth more
+precise than the type the bound is expressed in. An `f128` reference does
+suffice — `f128` resolution at 0.227 is 2⁻¹¹⁵ against a 3.8e-18 defect — but only
+if it does not cancel: `std.math.exp(f128)` inside the naive identity
+`(E-1)/(E+1)` cancels near zero and does not suffice. The full statement of the
+trap, the reference that works, and the three tests now holding this line are in
+`docs/tests-and-architecture-plan.md` §2, which owns them.
+
+**D18 — four operations are not enclosures at an infinity, and two more were
+reported wrongly. FIXED (P8).** `src/rounding.zig` states that a computed `+inf`
+stands for a real `R` above `floatMax`, and a computed `-inf` for a real below
+`-floatMax`. Under that reading an operation that forms one endpoint from an
+infinite operand must treat the saturated value as the endpoint the operand
+really stands for. Four of the six first reported here did not. The calls below
+are written as the constructor stood when the finding was made — `Interval.init(inf,
+inf)` is the overflow ray today, not the point it used to be — and they are kept
+as reported so the finding stays checkable against the tree it was made in.
+
+| op | call | answer | the real it leaves out |
+| --- | --- | --- | --- |
+| `add` | `Interval.init(inf, inf).add(Interval.init(-3, inf))` | `lo` AT `floatMax` | `R - 3`, and every real between it and `floatMax`. No `f64` lies in that gap — the ULP there is 2⁹⁷¹ — so nothing working in `f64` ever sees it, and the enclosure claim is about the reals |
+| `translate` | `Interval.init(inf, inf).translate(-3.0)` | `lo` at `floatMax` | a shift is an add, so the same `R - 3` |
+| `expand` | `Interval.init(inf, inf).expand(3.0)` | `lo` at `floatMax` | the margin comes off the low end, so `R - 3` is in the image. The precondition passes because the width of an unbounded interval is unbounded, so every finite margin does |
+| `recip` | `Interval.init(inf, inf).recip()` | a subnormal pair around 0 | `1/1e310` is an ordinary `f64` inside the operand's own ray. The corner `1/inf` is zero in IEEE and the underflow repair then widens that zero to a subnormal, when the true corner is the ray `(0, 1/floatMax]` |
+
+**Two of the six were wrong, and are withdrawn.** `sub`'s witness was
+`Interval.init(inf, inf).sub(Interval.init(-inf, -inf))`, on the ground that
+`R - S` can be zero. It cannot be: `R >= floatMax` and `S <= -floatMax` give
+`R - S >= 2*floatMax`, and the answer that witness recorded already enclosed
+that image. The real witness is the **same** ray against itself, whose image is
+the whole line — either end can outrun the other by any amount — and which
+aborted on the `inf - inf` corner instead of answering anything. `neg`'s witness
+said `Interval.init(inf, inf).neg()` answers `[-inf, -inf]` and leaves out
+everything below `-floatMax`. Under the canonical constructor `[+inf, +inf]` is
+not a point, so the input is the overflow ray and its reflection is the ordinary
+negative ray `[-inf, -floatMax]`, which is right; the finding only ever
+described a shape `init` no longer hands back. Withdrawing them is what the
+settled reading bought, not a retuning of the sweep.
+
+**The decision, taken.** An infinite endpoint is a **ray**, and an infinity the
+caller supplied is a **constructed** one rather than a computed one. `init`
+asserts the caller's ordering **first** and then maps two endpoint pairs:
+`(+inf, +inf)` to `[floatMax, +inf]` and `(-inf, -inf)` to `[-inf, -floatMax]`.
+Nothing else in the constructor moved, and a finite call is stored field for
+field. A **computed** infinity is untouched by this: `roundDown(+inf) = floatMax`
+and `roundUp(-inf) = -floatMax` remain the outward bounds of a finite real the
+format cannot hold.
+
+**Why the constructor change was enough, and it is not "widen at the
+frontier".** It is which arm of the widening helper the corner reaches. On a
+finite nonzero argument `roundDown` is `prevDown`, a full ULP outward, which is
+more than the half-ULP rounding error it has to absorb; on a computed `+inf` it
+is `+floatMax`, and that arm has no step left, because `+floatMax` is already the
+largest finite `f64`. A raw `+inf` reaching the arithmetic therefore spends the
+one arm that cannot help. Canonicalising the operand first puts the corner on
+the finite arm: `roundDown(floatMax + (-3.0))` computes `floatMax` and steps to
+`prevDown(floatMax) = floatMax - 2⁹⁷¹`, well below the true `floatMax - 3`. The
+same one-line `add` is then an enclosure with no branch in it, and `translate`
+inherits it for free because it is the same addition. The zero corner is exact
+and needs no step — `roundDown(0.0)` and `roundUp(0.0)` return `0.0` — which is
+why `translate` by `+inf` over `[-floatMax, floatMax]` answers `[0, +inf]`.
+
+The cost is observable and was accepted with it: `init(+inf, +inf)` no longer
+returns a point-shaped pair, so `neg`, `width`, `contains`, `eql`, `subsetOf`
+and any direct field read see the normalised values. Nothing else changed
+shape — two struct fields, no second normalising API, no extra allocation, no
+global whole-line widening, and no change to the finite path.
+
+**How they stand in the tree today.** The six `withheld` entries are gone. The
+frontier sweep **judges** all thirteen operations it walks — `add`, `sub`,
+`translate`, `expand`, `neg`, `recip`, `mul`, `div`, `abs`, `sqr`, `scale`,
+`hull`, `intersect` — by consumer-visible containment against a reference built
+from what an infinite endpoint stands for, and withholds none. The bit-pattern
+test that asserted a degenerate infinite box is a point rather than a ray was
+**deleted** rather than re-pinned: under this contract that shape is unreachable
+through `init`, and pinning it would pin the representation instead of the
+behaviour. What replaced it is containment plus canonical-input regression, and
+T2 in `docs/tests-and-architecture-plan.md` describes the sweep; the repair is
+P8 below. Per-operation tallies belong to a run rather than to this document and
+are not recorded here.
+
+### 1.2 S2 through S4
+
+| id | sev | site | statement | how it was established | state |
+| --- | --- | --- | --- | --- | --- |
+| **D5** | S2 | `src/vector.zig:774` | `mapResult` took a bare `anytype`; with `V = *Vec(n)` the `comptime V == DynVec` test was false, so it declared an uninitialised pointer and wrote through it. | execution: SIGSEGV in Debug and ReleaseFast | **FIXED** (P5) |
+| **D6** | S2 | `src/vector.zig:482-504` | `DynVec.deinit` was neither idempotent nor move-only: a second call freed an undefined slice, and a copy double-freed. | execution: SIGSEGV | **FIXED** (P5) |
+| **D7** | S2 | `src/vector.zig:774` | The `!@TypeOf(v)` return type carried `error.OutOfMemory` from a comptime-dead branch, so `mapResult` on a `Vec(2)` value failed to compile. | code; the caller-visible symptom is a compile error, not a crash | **FIXED** (P5) |
+| **D8** | S3 | `src/root.zig:95-115` | The `roundUp` / `roundDown` doc comments claimed they differ from `nextUp` / `prevDown` **at the infinities**. They are bit-identical there; the pairs differ only at the two signed zeros. | code | **FIXED** (P6) |
+| **D9** | S3 | `src/vector.zig:188-191`, `:362-369`, `:713-715` | `fromArray` documented that it is "the one way to place an inverted interval in a box", and both `isEmpty` comments claimed every component of every box obeys `lo <= hi`. Two comments on one type contradicted. | code | **FIXED** (P6) |
+| **D10** | S3 | `src/rounding.zig:109-110` | The `-0.0` guard in `nextUp` is justified as preventing a step "to the smallest negative subnormal, which is below -0.0". The general pattern step from `0x8000000000000000` does not produce that subnormal at all — it produces `+floatMax` — so the stated reason is not the reason the guard is there. The direction of the step is what changes at the zeros, and the comment one line up already says so. `prevDown`'s mirror comment at `:129-131` is wrong the same way. | code | **OPEN** |
+| **D11** | S3 | `README.md` | Drift, partly closed. **Closed:** the `prevDown`/`nextUp` recipe is gone everywhere, all four rounding helpers are documented, the benchmark build steps and the `iadd` ownership trap are in. **Open:** the README says the elementary functions widen by **two** ULP at `:69`, `:73`, `:81`, `:119` and `:123`, and the code now widens **three** (D17) — that is new drift created by the fix and it misstates the margin the package's central claim rests on; `:300` says `abs` returns "the interval itself" off zero, dropping the widening; `:295` says `sub` is "computed as `self + (-other)`" when the code crosses the pairing (`src/interval.zig:503-507`); and the remaining row numbers from the original audit have not been walked. | code, spot-verified line by line | **PART** (P7) |
+| **D12** | S3 | `build.zig:146-158` | The private cache directories for the nested fixture build were justified by a global-cache-lock deadlock that does not exist. `Cache.Manifest.hit` locks ONE manifest at a time and defaults to a shared lock. | code, and the flags dropped with the step measured unchanged | **FIXED** (P6): the flags are kept for containment, with the measured reason in their place |
+| **D13** | S4 | `tests/rounding_test.zig` | The file imported `nextUp`, `prevDown`, `piDown`, `piUp` and never bound `roundUp` or `roundDown` anywhere. The two functions the entire library widens with had no test at all. | code | **FIXED** (P6): ten tests, green in all four optimise modes, and mutation-checked — mutating the `-inf` arm of `roundUp` fails three of them, where it used to fail nothing in the tree |
+| **D14** | S4 | `src/vector.zig:53-60` | `errdefer out.deinit();` in `add`, `sub`, `mul`, `div` and `hull` was unreachable: the only statement between it and the return is a `map2` that returns `void`. | code | **FIXED** (P5): deleted, and the absence argued in the file header |
+| **D15** | S4 | `docs/performance-handover.md` | The source-layout table and the step-4 table described a tree that no longer existed. | code | **FIXED** |
+| **D16** | S4 | `tests/soundness_test.zig` | The oracle covered **8 of the 56** public operations with a containment check, and skipped 2,040 `div` cases and 2,163 `recip` cases as preconditions. | code, counted from the `Op` enum and the `apply` / `exact` switches | **FIXED** (F1): 35 covered, `0 skipped precondition` for both |
+
+Two things about D16 are worth keeping, because they are the reason D1 survived
+a 200-test suite and a `f128` oracle. First, the `div` and `recip` skips were
+half genuine non-applicability and half a coverage hole wearing a precondition's
+clothes: the library returns a documented contract value `[-inf, inf]` for a
+divisor that reaches zero, and a documented answer is a contract value to be
+checked, not a case the oracle may decline to judge. Both are now checked, from
+the sign of the two one-sided limits, and both report zero skips. Second, there
+was no containment oracle for any elementary function at all, which is how D17
+survived a tree that had already grown to 34 covered operations. Twenty-one
+elementary functions still have none; the ranking of that work is T4 in
+`docs/tests-and-architecture-plan.md`, and this document does not repeat it.
+
+---
+
+## 2. Implementation plan
+
+**Soundness fixes precede feature work, and P1 through P5 are done.** That
+ordering was not ceremonial: D1 and D2 were each a single missing outward step,
+and either one can be reintroduced by a later change that touches the same line
+and does not know why the step is there. What each bought is recorded, because a
+plan that lists finished work as pending is worse than no plan: the next
+session redoes it, or distrusts the rest of the document.
+
+Ordering inside the S1 block was severity, then blast radius, then risk. D1 and
+D2 were code defects on a shipped public path; D3 was a document that shipped
+the wrong recipe to every third-party caller; D4 was confined to the solver.
+
+**P8 is resolved, and it was the last open soundness item.** It came before
+anything in section 3, and it was not a wider version of D17: D17 was one
+function widening by one step too few, and P8 was a question about what an
+infinity *means*. What is still open in this document is documentation, not
+soundness: D10 and the remainder of D11 under P6 and P7 below.
+
+### P1 — DONE: `div` at infinite endpoints (D1)
+
+`cornerQuotient` sits beside `cornerProduct` (`src/interval.zig:91`) and is
+called from all four corners of `div` (`:707-710`); a corner wider than a point
+settles the reduction on its own (`:713`). **What it bought:** an indeterminate
+corner now answers the whole line, which is sound, matches the answer `div`
+already gave a zero divisor, and is the only enclosure a caller can act on. The
+narrow alternative — `[0, inf]` for the same-sign case, by sign-analysing the
+operands — was not needed; the frontier sweep judges `div` at thirteen shapes
+with the wide answer in place, and `0 / inf` is still exactly `[0, 0]` because
+IEEE defines it and the guard must not catch it.
+
+### P2 — DONE: `normDistance` (D2)
+
+`src/vector.zig:179-186` widens each step with `roundUp` and none with
+`roundDown`; `squareBound` (`:133-150`) carries the underflow, and the
+length-mismatch path still returns `+inf`, which is the value the
+zero-if-and-only-if promise rests on. **What it bought:** a distance is a bound
+rather than a rounding of one, on the same rule `add`, `abs` and `sqr` already
+state. No wider type entered the file, so its arithmetic stays uniform. The
+4,000,000-case containment check against the `f128` reference is in
+`tests/vector_test.zig`, and the exact-equality assertions it replaced were
+wrong to exist — a test that pins the round-to-nearest value of a function whose
+contract is a bound pins the wrong thing.
+
+### P3 — DONE: the README widening recipe (D3)
+
+`README.md:156-197` publishes `roundDown` / `roundUp` as the pair for callers
+widening their own arithmetic and demotes `nextUp` / `prevDown` to the strict
+neighbours they are, with one paragraph saying why. **What it bought:** the
+README stopped contradicting `src/`, and the acceptance is one grep —
+`interval.prevDown` / `interval.nextUp` appear in it nowhere.
+
+### P4 — DONE: `combinedColumn` cancellation (D4)
+
+`cancelsExactly` (`src/lp.zig:916`) decides the cancellation on the operands in
+`f128`, the only sound place to decide it: a **product** of two `f64` needs 106
+significand bits and `f128` carries 113, so each product is exact, and the
+verdict is an **equality between two such products** rather than a subtraction of
+them — so no sum is ever formed. That distinction is the whole repair, because an
+arbitrary sum of two `f64` is *not* exact in `f128` however wide `f128` is, and
+round 2 put a cheap `f64` pre-filter in front so that only pairs which already
+agree pay for the `f128`.
+**What it bought:** a coefficient whose exact value is zero is stored as the
+structural zero, so `isExactZero` stops reading a straddle as a two-sided
+constraint and later eliminations stop pairing rows that share no variable. Two
+characterisation tests in `tests/lp_test.zig` hold it, and the `bench-lp`
+geometry report stayed byte-identical through both changes. The operand-level
+pre-pass that would avoid `f128` entirely was never specified and is still not
+ready to implement; the measurement says the filtered version is affordable, so
+leave it there.
+
+### P5 — DONE: `mapResult` and `DynVec` ownership (D5, D6, D7, D14)
+
+`mapResult` (`src/vector.zig:774`) rejects a pointer argument at comptime with a
+message naming the fault, and its error union no longer carries
+`error.OutOfMemory` for a `Vec(n)`. `DynVec` records the address its constructor
+allocated (`own`, `:446`) and `deinit` (`:482-504`) compares `comps.ptr` against
+it under `std.debug.runtime_safety` — so ReleaseFast and ReleaseSmall elide it —
+with a message that names the mistake rather than the symptom. The slice is
+swapped for an empty one before the free, and that empty slice keeps the
+address, which is why a second `deinit` passes the check and frees nothing.
+The five unreachable `errdefer`s are gone, and the file header now argues why
+there is no `errdefer` after an `allocLike`.
+
+**What it bought:** a caller can no longer make the library free memory it never
+allocated, and `deinit` is idempotent. **What it did not buy:** the check
+constrains REPLACEMENT, not duplication. A copy holds the same `comps.ptr` and
+the same `own`, so both copies pass and the double free stands. The type's
+comment says so rather than pretending otherwise.
+
+### P6 — MOSTLY DONE: the documentation and dead-code sweep (D8 through D14)
+
+**Landed.** D8: the `root.zig` comments now say the pairs differ at the two
+signed zeros and agree at the infinities, matching `src/rounding.zig` and
+`src/interval_ext.zig`. D9: `fromArray` is named as the one door an inverted
+interval comes through, in all three places that talk about it, and `isEmpty`
+agrees with it. D12: the private fixture caches are kept with the measured
+reason in place of a deadlock that does not exist. D13: `roundUp` and `roundDown`
+have **ten** direct tests in `tests/rounding_test.zig`, and the acceptance held
+— mutating the `-inf` arm of `roundUp` now fails three of them, where before it
+failed nothing anywhere in the tree.
+
+**Still open: D10**, one wrong reason in two comments. The `-0.0` guard in
+`nextUp` (`src/rounding.zig:109-110`) is justified as preventing a step "to the
+smallest negative subnormal, which is below -0.0". The general pattern step
+from `0x8000000000000000` does not produce that subnormal at all — the sign bit
+is set, so the step is a subtraction, and the result is `+floatMax`. The guard
+is right; the reason is not the reason. `prevDown`'s mirror comment at
+`:129-131` is wrong the same way. **Acceptance:** both comments name the change
+of direction at the zeros, which is the fact they should have stood on all
+along. No test is affected.
+
+### P7 — PART: README drift and the handover (D11, D15)
+
+**Landed.** The strict-pair recipe is gone from every part of the README
+including `:55-56` and `:424-426`; all four rounding helpers are documented; the
+benchmark build steps are listed; the `iadd` ownership trap has its own section;
+and the two worked examples that could not run both run now — the
+Fourier–Motzkin example, which passed an inverted interval to `Interval.init`
+and panicked before printing a line, and the build-wiring snippet, which omitted
+`target` and panicked inside the dependent's own build script. The handover's
+source-layout table and step-4 verdicts have been refreshed against the tree.
+
+**Still open.** The README says the elementary functions widen by **two** ULP at
+`:69`, `:73`, `:81`, `:119` and `:123`, and they now widen **three**. That is new
+drift created by D17's fix, it misstates the margin the package's central claim
+rests on, and it is the first thing to correct. Then `abs` off zero (`:300`,
+"the interval itself", dropping the widening), `sub`'s pairing (`:295`, still
+saying "computed as `self + (-other)`" when the code crosses the pairing because
+crossing is the whole point), the new `own` field on `DynVec` and the `deinit`
+trap, which the vector API section does not mention at all, and the rest of the
+original audit's line list, which has not been walked. **Acceptance:** `zig build
+docs` green and a diff in which every changed claim is traceable to a line in
+`src/`.
+
+### P8 — DONE: the reading of an infinite endpoint, and the rays that honour it (D18)
+
+**Done.** The reading is settled and the repair is in the tree. Section 1.1
+states the decision and why one constructor change was enough; this section
+records what changed, so a later session does not re-derive it.
+
+**What changed.** `Interval.init` asserts the caller's ordering and then
+normalises two endpoint pairs, `(+inf, +inf)` to `[floatMax, +inf]` and
+`(-inf, -inf)` to `[-inf, -floatMax]`. Nothing else in the constructor moved,
+and `hull`, `hullOf`, `intersect` and `intersectionOf` take canonicality from
+their inputs rather than from a normaliser on the hot path. Non-canonical
+literals in the tree were migrated, except the ones that are deliberately poison
+or invalid-input probes.
+
+**`translate`** is `self.add(Interval.init(delta, delta))`, so an infinite delta
+is the canonical scalar overflow ray and contributes its two endpoints rather
+than being read as a number. Finite delta numerics are unchanged.
+
+**`expand`** gained the `-inf` arm. `+inf` needs none: it walks the low end to
+`-inf` and leaves the high one at `+inf`, so the general body already answers
+the whole line. `-inf` is a ray of margins rather than one margin, and it means
+every margin at or below `-floatMax`, so it asserts that the input is **actually
+unbounded**. Every bounded input stays invalid, `[-floatMax, floatMax]`
+included: the widest bounded box is no more valid there than `[0, 1]` is, and
+the ray is not quietly clipped to the single admissible `-floatMax`. The
+unbounded case is the union over the valid margins,
+`[roundDown(lo + floatMax), roundUp(hi - floatMax)]`, which never forms
+`inf - inf`.
+
+**`scale`** gained one branch, and it is the only production branch outside
+constructor and scalar handling. An unbounded input has no finite midpoint, so
+`|factor| == 1` is the identity and every other factor — including `0` and every
+`|factor| < 1` — answers the whole line, covering the finite-centre completions
+rather than fabricating a centre. Factor validation stays first, because
+`Interval.init` still catches a NaN factor. The bounded path and every finite
+numerical repair are unchanged; `[1, 3].scale(2)` is still the loose box it was.
+
+**The arithmetic operators** needed no new branch; the reason is which arm of
+`roundDown` the corner reaches, and it is in section 1.1. Same-ray subtraction
+and opposite-ray addition now answer the whole real line, which is their exact
+image. `mul`, `div`, `abs`, `sqr`, `hull` and `intersect` are untouched and stay
+as tight as they were.
+
+**Preserved on purpose.** The `cornerQuotient` subnormal repair, the directed
+rounding, the exact quotient checks and the QEMU child runners are all as they
+were. The two overflow guards in the oracle are the same argument at a
+different magnitude and were not undone.
+
+**The shortcut that was not taken.** Widening every saturated result to the
+whole line is sound and was rejected: it costs tightness on every call, and
+`mul`, `sqr`, `abs`, `hull` and `intersect` are sound at the frontier today and
+would stop being as tight for nothing. The rays are canonicalised once, at the
+constructor.
+
+**And the reading that was not adopted.** The point reading — `[inf, inf]` is
+the point `+inf` — is self-consistent, and under it all six original findings
+evaporate. It is not the contract, because `div` already answers `inf / inf`
+with the whole line and would be wrong by the whole line if the point reading
+were right. Recorded so a later session does not re-derive the choice.
+
+**Files.** `src/interval.zig` for the constructor, `translate`, `expand` and
+`scale`; `src/interval_ext.zig` for the ray readers; `src/vector.zig` for the
+`fromArray` input contract; `tests/interval_test.zig` for the regressions; and
+`tests/soundness_test.zig` for the frontier judging.
+
+**Acceptance. MET — four modes green, `withheld` empty.** The two changed
+constructor shapes are documented in the README, `scale`'s conservative whole
+line is documented rather than skipped, and `withheld` in
+`tests/soundness_test.zig` is empty. `zig build test` exits 0 in Debug,
+ReleaseSafe, ReleaseFast and ReleaseSmall, and the oracle reports `0 FAILED` on
+all 35 of its operations in each.
+
+**What the red frontier sweep turned out to be, which is the part worth
+keeping.** The paragraph this replaces traced every failing row to a defect in
+the ORACLE's own reference rather than in `src/`, and it was right about every
+one of them. It named four classes; there were five defects, because one class
+had two members.
+
+- **`reachesZero` was one-sided** — `c.lo_unbounded or c.lo <= 0.0`. A divisor
+  of `[-3, -1]` therefore "reached zero", and the reference demanded the whole
+  line from a `div` that had correctly answered `[-1, -1/3]`. Both ends decide
+  it: `c.lo <= 0 and c.hi >= 0`. This was `div` and `recip`.
+- **`productSet` collapsed a zero factor only when both ends were `.value`.**
+  A zero times a RAY fell through to `stretched(0.0, r)` and became an open
+  ray, so `[0,0] * [3, inf]` was judged against `[-inf, 0]` when its true
+  image is the single point `0`. The collapse is now `or`'d across the two
+  cases, which is what the comment two lines above the code already said. This
+  was `mul`.
+- **`frontierMagnitude` read an unbounded magnitude as spanning zero** — it
+  or'd in `a.lo_unbounded`, putting `0` under `abs([-inf, -3])`, whose true
+  image is `[3, +inf)`. The two-ends test alone is correct, because an
+  unbounded end carries the infinity it runs off to. This was `abs` and `sqr`.
+- **`frontierExpand` had the sign of the `-inf` ray inverted.** It built
+  `[lo - far, hi + far]`, which is what `expand` does for a POSITIVE margin. A
+  negative margin contracts, and the union over the ray `m <= -floatMax` is the
+  two ends pulled together by its last member. It judged
+  `expand([3, +inf), -inf)` against `[-floatMax, +inf]` when the answer is
+  `[3 + floatMax, +inf)`. This was `expand`.
+- **The `guard` row had been made vacuous by P8 itself.** It built its
+  deliberately non-canonical `[-inf, -inf]` through `Interval.init`, which now
+  canonicalises that pair to the overflow ray — so it was comparing the
+  saturating case with itself and expecting the two to differ. It is now a raw
+  struct literal, which the type's own doc calls the way to hold a
+  non-canonical interval.
+
+**And one blocker sat in front of all five, in no list at all: the test file
+did not compile.** `tests/soundness_test.zig` carried a `std.debug.print` with
+six format placeholders and five arguments — the missing one being the `tiny`
+of `floatMax/2 - tiny/2` — so the two `{s}` verdicts shifted into the `{e}`
+slots. Nothing in the tree had compiled since, and a `zig build test` here stops
+at that compile error before a single test runs, which is worth remembering:
+on a tree this size a red gate is not evidence about behaviour until it has
+been read past the compile.
+
+---
+
+## 3. Feature proposals, ranked by value against cost
+
+Separate from the defects above. Nothing here is a bug. P1 through P5 have
+landed, so F1 has been running while the rest of this section waited.
+
+### F1 — MOSTLY DONE: the oracle now reaches 35 of the 56 public operations
+
+**What it was.** Take `tests/soundness_test.zig` from 8 operations to as close to
+56 as the machinery honestly allows, in three tiers by how the reference is
+obtained. Tier one, the cheap exact answers: `abs` and `sqr` are exact `f128`
+images of the `f64` endpoints with no new machinery, because a product of two
+`f64` is exact in `f128`. Tier two, exact without `f128` at all: `hull` and
+`hullOf` are exact and need only the two distributive laws plus an equality
+against the min/max of the four endpoints; `intersect` and `intersectionOf` are
+exact and need the complement; `neg`, `midpoint`, `clamp`, `contains` and the
+six certain-comparisons are definitional or one line each. Tier three, the
+elementary functions, where the honest alternative was declared to be a
+*characterisation* oracle rather than containment, because Zig offers no
+correctly rounded `f128` `exp`, `log` or `sin` to compare against.
+
+**What it bought.** 35 operations are judged by containment where 8 were, and
+`div` / `recip` report `0 skipped precondition` where they reported 2,040 and
+2,163 — a divisor that merely REACHES zero is now checked from the sign of its
+two one-sided limits, because the library returns a documented answer there and
+a documented answer is a contract value to be checked, not a case to decline.
+Every oracle added was checked to bite before it was trusted: tightening `sqrt`
+by 3 ULP fails 1,739 of 7,314, tightening `cbrt` by 3 ULP fails 6,895 of 7,251,
+dropping the third element of `hullOf` fails 4,231. That is what separates a
+live oracle from a decorative one.
+
+**And the tier-three direction changed after this section was written.**
+`tanh` is already in, built from the exponential identity with the cancellation
+paid for, and catching D17 is what it was built for. **Twenty-one elementary
+functions still have no containment oracle**, and all twenty-one remain open
+until that work lands — none of them is implemented and none of them is
+exercised. The plan is not to hand-write more reference series in this tree: an
+`f128` series is a *second implementation* of the same function, and the audit
+needed to convince anyone it is right costs more than the coverage it buys. The
+plan is an **independently generated MPFR directed-rounding containment corpus**,
+against which this library's answers are checked by containment at the declared
+rounding direction. T4, T6 and T7 in
+`docs/tests-and-architecture-plan.md` carry it and are **open** until that spec
+and its evidence land; the shape table there is kept as the fallback analysis,
+not as the plan.
+
+### F2 — DONE: `asin`, `acos` and `atanh` clip to their domains instead of refusing
+
+**Done.** The refusal is gone and `null` now means the one thing the package
+prose says it means. The clipping is `@max(x.lo, -1)` / `@min(x.hi, 1)` for the
+two closed domains and the same pair for the open one, and emptiness is a clip
+that reaches no further than the endpoint from inside it.
+
+**What it bought.** `asin(Interval.init(-4, 0.5))` answers `[-pi/2, asin(0.5)]`
+and `atanh(Interval.init(-2, -0.5))` answers `[-inf, atanh(-0.5)]`, where both
+answered nothing and both had a sound answer. A caller doing global
+reachability no longer splits the domain by hand at every call site, and the
+library's identity — it bounds rather than refuses — now holds for every
+function in `ext` without an exception to remember.
+
+**The one place the answer is NOT the closed-domain rule, and why.** `atanh`'s
+domain is OPEN, so an argument whose only overlap with it is the endpoint
+itself — `atanh([1, 2])` — has an empty true image and stays `null`. A closed
+clip would have accepted it and answered `[floatMax, +inf]`, which is a bound of
+nothing wearing an interval's clothes. The emptiness test is therefore
+two-sided (`hi <= -1 or lo >= 1`) and not `lo <= hi`. That is the whole of the
+distinction between `atanh` and its two closed-domain siblings.
+
+**What it did not change.** `mapResult`'s null still means "some component's
+true image is empty" and never "some component reached a boundary"; a test over
+a `Vec(3)` with two clipping components and one empty one pins it, because
+clipping is exactly the change that could have merged those two answers.
+`powf` is untouched and is the one function that still refuses a partly invalid
+argument, because a negative base to a general real exponent has no real value
+at any part of the argument and there is nothing to clip to. `acosh` already
+clipped.
+
+**What it is.** `src/interval_ext.zig:489` returns `null` unless the whole
+interval lies inside `[-1, 1]`; `:497` does the same for `acos`; `:576` refuses
+anything reaching `±1`. Clip instead: intersect the argument with the domain,
+evaluate the monotone function at the clipped ends, and let the pole produce an
+infinite endpoint. `atanh([-2, -0.5])` becomes `[-inf, atanh(-0.5)]` instead of
+of `null`. Under the proposal `null` would then mean what the package prose says
+of `src/root.zig` — the true image empty in the reals — which happens only when
+the whole interval is outside the domain, as `asin([2, 4])` already does. It is
+not what those three functions mean **today**: as they stand, `null` there also
+covers a partly valid argument, which is precisely the case this proposal
+removes. That asymmetry is the finding, and it is the same asymmetry
+`sqrt`, `log*` and `acosh` do not have, because those clip a partial violation
+and refuse only a wholly invalid one.
+
+**Why it matters to a user.** Today a caller doing global reachability gets no
+answer where a sound one exists, and the only workaround is to split the domain
+by hand at every call site. The change costs a caller nothing and saves them
+that. It is also the difference between a library that refuses and one that
+bounds, which is the identity this library is selling.
+
+**What it risks.** The `mapResult` null contract in `src/vector.zig`, which
+folds a scalar `?Interval` over a box and reports null as soon as one component
+leaves the domain. Clipping does not change that contract, but a reviewer must
+check it has not: the `null` from `mapResult` must still mean "some component's
+true image is empty", never "some component reached a boundary". `acosh`
+(`src/interval_ext.zig:568`) has the same shape and should be considered
+together.
+
+**Acceptance.** New tests in `tests/interval_ext_test.zig` asserting
+`atanh(Interval.init(-2.0, -0.5))` is non-null with `.lo == -inf` and
+`.hi <= atanh(-0.5)`, that `asin(Interval.init(-4.0, 0.5))` and
+`acos(Interval.init(0.5, 4.0))` are non-null with the unclipped end at
+±pi/2 widened, and that `asin(Interval.init(2.0, 4.0))`,
+`acos(Interval.init(2.0, 4.0))` and `atanh(Interval.init(1.0, 2.0))` still
+return `null`. A `mapResult` test over a `Vec(3)` with one component outside the
+domain must still return `null` while the other two would clip, proving the two
+answers were not merged. README rows `README.md:297`, `:298` and `:306` updated
+in the same commit.
+
+### F3 — DONE: `roundUp` / `roundDown` documented as the widening pair
+
+The README half landed as P3 and the source-side half with it: `src/root.zig`
+carries correct comments on both, and the README names both pairs in its API
+table alongside `piDown` and `piUp`, with a paragraph on why the non-strict pair
+is the one a bound needs. Nothing is left here, and it is not to be reopened as a
+separate decision — the acceptance is P3's, one grep.
+
+---
+
+## 4. Optimisation backlog for the next round
+
+Drawn from the step-4 ranking in `docs/performance-handover.md`, with the
+verdicts that ranking already reached and the figures it ended on. One caveat,
+restated because it governs every number here: **cheap operations move by up to
+44 % between two runs of the same binary on this shared host, so nothing under
+about 10 ns/op is claimable from a single pair of runs.** Take the measurement
+on an idle machine, or take three runs and compare minima. And do not re-derive
+a figure that file already holds: cite it, with its date and its mode.
+
+**O1 — `scale` at 47.795 ns/op, six widening steps per endpoint.**
+`src/interval.zig`. Verdict: **NO, not without a proof.** Its doc comment is the
+reason and it is correct: a bound has to bound the whole chain, and the error of
+a chain is not the error of its last step. A direct formulation needs one step
+per endpoint, and nothing establishes that one step covers the chain of roundings
+the present composition encloses. It remains the single largest scalar win
+available — 3.1x `div`, 5.0x `mul`, 9.5x `add` at the round-2 capture — and it
+is blocked on an argument rather than on work. The prerequisite is a written
+enclosure for the fused form, checked against the `f128` oracle over the
+existing `scale` fuzz. Until that enclosure exists, any change here is a guess
+with a 48 ns/op prize attached. The step count did not change in round 2; what
+changed was the price of a step, which is why the figure moved at all.
+
+**O2 — `box` re-deriving all `m` projections from scratch.** `box` in
+`src/lp.zig` calls `bounds(k)` for every `k`, and each call clones and
+eliminates, so the cost is `m` clones and `m * m` eliminations. Verdict: **YES,
+the soundness argument permits it.** Every elimination step is a sound
+over-approximation, so a projection computed from a shared prefix is at least as
+valid as one computed from a private copy; the only question is tightness, since
+the Tupper order is a row-count heuristic and sharing it fixes one order for all
+`m` projections. The `f128` oracle plus the existing lp characterisation tests
+decide it. Acceptance: `box` returns bit-identical or **wider** output against
+the current implementation on a fixed generated corpus, the `bench-lp` geometry
+report stays byte-identical, and the `bounds`-calling rows — 75,219 ns and
+152,932 ns at the round-2 capture — are far enough above the noise floor to be
+measured on a single pair of runs.
+
+**O3 — DONE: the `undersized` side channel in `mul` and `div`.** The flag was
+computed eagerly per corner, four byte stores and three unconditional reloads in
+`mul` and four dead stores in `div`, and the reloads sat above the `v == 0.0`
+guard, carrying an answer that is dead unless the reduced extremum is exactly
+zero. It is gone: the operands are read at the one moment they are needed, by
+`Corners.undersizedAt`. The flag's *meaning* did not change, only *when* it is
+computed, and the widening step count is unchanged. **Claimed: `mul` 11.062 →
+9.639 ns/op, −13 %**, which clears the noise band. The corner tests and the
+underflow reproducers in the oracle are unchanged. This was a tidy-up that turned
+out to be measurable, and it is the only item in this section that has landed.
+
+**O4 — `powf` at 272.5 ns/op, seven interval operations composed.**
+`powerCorner` (`src/interval_ext.zig:351`) and the identity above it. Verdict:
+**NO. Clearly no, and this is settled.** The composition *is* the guarantee:
+`log` widens three ULP, `mul` widens one, `exp` widens three, and the image of a
+rising function over an enclosure is the enclosure of its two ends. Replacing it
+with `std.math.pow` reintroduces the error that grows with the exponent —
+measured at 1.52 ULP on an ordinary exponent, and `1.0000000001^1e8` came back
+as 1.01005016788679320 against a true 1.0100501679193823. The handover reached
+the same verdict at rank 5: "do not change ... deliberately traded for
+soundness. Quantified, as asked; not a defect." Do not reopen it.
+
+---
+
+## 5. Not doing
+
+Listed so a later session does not relitigate any of it.
+
+**The straddling duplication in `eliminate` stays.** The `.straddle` arm of the
+bucketing switch in `src/lp.zig` pushes a coefficient interval that straddles
+zero into **both** sign buckets, because dropping it would discard a real
+constraint and cut the feasible set, "which is the one thing this library must
+never do". The duplication is the guarantee, not waste. The cost is row
+explosion, documented and measured in `docs/performance-handover.md`, and the
+mitigation is the 20,000-row budget in the benchmark harness, not a change to the
+solver. The `f128` cancellation fix in P4 is compatible with this: it removes
+coefficients that are *exactly* zero, which is a different thing from a
+coefficient whose interval contains zero.
+
+**Stopping after `n - 1` variables stays out.** A textbook Fourier–Motzkin loop
+stops with one variable live, because the last round produces the contradiction
+test. Here `eliminationOrder` is contractually a full permutation and the final
+row count is pinned by tests, so removing the round changes observable behaviour
+and makes it a different function — the finding is recorded at
+`docs/performance-handover.md:375-381` and the tests are the reason it is
+closed.
+
+**`powf`'s composition stays.** See O4. The composition is the proof; the
+measured 272.5 ns/op is the price and was accepted knowingly.
+
+**The `log2` / `log10` subnormal claim stays withdrawn.** An audit filed it, and
+it was checked and not reproduced: the library contains the truth on the
+smallest subnormal and at the range boundary in every case tried. The apparent
+misses were an `f64`-computed reference compared against the library's widening
+— the same reference mistake that would recreate D2 inside the oracle, and the
+same one that made D17 look sound. It is not in section 1 and must not be added
+to a later audit's list without a reference finer than `f64`.
+
+**The `0 * inf` guard in `mul` stays, and is not "redundant".**
+`src/interval.zig:31-38` answers a corner IEEE declares invalid with the sign
+xor of the two operands, which is the only way the four-corner reduction can
+survive it. `div` has its counterpart now (`cornerQuotient`, P1); neither guard
+is a reason to touch the other.
+
+**The two overflow guards in the oracle are guards, not reproducers.** They are
+not defect reproducers and must not be deleted as obsolete. They exist because
+the natural "fix" to each is unsound, and each says so in its own comment. They
+are the standing record of why an overflowed corner's bound is pulled back
+inside rather than read as an infinity. P8 settled that same argument at a
+different magnitude by canonicalising the rays in the constructor; the guards
+stay exactly as they are.
+
+**`bench-lp` sizes must not be restored to their old values.** The measurements
+that never terminated were resized to fit the row budget, with the achieved
+counts recorded in the file's own header so the next reader does not "restore"
+the values that used to hang. The `ulimit -v` recipe from an even earlier draft
+is wrong and was removed; do not reintroduce it.

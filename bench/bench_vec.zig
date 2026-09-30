@@ -18,21 +18,44 @@
 //! Second, `DynVec` should lose by roughly the cost of the fold plus the
 //! cost of an allocator round trip. The value-returning operations
 //! allocate on every call, so a loop of `dv = dv.add(other)` pays that per
-//! step, while a loop of `dv.iadd(other)` pays it once. That difference is
-//! the most actionable thing a user of this library can be told, and it
-//! cannot be reported without measuring both forms. It is measured here for
-//! `add`, `sub`, `mul`, `div`, `hull` and `intersect`, and the in-place
+//! step, while a loop of `dv.iadd(other)` pays it once. The value form is
+//! measured for every operation that has one — `add`, `sub`, `mul`, `div`,
+//! `hull`, `intersect` and both `mapResult sqrt` cases — and the in-place
 //! numbers are reported net of the re-seed copy so the comparison is
 //! fold-against-allocator rather than memcpy-against-allocator.
 //!
-//! Allocators: the hot path uses `std.heap.smp_allocator`, the general
-//! purpose allocator a caller reaches for by default, because a
-//! `DebugAllocator` would make an allocation benchmark measure the
-//! `DebugAllocator` — its own bookkeeping, its own leak-detection state —
-//! rather than the library. That claim is not taken on faith: the last
-//! section times a bare `alloc`/`free` round trip under both allocators at
-//! two sizes, so the reader can see how much of a `DynVec` figure is the
-//! allocator and how much is the library.
+//! That penalty is an allocator round trip and nothing else, so its size
+//! is the allocator the caller supplies rather than a property of this
+//! library, and quoting one allocator's figure as "the" cost of a
+//! `DynVec` is simply wrong. Every value-returning body is therefore
+//! measured TWICE, on two environments built side by side for each
+//! dimension: one on `smp_allocator`, the general purpose allocator a
+//! caller reaches for by default, and one on a `DebugAllocator`. The rows
+//! are named `...value.smp` and `...value.dbg` and every table below
+//! prints both, because a cross-over quoted against only one of them is a
+//! measurement of the allocator.
+//!
+//! Allocators: the hot path uses `std.heap.smp_allocator`, because a
+//! `DebugAllocator` turns an allocation benchmark into a measurement of
+//! the `DebugAllocator` — its own bookkeeping, its own leak-detection
+//! state — rather than of the library. That claim is checked rather than
+//! asserted: the last section times a bare `alloc`/`free` round trip under
+//! both allocators at every box size measured here, and prints what share
+//! of a value-returning call that round trip accounts for.
+//!
+//! What the two come to, measured on this machine in ReleaseFast over
+//! several runs: the round trip runs at 17 to 29 ns under `smp_allocator`
+//! and 5,400 to 10,100 ns under the `DebugAllocator`, a factor of roughly
+//! 240 to 500. The figures move by half between runs on a loaded host, so
+//! read the last two tables of the output rather than this paragraph for
+//! anything load-bearing.
+//!
+//! The consequence is the whole point of measuring twice, and it is large.
+//! Against `Vec(4).add`, `add` measures 0.5 to 1.1x in place, 1.2 to 2.1x
+//! value-returning on `smp_allocator`, and 230 to 460x value-returning on
+//! the `DebugAllocator`. Every one of those is a true measurement of
+//! something, they are not the same claim, and the earlier version of this
+//! file printed only the last while calling it the cost of the library.
 //!
 //! Inputs vary with the iteration index over a table of `kCases` distinct
 //! boxes, so no single cached case is measured a hundred thousand times.
@@ -267,9 +290,12 @@ fn VecBench(comptime n: usize) type {
         }
 
         /// `mapResult` over `Vec(n)`: a stack array, no allocation, and a
-        /// domain failure is a null with nothing to free.
+        /// domain failure is a null with nothing to free. The `Vec(n)`
+        /// instantiation cannot fail, so it returns a plain optional and
+        /// there is no error union to unwrap here — only the `DynVec` arms
+        /// below carry `catch unreachable`.
         pub fn mapResult_sqrt(ctx: *timing.Ctx, i: usize) void {
-            if (interval.mapResult(pos[i & case_mask], interval.sqrt) catch unreachable) |r| {
+            if (interval.mapResult(pos[i & case_mask], interval.sqrt)) |r| {
                 keepVec(ctx, n, r);
             } else {
                 ctx.keep(0);
@@ -279,7 +305,7 @@ fn VecBench(comptime n: usize) type {
         pub fn mapResult_sqrt_out_of_domain(ctx: *timing.Ctx, i: usize) void {
             // `gen` straddles zero, so `sqrt` fails on it. The fold stops
             // at the first component.
-            if (interval.mapResult(gen[i & case_mask], interval.sqrt) catch unreachable) |r| {
+            if (interval.mapResult(gen[i & case_mask], interval.sqrt)) |r| {
                 keepVec(ctx, n, r);
             } else {
                 ctx.keep(-1);
@@ -291,10 +317,11 @@ fn VecBench(comptime n: usize) type {
 // ---------------------------------------------------------------------------
 // DynVec bodies.
 //
-// The tables are on the heap, built once in `setup`, and reached through a
-// file-scope array indexed by dimension. A benchmark body is a plain
-// `fn (ctx, i) void` with nowhere to hang a context, so the state it needs
-// has to live somewhere the function can name.
+// The tables are on the heap, built once in `setupEnv`, and reached through
+// a file-scope array indexed by allocator and then by dimension. A
+// benchmark body is a plain `fn (ctx, i) void` with nowhere to hang a
+// context, so the state it needs has to live somewhere the function can
+// name.
 //
 // The in-place bodies re-seed their destination from the table each step.
 // Without that the box would be transformed over and over across the
@@ -304,6 +331,13 @@ fn VecBench(comptime n: usize) type {
 // that copy with no operation on top of it, so the in-place figure can be
 // read net of it.
 // ---------------------------------------------------------------------------
+
+/// Which allocator a `DynVec` environment is built on. The value-returning
+/// bodies allocate through `env.gpa` and nothing else in them touches the
+/// heap, so the same source line measured under the two allocators differs
+/// by exactly the round trip. That difference is the whole measurement, so
+/// it is never left to one allocator.
+const Alloc = enum { smp, dbg };
 
 const DynEnv = struct {
     gpa: std.mem.Allocator,
@@ -315,13 +349,19 @@ const DynEnv = struct {
     work: DynVec, // scratch of width n for the in-place bodies
 };
 
-var dyn_envs: [dims.len]DynEnv = undefined;
+/// Indexed by allocator first, then by dimension, so the two runs of every
+/// dimension sit side by side and share no state.
+var dyn_envs: [2][dims.len]DynEnv = undefined;
 
 fn dimSlot(comptime n: usize) usize {
     inline for (dims, 0..) |d, idx| {
         if (d.n == n) return idx;
     }
     @compileError("no DynVec environment for this dimension");
+}
+
+fn envOf(comptime a: Alloc, comptime n: usize) *DynEnv {
+    return &dyn_envs[@intFromEnum(a)][dimSlot(n)];
 }
 
 fn setupEnv(env: *DynEnv, gpa: std.mem.Allocator, comptime n: usize) !void {
@@ -366,8 +406,14 @@ fn teardownEnv(env: *DynEnv) void {
     env.gpa.free(env.pts);
 }
 
-fn DynBench(comptime n: usize) type {
-    const env = &dyn_envs[dimSlot(n)];
+/// Bodies for one dimension under one allocator. The value-returning
+/// bodies allocate through `env.gpa`, so the identical source measured
+/// under `.smp` and under `.dbg` differs by precisely the round trip and
+/// by nothing else. The in-place and no-allocation bodies never reach the
+/// allocator, so they are measured once, from the `.smp` environment, and
+/// a second run of them would be the same number twice.
+fn DynBench(comptime n: usize, comptime a: Alloc) type {
+    const env = envOf(a, n);
 
     return struct {
         const Self = @This();
@@ -377,6 +423,10 @@ fn DynBench(comptime n: usize) type {
         }
 
         // -- value-returning: one allocation and one free per call -------
+        //
+        // Every body below this line is measured twice, once per
+        // allocator, because every one of them calls `allocLike` (or
+        // `mapResult`, which calls it) before the fold and frees after.
 
         pub fn add_value(ctx: *timing.Ctx, i: usize) void {
             const c = i & case_mask;
@@ -539,18 +589,38 @@ fn DynBench(comptime n: usize) type {
 //
 // The gap between a value-returning `DynVec` call and an in-place one is an
 // allocator round trip plus a little. This measures the round trip
-// directly, under the allocator the hot path uses and under a
-// `DebugAllocator`, so the share of the `DynVec` figures that belongs to
-// the allocator rather than to the library is visible rather than assumed.
+// directly, at every box size the `DynVec` sections use, under the
+// allocator the hot path uses and under a `DebugAllocator`, so the share of
+// the `DynVec` figures that belongs to the allocator rather than to the
+// library is visible rather than assumed.
+//
+// Every size, not just two of them. A round trip's cost depends on the
+// request size, and a share computed against the wrong size would be a
+// fabrication, so each dimension's own byte count is measured rather than
+// interpolated from a neighbour.
 // ---------------------------------------------------------------------------
 
 var smp_alloc: std.mem.Allocator = undefined;
 var dbg_alloc_storage: std.heap.DebugAllocator(.{}) = undefined;
 
-/// 4 components, the size of the smallest interesting box.
-const small_bytes = 4 * @sizeOf(Interval);
-/// 32 components, the largest measured.
-const large_bytes = 32 * @sizeOf(Interval);
+/// The bytes a `DynVec` of width n asks its allocator for, which is the
+/// same request `DynVec.allocLike` makes on every value-returning call.
+fn boxBytes(comptime n: usize) usize {
+    return n * @sizeOf(Interval);
+}
+
+/// Row name for a round trip at one dimension under one allocator.
+fn allocName(comptime s: []const u8, comptime suffix: []const u8) []const u8 {
+    return std.fmt.comptimePrint("alloc.{s}comp.{s}", .{ s, suffix });
+}
+
+/// Human label for the same row: the width and the request size. The size
+/// is written out as an expression rather than as a call to `boxBytes`,
+/// because Zig 0.16 cannot resolve the length of a `comptimePrint` whose
+/// argument tuple holds a function call.
+fn allocLabel(comptime n: usize) []const u8 {
+    return std.fmt.comptimePrint("{d} components ({d} B)", .{ n, n * @sizeOf(Interval) });
+}
 
 fn AllocBench(comptime bytes: usize) type {
     return struct {
@@ -560,15 +630,24 @@ fn AllocBench(comptime bytes: usize) type {
             // The touch is one byte: the point is the allocator, and a
             // first-touch page fault would be an mmap measurement.
             p[0] = @truncate(i);
-            smp_alloc.free(p);
+            // Read the byte back BEFORE the free. This used to free first
+            // and then read `p[0]` into the sink, which is a use-after-free:
+            // the smp allocator happened to leave the byte intact so the
+            // figures looked plausible, while the DebugAllocator poisons
+            // freed memory and the row died with SIGSEGV. The sink was also
+            // reading whatever the allocator left behind, so both rows
+            // reported `checksum 0` for work that had plainly happened.
+            // The value is what keeps the work observable; it has to be
+            // taken while the allocation is still alive.
             ctx.keep(p[0]);
+            smp_alloc.free(p);
         }
 
         pub fn debug(ctx: *timing.Ctx, i: usize) void {
             const p = dbg_alloc_storage.allocator().alloc(u8, bytes) catch unreachable;
             p[0] = @truncate(i);
-            dbg_alloc_storage.allocator().free(p);
             ctx.keep(p[0]);
+            dbg_alloc_storage.allocator().free(p);
         }
     };
 }
@@ -586,10 +665,21 @@ pub fn main() !void {
     var runner = try timing.Runner.init(gpa.allocator());
     defer runner.deinit();
 
+    // Two environments per dimension, one per allocator, on the same
+    // inputs, so a value-returning figure under one can be set against the
+    // same figure under the other. The `defer` for the teardown is
+    // registered after the `dyn_gpa` teardown and so runs before it, which
+    // is what keeps the DebugAllocator's leak report empty.
     var dyn_gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(dyn_gpa.deinit() == .ok);
-    inline for (dims) |d| try setupEnv(&dyn_envs[dimSlot(d.n)], dyn_gpa.allocator(), d.n);
-    defer inline for (dims) |d| teardownEnv(&dyn_envs[dimSlot(d.n)]);
+    inline for (dims) |d| {
+        try setupEnv(envOf(.smp, d.n), smp_alloc, d.n);
+        try setupEnv(envOf(.dbg, d.n), dyn_gpa.allocator(), d.n);
+    }
+    defer inline for (dims) |d| {
+        teardownEnv(envOf(.smp, d.n));
+        teardownEnv(envOf(.dbg, d.n));
+    };
 
     std.debug.print("\n=== Vec(n): fixed dimension, inline components ===\n", .{});
     inline for (dims) |d| {
@@ -615,36 +705,55 @@ pub fn main() !void {
 
     std.debug.print("\n=== DynVec: runtime dimension, heap components ===\n", .{});
     inline for (dims) |d| {
-        const B = DynBench(d.n);
+        // `S` and `D` are the same bodies over the same inputs on the two
+        // allocators. Only the value-returning ones differ: they are the
+        // ones that reach `env.gpa`. The in-place and no-allocation bodies
+        // are measured once, from `S`, because a second run of them under
+        // `D` would be the same number printed twice.
+        const S = DynBench(d.n, .smp);
+        const D = DynBench(d.n, .dbg);
         const it = itersFor(d.n);
         const p = "dyn" ++ d.s ++ ".";
-        try timing.measure(&runner, p ++ "seed", it, B.seed);
-        try timing.measure(&runner, p ++ "add.value", it, B.add_value);
-        try timing.measure(&runner, p ++ "add.inplace", it, B.iadd);
-        try timing.measure(&runner, p ++ "sub.value", it, B.sub_value);
-        try timing.measure(&runner, p ++ "sub.inplace", it, B.isub);
-        try timing.measure(&runner, p ++ "mul.value", it, B.mul_value);
-        try timing.measure(&runner, p ++ "mul.inplace", it, B.imul);
-        try timing.measure(&runner, p ++ "div.value", it, B.div_value);
-        try timing.measure(&runner, p ++ "div.inplace", it, B.idiv);
-        try timing.measure(&runner, p ++ "hull.value", it, B.hull_value);
-        try timing.measure(&runner, p ++ "intersect.value", it, B.intersect_value);
-        try timing.measure(&runner, p ++ "intersect.disj.value", it, B.intersect_disjoint_value);
-        try timing.measure(&runner, p ++ "neg.inplace", it, B.neg);
-        try timing.measure(&runner, p ++ "recip.inplace", it, B.recip);
-        try timing.measure(&runner, p ++ "abs.inplace", it, B.abs);
-        try timing.measure(&runner, p ++ "sqr.inplace", it, B.sqr);
-        try timing.measure(&runner, p ++ "mapResult.sqrt", it, B.mapResult_sqrt);
-        try timing.measure(&runner, p ++ "mapResult.sqrt.ood", it, B.mapResult_sqrt_out_of_domain);
-        try timing.measure(&runner, p ++ "contains", it, B.contains);
-        try timing.measure(&runner, p ++ "distance", it, B.distance);
+        try timing.measure(&runner, p ++ "seed", it, S.seed);
+        try timing.measure(&runner, p ++ "add.value.smp", it, S.add_value);
+        try timing.measure(&runner, p ++ "add.value.dbg", it, D.add_value);
+        try timing.measure(&runner, p ++ "add.inplace", it, S.iadd);
+        try timing.measure(&runner, p ++ "sub.value.smp", it, S.sub_value);
+        try timing.measure(&runner, p ++ "sub.value.dbg", it, D.sub_value);
+        try timing.measure(&runner, p ++ "sub.inplace", it, S.isub);
+        try timing.measure(&runner, p ++ "mul.value.smp", it, S.mul_value);
+        try timing.measure(&runner, p ++ "mul.value.dbg", it, D.mul_value);
+        try timing.measure(&runner, p ++ "mul.inplace", it, S.imul);
+        try timing.measure(&runner, p ++ "div.value.smp", it, S.div_value);
+        try timing.measure(&runner, p ++ "div.value.dbg", it, D.div_value);
+        try timing.measure(&runner, p ++ "div.inplace", it, S.idiv);
+        try timing.measure(&runner, p ++ "hull.value.smp", it, S.hull_value);
+        try timing.measure(&runner, p ++ "hull.value.dbg", it, D.hull_value);
+        try timing.measure(&runner, p ++ "intersect.value.smp", it, S.intersect_value);
+        try timing.measure(&runner, p ++ "intersect.value.dbg", it, D.intersect_value);
+        try timing.measure(&runner, p ++ "intersect.disj.value.smp", it, S.intersect_disjoint_value);
+        try timing.measure(&runner, p ++ "intersect.disj.value.dbg", it, D.intersect_disjoint_value);
+        try timing.measure(&runner, p ++ "neg.inplace", it, S.neg);
+        try timing.measure(&runner, p ++ "recip.inplace", it, S.recip);
+        try timing.measure(&runner, p ++ "abs.inplace", it, S.abs);
+        try timing.measure(&runner, p ++ "sqr.inplace", it, S.sqr);
+        try timing.measure(&runner, p ++ "mapResult.sqrt.value.smp", it, S.mapResult_sqrt);
+        try timing.measure(&runner, p ++ "mapResult.sqrt.value.dbg", it, D.mapResult_sqrt);
+        try timing.measure(&runner, p ++ "mapResult.sqrt.ood.value.smp", it, S.mapResult_sqrt_out_of_domain);
+        try timing.measure(&runner, p ++ "mapResult.sqrt.ood.value.dbg", it, D.mapResult_sqrt_out_of_domain);
+        try timing.measure(&runner, p ++ "contains", it, S.contains);
+        try timing.measure(&runner, p ++ "distance", it, S.distance);
     }
 
+    // One round trip per dimension, at that dimension's own box size, so
+    // the share printed in the report divides a value-returning figure by
+    // the round trip that figure actually pays.
     std.debug.print("\n=== allocator round trip, alone ===\n", .{});
-    try timing.measure(&runner, "alloc.smp.4comp", itersFor(4), AllocBench(small_bytes).smp);
-    try timing.measure(&runner, "alloc.smp.32comp", itersFor(32), AllocBench(large_bytes).smp);
-    try timing.measure(&runner, "alloc.debug.4comp", itersFor(4), AllocBench(small_bytes).debug);
-    try timing.measure(&runner, "alloc.debug.32comp", itersFor(32), AllocBench(large_bytes).debug);
+    inline for (dims) |d| {
+        const it = itersFor(d.n);
+        try timing.measure(&runner, allocName(d.s, "smp"), it, AllocBench(boxBytes(d.n)).smp);
+        try timing.measure(&runner, allocName(d.s, "debug"), it, AllocBench(boxBytes(d.n)).debug);
+    }
 
     report(&runner);
     runner.report.print();
@@ -659,32 +768,62 @@ pub fn main() !void {
 // column is what makes an N=16 regression visible, and the value/in-place
 // column is the actionable finding. They are printed before the harness
 // table because the harness sorts its rows in place.
+//
+// A form is a claim about what the body does, not a bucket to sort
+// figures into, and the three `dyn_*` fields below are mutually exclusive
+// for exactly that reason. `contains` and `distance` used to be listed
+// under the value-returning field even though they return a scalar and
+// never allocate, which printed `contains 2.95/value` beside neighbours
+// at 11,000 ns and told the reader a round trip the body does not make.
+// They now have a field of their own, and every cell that is not measured
+// prints a dash rather than a number.
 // ---------------------------------------------------------------------------
 
 const Op = struct {
     name: []const u8,
     vec: ?[]const u8 = null,
+    /// Value-returning: allocates and frees once per call. The template
+    /// takes the dimension and then the allocator suffix, so it expands
+    /// to two row names.
     dyn_val: ?[]const u8 = null,
+    /// In-place: allocates nothing.
     dyn_in: ?[]const u8 = null,
+    /// Returns a scalar, not a box. Allocates nothing and has no
+    /// in-place twin.
+    dyn_none: ?[]const u8 = null,
 };
 
 const ops = [_]Op{
-    .{ .name = "add", .vec = "vec{s}.add", .dyn_val = "dyn{s}.add.value", .dyn_in = "dyn{s}.add.inplace" },
-    .{ .name = "sub", .vec = "vec{s}.sub", .dyn_val = "dyn{s}.sub.value", .dyn_in = "dyn{s}.sub.inplace" },
-    .{ .name = "mul", .vec = "vec{s}.mul", .dyn_val = "dyn{s}.mul.value", .dyn_in = "dyn{s}.mul.inplace" },
-    .{ .name = "div", .vec = "vec{s}.div", .dyn_val = "dyn{s}.div.value", .dyn_in = "dyn{s}.div.inplace" },
-    .{ .name = "hull", .vec = "vec{s}.hull", .dyn_val = "dyn{s}.hull.value" },
+    .{ .name = "add", .vec = "vec{s}.add", .dyn_val = "dyn{s}.add.value.{s}", .dyn_in = "dyn{s}.add.inplace" },
+    .{ .name = "sub", .vec = "vec{s}.sub", .dyn_val = "dyn{s}.sub.value.{s}", .dyn_in = "dyn{s}.sub.inplace" },
+    .{ .name = "mul", .vec = "vec{s}.mul", .dyn_val = "dyn{s}.mul.value.{s}", .dyn_in = "dyn{s}.mul.inplace" },
+    .{ .name = "div", .vec = "vec{s}.div", .dyn_val = "dyn{s}.div.value.{s}", .dyn_in = "dyn{s}.div.inplace" },
+    .{ .name = "hull", .vec = "vec{s}.hull", .dyn_val = "dyn{s}.hull.value.{s}" },
     .{ .name = "neg", .vec = "vec{s}.neg", .dyn_in = "dyn{s}.neg.inplace" },
     .{ .name = "recip", .vec = "vec{s}.recip", .dyn_in = "dyn{s}.recip.inplace" },
     .{ .name = "abs", .vec = "vec{s}.abs", .dyn_in = "dyn{s}.abs.inplace" },
     .{ .name = "sqr", .vec = "vec{s}.sqr", .dyn_in = "dyn{s}.sqr.inplace" },
-    .{ .name = "intersect", .vec = "vec{s}.intersect", .dyn_val = "dyn{s}.intersect.value" },
-    .{ .name = "intersect (disjoint)", .vec = "vec{s}.intersect.disjoint", .dyn_val = "dyn{s}.intersect.disj.value" },
-    .{ .name = "mapResult sqrt", .vec = "vec{s}.mapResult.sqrt", .dyn_val = "dyn{s}.mapResult.sqrt" },
-    .{ .name = "mapResult sqrt (out of domain)", .vec = "vec{s}.mapResult.sqrt.ood", .dyn_val = "dyn{s}.mapResult.sqrt.ood" },
-    .{ .name = "contains", .vec = "vec{s}.contains", .dyn_val = "dyn{s}.contains" },
-    .{ .name = "distance", .vec = "vec{s}.distance", .dyn_val = "dyn{s}.distance" },
+    .{ .name = "intersect", .vec = "vec{s}.intersect", .dyn_val = "dyn{s}.intersect.value.{s}" },
+    .{ .name = "intersect (disjoint)", .vec = "vec{s}.intersect.disjoint", .dyn_val = "dyn{s}.intersect.disj.value.{s}" },
+    .{ .name = "mapResult sqrt", .vec = "vec{s}.mapResult.sqrt", .dyn_val = "dyn{s}.mapResult.sqrt.value.{s}" },
+    .{ .name = "mapResult sqrt (out of domain)", .vec = "vec{s}.mapResult.sqrt.ood", .dyn_val = "dyn{s}.mapResult.sqrt.ood.value.{s}" },
+    .{ .name = "contains", .vec = "vec{s}.contains", .dyn_none = "dyn{s}.contains" },
+    .{ .name = "distance", .vec = "vec{s}.distance", .dyn_none = "dyn{s}.distance" },
 };
+
+/// The row name of a value-returning body under one allocator: the
+/// allocator is always on the end, so a bare `dyn4.add.value` cannot appear
+/// in a report. Both arguments go straight into the format for the same
+/// reason `allocLabel` spells its size out: Zig 0.16 leaves the length of a
+/// `comptimePrint` unresolvable when its argument tuple holds a call, and a
+/// plain `++` of two comptime slices yields a correctly sized array of
+/// zeroes instead of the text.
+fn valName(comptime tpl: []const u8, comptime dim: []const u8, comptime a: Alloc) []const u8 {
+    return switch (a) {
+        .smp => std.fmt.comptimePrint(tpl, .{ dim, "smp" }),
+        .dbg => std.fmt.comptimePrint(tpl, .{ dim, "dbg" }),
+    };
+}
 
 /// The row names one (dimension, operation) pair contributes, expanded at
 /// comptime. The report walks this at run time and does nothing but a
@@ -692,8 +831,12 @@ const ops = [_]Op{
 /// the thing worth reading here is a matrix rather than a list.
 const PlanRow = struct {
     vec: ?[]const u8 = null,
-    val: ?[]const u8 = null,
+    /// The value-returning row under each allocator, indexed by
+    /// `@intFromEnum(Alloc)`. Both are always set or both are null, so no
+    /// table can print one and silently drop the other.
+    val: [2]?[]const u8 = .{ null, null },
     inpl: ?[]const u8 = null,
+    noalloc: ?[]const u8 = null,
 };
 
 fn buildPlan() [dims.len][ops.len]PlanRow {
@@ -703,8 +846,12 @@ fn buildPlan() [dims.len][ops.len]PlanRow {
         inline for (ops, 0..) |op, oi| {
             arr[di][oi] = .{
                 .vec = if (op.vec) |t| std.fmt.comptimePrint(t, .{d.s}) else null,
-                .val = if (op.dyn_val) |t| std.fmt.comptimePrint(t, .{d.s}) else null,
+                .val = if (op.dyn_val) |t| .{
+                    valName(t, d.s, .smp),
+                    valName(t, d.s, .dbg),
+                } else .{ null, null },
                 .inpl = if (op.dyn_in) |t| std.fmt.comptimePrint(t, .{d.s}) else null,
+                .noalloc = if (op.dyn_none) |t| std.fmt.comptimePrint(t, .{d.s}) else null,
             };
         }
     }
@@ -740,9 +887,11 @@ fn dynInPlaceNet(runner: *timing.Runner, di: usize, key: ?[]const u8) ?f64 {
 /// Horizontal rules. `**` is array repetition now, so a repeated string is
 /// spliced out of a literal with `++` rather than written as `"-" ** n`.
 const dash10 = "----------";
+const dash60 = dash10 ++ dash10 ++ dash10 ++ dash10 ++ dash10 ++ dash10;
 const dash70 = dash10 ++ dash10 ++ dash10 ++ dash10 ++ dash10 ++ dash10 ++ dash10;
 const dash80 = dash70 ++ dash10;
 const dash100 = dash80 ++ dash10 ++ dash10;
+const dash110 = dash100 ++ dash10;
 
 fn columnHeader() void {
     std.debug.print("{s:>34}", .{"operation"});
@@ -750,19 +899,31 @@ fn columnHeader() void {
     std.debug.print("\n{s}\n", .{dash100});
 }
 
+/// Which `DynVec` form a cross-over column is built from. The two
+/// value-returning entries differ only in the allocator, which is the whole
+/// point: the ratio is not a property of the library until the allocator
+/// behind it is named.
+const DynForm = enum { inpl_net, value_smp, value_dbg };
+
 /// `Vec(n)` against `DynVec` at the same operation and the same dimension.
-/// `net_of_seed` picks which DynVec form is the comparison: the value form
-/// is what a caller writing `dv = dv.add(other)` pays, the net in-place
-/// form is what a caller writing `dv.iadd(other)` pays.
-fn crossOver(runner: *timing.Runner, title: []const u8, note: []const u8, comptime net_of_seed: bool) void {
+/// `form` picks which `DynVec` form is the comparison: the in-place form is
+/// what a caller writing `dv.iadd(other)` pays, the two value-returning
+/// forms are what a caller writing `dv = dv.add(other)` pays, once per
+/// allocator. A dash means the operation has no such form, not that it was
+/// fast.
+fn crossOver(runner: *timing.Runner, title: []const u8, note: []const u8, comptime form: DynForm) void {
     std.debug.print("\n=== {s} ===\n", .{title});
     columnHeader();
     for (0..ops.len) |oi| {
         std.debug.print("{s:>34}", .{ops[oi].name});
         for (0..dims.len) |di| {
-            const key = if (net_of_seed) plan[di][oi].inpl else plan[di][oi].val;
-            const v = if (plan[di][oi].vec) |k| nsFor(runner, k) else null;
-            const d = if (net_of_seed) dynInPlaceNet(runner, di, key) else if (key) |k| nsFor(runner, k) else null;
+            const pr = plan[di][oi];
+            const v = if (pr.vec) |k| nsFor(runner, k) else null;
+            const d: ?f64 = switch (form) {
+                .inpl_net => dynInPlaceNet(runner, di, pr.inpl),
+                .value_smp => if (pr.val[@intFromEnum(Alloc.smp)]) |k| nsFor(runner, k) else null,
+                .value_dbg => if (pr.val[@intFromEnum(Alloc.dbg)]) |k| nsFor(runner, k) else null,
+            };
             if (v != null and d != null) {
                 std.debug.print("  {d:>6.2}/{d:>5.2}", .{ v.?, d.? / v.? });
             } else {
@@ -773,6 +934,46 @@ fn crossOver(runner: *timing.Runner, title: []const u8, note: []const u8, compti
     }
     std.debug.print("\n{s}\n", .{note});
 }
+
+/// A figure, or a dash when the operation has no such form. Never 0.00 for
+/// a missing cell: 0 ns would be a claim about a measurement, whereas a
+/// dash is only a claim about the table.
+fn cell(ns: ?f64) void {
+    if (ns) |v| {
+        std.debug.print("{d:>13.2}", .{v});
+    } else {
+        std.debug.print("{s:>13}", .{"-"});
+    }
+}
+
+/// The round trip as a percentage of a whole call, or a dash when either
+/// side of the ratio is missing.
+fn shareCell(rt: ?f64, call: ?f64) void {
+    const r = rt orelse {
+        std.debug.print("{s:>11}", .{"-"});
+        return;
+    };
+    const c = call orelse {
+        std.debug.print("{s:>11}", .{"-"});
+        return;
+    };
+    if (c <= 0) {
+        std.debug.print("{s:>11}", .{"-"});
+        return;
+    }
+    std.debug.print("{d:>11.1}", .{100.0 * r / c});
+}
+
+/// The `add` row of `ops`, used as the reference for the allocator share:
+/// `add` is the operation the cross-over claim is quoted for, so it is the
+/// one the share is stated against. Every other value-returning row is in
+/// the table above and divides by the same round trip.
+const add_op: usize = blk: {
+    for (ops, 0..) |op, idx| {
+        if (std.mem.eql(u8, op.name, "add")) break :blk idx;
+    }
+    @compileError("no `add` row in `ops`");
+};
 
 fn report(runner: *timing.Runner) void {
     std.debug.print("\n=== Vec(n): ns per call / ns per component ===\n", .{});
@@ -792,27 +993,32 @@ fn report(runner: *timing.Runner) void {
     }
     std.debug.print("\n  left of the slash is ns per call, right is ns per component\n", .{});
 
-    std.debug.print("\n=== DynVec: value-returning vs in-place, ns per call ===\n", .{});
-    columnHeader();
+    // One row per (operation, dimension) rather than a matrix: a dimension
+    // column now carries four figures instead of two, and a matrix of
+    // those runs off the side of a screen.
+    std.debug.print("\n=== DynVec: what each form costs, ns per call ===\n", .{});
+    std.debug.print("{s:>34}{s:>5}{s:>13}{s:>13}{s:>13}{s:>13}\n", .{
+        "operation", "dim", "inpl(net)", "no-alloc", "value/smp", "value/dbg",
+    });
+    std.debug.print("{s}\n", .{dash100});
     for (0..ops.len) |oi| {
-        std.debug.print("{s:>34}", .{ops[oi].name});
         for (0..dims.len) |di| {
-            const a = if (plan[di][oi].val) |k| nsFor(runner, k) else null;
-            const b = if (plan[di][oi].inpl) |k| nsFor(runner, k) else null;
-            if (a != null and b != null) {
-                std.debug.print("  {d:>6.2}/{d:>5.2}", .{ a.?, b.? });
-            } else if (a != null) {
-                std.debug.print("  {d:>6.2}/{s:>5}", .{ a.?, "value" });
-            } else if (b != null) {
-                std.debug.print("  {s:>6}/{d:>5.2}", .{ "inpl", b.? });
-            } else {
-                std.debug.print("  {s:>13}", .{"-"});
-            }
+            const pr = plan[di][oi];
+            if (pr.inpl == null and pr.noalloc == null and pr.val[0] == null) continue;
+            std.debug.print("{s:>34}{s:>5}", .{ ops[oi].name, dims[di].s });
+            cell(dynInPlaceNet(runner, di, pr.inpl));
+            cell(if (pr.noalloc) |k| nsFor(runner, k) else null);
+            cell(if (pr.val[@intFromEnum(Alloc.smp)]) |k| nsFor(runner, k) else null);
+            cell(if (pr.val[@intFromEnum(Alloc.dbg)]) |k| nsFor(runner, k) else null);
+            std.debug.print("\n", .{});
         }
-        std.debug.print("\n", .{});
     }
-    std.debug.print("\n  left of the slash allocates and frees on every call, right of it does not;\n", .{});
-    std.debug.print("  'inpl' marks an operation with no value-returning form at all\n", .{});
+    std.debug.print("\n  inpl(net) allocates nothing; it is the in-place body minus its re-seed copy\n", .{});
+    std.debug.print("  no-alloc returns a scalar rather than a box, so it has nothing to allocate\n", .{});
+    std.debug.print("  value/smp and value/dbg are the same body allocating and freeing on every\n", .{});
+    std.debug.print("  call, once under smp_allocator and once under a DebugAllocator. The gap\n", .{});
+    std.debug.print("  between those two columns is the allocator, not the library.\n", .{});
+    std.debug.print("  A dash is an operation that has no such form, never a dropped measurement.\n", .{});
 
     std.debug.print("\n=== DynVec in-place, net of the re-seed copy ===\n", .{});
     std.debug.print("{s:>34}{s:>8}{s:>12}{s:>12}{s:>12}\n", .{ "operation", "dim", "as measured", "re-seed", "net" });
@@ -830,22 +1036,48 @@ fn report(runner: *timing.Runner) void {
         }
     }
 
-    crossOver(runner, "cross-over: DynVec in-place (net) / Vec(n)", "  left is Vec(n) ns/call, right is the ratio; above 1.00 the fixed form is cheaper", true);
-    crossOver(runner, "cross-over: DynVec value-returning / Vec(n)", "  left is Vec(n) ns/call, right is the ratio; above 1.00 the fixed form is cheaper", false);
+    const ratio_note = "  left is Vec(n) ns/call, right is the ratio; above 1.00 the fixed form is cheaper";
+    crossOver(runner, "cross-over: DynVec in-place (net) / Vec(n)", ratio_note, .inpl_net);
+    crossOver(runner, "cross-over: DynVec value-returning under smp_allocator / Vec(n)", ratio_note, .value_smp);
+    crossOver(runner, "cross-over: DynVec value-returning under DebugAllocator / Vec(n)", ratio_note, .value_dbg);
 
     std.debug.print("\n=== allocator round trip on its own, ns per alloc+free ===\n", .{});
-    std.debug.print("{s:>34}{s:>16}{s:>18}\n", .{ "size", "smp_allocator", "DebugAllocator" });
-    std.debug.print("{s}\n", .{dash70});
-    const alloc_rows = [_]struct { label: []const u8, smp: []const u8, dbg: []const u8 }{
-        .{ .label = "4 components (64 B)", .smp = "alloc.smp.4comp", .dbg = "alloc.debug.4comp" },
-        .{ .label = "32 components (512 B)", .smp = "alloc.smp.32comp", .dbg = "alloc.debug.32comp" },
-    };
-    for (alloc_rows) |r| {
-        std.debug.print("{s:>34}{d:>16.2}{d:>18.2}\n", .{
-            r.label,
-            nsFor(runner, r.smp) orelse 0,
-            nsFor(runner, r.dbg) orelse 0,
-        });
+    std.debug.print("{s:>34}{s:>13}{s:>13}\n", .{ "box", "smp", "Debug" });
+    std.debug.print("{s}\n", .{dash60});
+    inline for (dims) |d| {
+        std.debug.print("{s:>34}", .{allocLabel(d.n)});
+        cell(nsFor(runner, allocName(d.s, "smp")));
+        cell(nsFor(runner, allocName(d.s, "debug")));
+        std.debug.print("\n", .{});
     }
-    std.debug.print("\n  the hot path uses smp_allocator; these rows are what that choice costs\n", .{});
+    std.debug.print("\n  'smp' is std.heap.smp_allocator, which the hot path uses, and 'Debug' is a\n", .{});
+    std.debug.print("  DebugAllocator. One row per box size, so a share can be divided by the round\n", .{});
+    std.debug.print("  trip that box actually pays rather than by one measured at another size.\n", .{});
+
+    std.debug.print("\n=== how much of a value-returning add is the allocator ===\n", .{});
+    std.debug.print("{s:>34}{s:>13}{s:>13}{s:>13}{s:>13} {s:>11}{s:>11}\n", .{
+        "box", "rt smp", "rt Debug", "add smp", "add Debug", "% rt smp", "% rt Debug",
+    });
+    std.debug.print("{s}\n", .{dash110});
+    inline for (dims) |d| {
+        const pr = plan[dimSlot(d.n)][add_op];
+        const rt_smp = nsFor(runner, allocName(d.s, "smp"));
+        const rt_dbg = nsFor(runner, allocName(d.s, "debug"));
+        const val_smp = if (pr.val[@intFromEnum(Alloc.smp)]) |k| nsFor(runner, k) else null;
+        const val_dbg = if (pr.val[@intFromEnum(Alloc.dbg)]) |k| nsFor(runner, k) else null;
+        std.debug.print("{s:>34}", .{allocLabel(d.n)});
+        cell(rt_smp);
+        cell(rt_dbg);
+        cell(val_smp);
+        cell(val_dbg);
+        shareCell(rt_smp, val_smp);
+        shareCell(rt_dbg, val_dbg);
+        std.debug.print("\n", .{});
+    }
+    std.debug.print("\n  'rt' is the round trip at that exact box size, 'add' the value-returning add\n", .{});
+    std.debug.print("  on the same allocator. The percentage is the round trip's share of that one\n", .{});
+    std.debug.print("  call; the remainder is the componentwise fold and the sink, and is the\n", .{});
+    std.debug.print("  library's. The same division holds for every value-returning row above.\n", .{});
+    std.debug.print("  Every figure is the minimum of seven repetitions, so a share above 100 just\n", .{});
+    std.debug.print("  means the round trip's best repetition beat the call's.\n", .{});
 }

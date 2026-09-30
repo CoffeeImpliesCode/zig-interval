@@ -45,9 +45,28 @@ pub const Report = struct {
     rows: std.ArrayList(Row),
     gpa: std.mem.Allocator,
     io: std.Io,
+    /// Running total over every measured body, accumulated as the SUM OF BIT
+    /// PATTERNS rather than as a sum of the values.
+    ///
+    /// The value form was tried first and is useless here. A correct
+    /// benchmark in this library legitimately produces sinks of `inf` and of
+    /// `-1400001`, because the operations really do return unbounded
+    /// intervals, so a floating-point total collapses to `inf` on the first
+    /// such body and then reads `inf` for every run regardless of what the
+    /// bodies did. A constant cannot tell "the work was not elided" from
+    /// "the work was elided and the result still overflowed".
+    ///
+    /// Summing the bit patterns keeps the figure finite, exact, and sensitive
+    /// to every body that runs. It is NOT the same number as the per-row
+    /// `checksum` line `measure` prints: each `measure` call builds its own
+    /// `Ctx`, so its printed checksum covers that one body's warmup call plus
+    /// all of its repetitions, whereas this field folds every body's sink
+    /// together. It is a liveness witness across the run, not a quantity to
+    /// interpret arithmetically.
+    sink_total: u64,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io) Report {
-        return .{ .gpa = gpa, .rows = .empty, .io = io };
+        return .{ .gpa = gpa, .rows = .empty, .io = io, .sink_total = 0 };
     }
 
     pub fn deinit(self: *Report) void {
@@ -70,7 +89,10 @@ pub const Report = struct {
                 r.iterations,
             });
         }
-        std.debug.print("\nchecksum {d}\n", .{@as(f64, 0)});
+        // The real accumulated total, not a placeholder. A reader checking
+        // whether the work was elided needs a figure that actually moved,
+        // and this one moves whenever any body computed anything different.
+        std.debug.print("\nchecksum {x}\n", .{self.sink_total});
     }
 
     fn byCostDesc(_: void, a: Row, b: Row) bool {
@@ -142,6 +164,12 @@ pub fn measure(
     std.debug.print("checksum {d}\n", .{ctx.sink});
 
     const ns_per_op: f64 = @as(f64, @floatFromInt(best)) / @as(f64, @floatFromInt(iterations));
+    // Fold this body's sink into the run total before the row is recorded,
+    // by bit pattern rather than by value. See `sink_total` for why the value
+    // form collapses to a constant here. `+%` rather than `+` because a
+    // wrapping sum is still a perfect witness and an overflow trap in a
+    // benchmark's bookkeeping would be a pointless way to end a run.
+    runner.report.sink_total +%= @as(u64, @bitCast(ctx.sink));
     try runner.report.rows.append(runner.gpa, .{
         .name = name,
         .ns_per_op = ns_per_op,

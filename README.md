@@ -52,36 +52,64 @@ double at or above `x`". Without directed rounding, an operation computed in
 ordinary floating point can land one ULP on the wrong side of the true answer.
 
 So each operation widens instead. It computes its endpoints with ordinary IEEE
-round-to-nearest arithmetic and then moves each endpoint outward: `prevDown` on
-a computed lower bound, `nextUp` on a computed upper bound. **How many steps it
+round-to-nearest arithmetic and then moves each endpoint outward: `roundDown` on
+a computed lower bound, `roundUp` on a computed upper bound. **How many steps it
 moves depends on what computed the endpoint, and the two cases are not equally
 well established.**
 
 **Arithmetic widens by one ULP, and that is a proof.** IEEE 754 defines
 addition, subtraction, multiplication, division and square root as correctly
-rounded, so the computed result is the double nearest the exact one and lies
-within half a ULP of it. A full ULP of outward slack strictly exceeds that
-error, so the widened bound cannot exclude the true value. This is why the
-algebraic operations on `Interval` — `add`, `sub`, `mul`, `div`, `recip`, `sqr` —
-widen by exactly one step and owe nothing more.
+rounded, so an IEEE result lies within half a ULP of the exact one. A full
+ULP of outward slack exceeds that error. The algebraic operations on
+`Interval` — `add`, `sub`, `mul`, `div`, `recip`, `sqr` — widen by one step.
+
+Zig 0.16's software `__divdf3`, used by the default MIPS32 targets, does not
+meet that premise for subnormal quotients: it flushes them to zero. `div`
+and `recip` recover a zero quotient of nonzero finite operands by scaling
+the numerator by 2^54, dividing, and multiplying the result by 2^-54.
+The numerator scaling is exact and cannot overflow on this path. A
+representable nonzero quotient becomes normal before division; scaling
+back contributes at most three quarters of the smallest subnormal in total
+rounding error. If the scaled division still flushes, the exact quotient
+is smaller than one quarter of that subnormal. The same one-step outward
+bounds cover both cases. The exact oracle is not relaxed for these targets.
 
 `sqrt` stands in the same position: correctly rounded, so one step would be
-enough. The free function is widened by two anyway, so that everything reached
-through `interval.ext` answers under one rule. That extra width is the price of
-uniformity, not a risk.
+enough. The free function is widened by three anyway — the same three as every
+other answer reached through `interval.ext` — so the whole namespace answers
+under one rule. That extra width is the price of uniformity, not a risk.
 
-**The elementary functions widen by two ULP, and that is a measured margin, not
-a proof.** The `std.math` primitives behind `exp`, `log`, the trigonometric
+**The elementary functions widen by three ULP, and that is a measured margin,
+not a proof.** The `std.math` primitives behind `exp`, `log`, the trigonometric
 functions, the hyperbolic functions and the rest are not correctly rounded and
-carry no documented error bound. Measured against exact arithmetic over 300
-arguments per function at magnitudes from 1e-8 to 1e8, the point primitives the
-library calls landed within about 1.1 ULP, with `tanh` the worst at 1.07 — past
-what a single step absorbs. That is a sample of those primitives rather than a
-bound on them, and it does not hold for all of them: `std.math.pow` measured
-1.52 ULP. Those results are therefore widened by two steps, and two is where the
-measurement stopped, with headroom. A rigorous guarantee there would need a
-correctly rounded or formally verified implementation of each function, which
-this library does not provide.
+carry no documented error bound, so the count has to clear the worst of what
+those primitives actually do rather than the worst of a guess about them. The
+worst of them measured is `tanh`, at 2.14 ULP, and [what is proved and what is
+measured](#what-is-proved-and-what-is-measured) below gives every figure with
+the margin it leaves.
+
+**Three, and not two, because two was not enough.** The count used to be two,
+on the strength of a sample of 300 arguments per function at magnitudes from
+1e-8 to 1e8, which put every point primitive the library calls within about
+1.1 ULP, `tanh` the worst at 1.07 — past what a single step absorbs, so the
+sample said two steps would do. A denser sweep over `|x| <= 0.5` then put
+`tanh` at 2.14, and at the worst argument it found, `x = 0.23139395412799124`,
+the two-step widening put the lower bound *above* the true value, so
+`interval.ext.tanh` was returning an enclosure that excluded the value it was
+asked to enclose. That is a hole in the one guarantee this package makes, and
+no oracle built out of `f64` can see it, because the nearest double to that
+true value *is* the bound that was returned.
+
+**One count for the whole family, not one per function, and the uniformity is
+the point.** A single number is what makes the margin auditable: one number, in
+one place, checked against one table whenever a primitive is added or
+re-measured. A per-function margin would be narrower, which reads as an
+improvement and is not — it is exactly the kind of number drawn from a sample,
+and a sample has now been shown wrong about one member of this family, so a
+narrower rule for `tanh` alone is the last one anybody should trust. The third
+step costs two ULP of width, 4.4e-16 relative on a value near one, and it is
+paid on purpose: a result one ULP too wide is merely loose, while one ULP too
+narrow is silently wrong and nothing downstream can detect it.
 
 `powf` is the one operation whose underlying primitive has no usable error bound
 at all, and it is now handled by composition rather than by a constant.
@@ -105,9 +133,9 @@ in its own right, rather than taking a fixed number of steps from the outside.
 
 `sin` and `cos` are the two functions that cannot simply take the value at each
 end, because the range may turn inside the argument. They read it off the
-endpoints and the critical points it covers, and the endpoints take the same two
-steps as everything else; the critical values are exactly ±1 and carry no error
-of their own.
+endpoints and the critical points it covers, and the endpoints take the same
+three steps as everything else; the critical values are exactly ±1 and carry no
+error of their own.
 
 ### What is proved and what is measured
 
@@ -116,20 +144,50 @@ Read this before trusting `tanh` in a verification pipeline.
 | | Basis | Status |
 | --- | --- | --- |
 | `add`, `sub`, `mul`, `div`, `recip`, `sqr` | IEEE 754 correct rounding, half a ULP | **Proven.** One ULP of outward widening is sufficient. |
-| `sqrt` | IEEE 754 correct rounding, half a ULP | **Proven.** Widened by two ULP anyway, for uniformity. |
-| `exp`, `log`, the trigonometric and hyperbolic functions, and the rest | Sampled at ≈ 1.1 ULP over the point primitives; `std.math.pow` measured 1.52 ULP | **Empirically bounded.** Two ULP of outward widening. |
+| `sqrt` | IEEE 754 correct rounding, half a ULP | **Proven.** Widened by three ULP anyway, for uniformity. |
+| `exp`, `log`, the trigonometric and hyperbolic functions, and the rest | Worst measured 2.14 ULP over the point primitives, `tanh` the worst; `std.math.pow` measured 1.52 ULP | **Empirically bounded.** Three ULP of outward widening. |
 
 This library does not implement correctly rounded or formally verified
-elementary functions. For those, the two-ULP figure is a margin chosen from
-measurement, not a proof of it: it is where the measurement stopped, with
-headroom. It is stated here rather than left for a reader to infer. If you need
-a *proof* that an `exp`, `log`, trigonometric or hyperbolic bound holds, use a
+elementary functions. The three is the worst of what these primitives were
+measured to do, not a bound on what they can do, and the table below is that
+measurement in full — each primitive this library calls, in ULPs of the true
+value, with what is left of the margin under three:
+
+| Primitive | Worst measured | Margin left under three |
+| --- | --- | --- |
+| `tanh` | 2.14 ULP | 0.86 |
+| `sinh` | 1.75 ULP | 1.25 |
+| `log` | 1.50 ULP | 1.50 |
+| `log10` | 1.37 ULP | 1.63 |
+| `log2` | 1.22 ULP | 1.78 |
+| `cosh` | 1.10 ULP | 1.90 |
+| `exp` | 0.87 ULP | 2.13 |
+| `tan` | 0.83 ULP | 2.17 |
+| `log1p` | 0.78 ULP | 2.22 |
+| `sin` | 0.77 ULP | 2.23 |
+| `atan` | 0.76 ULP | 2.24 |
+| `cos` | 0.74 ULP | 2.26 |
+| `exp2` | 0.50 ULP | 2.50 |
+
+Every row is the highest figure any measurement pass produced rather than an
+average or a worst case over the reals: `sinh` came back at 1.45 on a later
+sweep, and the table keeps 1.75, because a margin is only as good as the worst
+figure anyone holds for the primitive. The pass each row came from is recorded
+in the source, and the argument bands are not all the same, which is itself a
+reason to read the table as a sample rather than as a bound. Seven primitives
+this library calls are not in it at all — `asin`, `acos`, `acosh`, `atanh`,
+`cbrt`, `expm1` and `sqrt` — and `std.math.pow`, which `powf` no longer calls,
+measured 1.52 ULP with an error that grows without limit in the exponent.
+
+So the three-ULP figure is a margin chosen from measurement, not a proof of it.
+It is stated here rather than left for a reader to infer. If you need a
+*proof* that an `exp`, `log`, trigonometric or hyperbolic bound holds, use a
 verified implementation of those functions rather than this one.
 
 ### The cost
 
-One extra ULP of width per endpoint for arithmetic, square root and the
-single-step geometry operations, two for the elementary functions, and a few
+One extra ULP of width per endpoint for arithmetic and the single-step geometry
+operations, three for `sqrt` and every other elementary function, and a few
 more for `scale`, which composes several of them. The results are therefore
 **slightly wider than mathematically necessary**. That is the price of soundness
 and it is deliberate: a result one ULP too wide is safe and costs a little
@@ -146,18 +204,69 @@ after exponent `n` grows with the binary length of `n` rather than staying at
 one step per squaring. `powf` is not that operation — going through
 `exp(y * log x)`, it composes linearly like everything else.
 
-`nextUp` and `prevDown` are exported, so you can apply the same widening to your
-own arithmetic when a value of yours feeds an `Interval`:
+### Widening your own arithmetic
+
+Six rounding helpers are exported, each reachable from the public module as
+`interval.<name>`. Four of them are the two pairs a caller needs to tell apart,
+and the other two are the certified bounds on π.
+
+| Export | Meaning |
+| --- | --- |
+| `roundUp(x: f64) f64` | **The upper bound of `x`**: the smallest `f64` at or above it. At `-inf` it answers `-floatMax`, because `-inf` is below every real and so bounds nothing; `+inf` is left alone, since it is already an upper bound of everything. At every finite nonzero value it is one `nextUp` step. Use it on every computed upper bound, including one of your own. |
+| `roundDown(x: f64) f64` | **The lower bound of `x`**: the largest `f64` at or below it. At `+inf` it answers `+floatMax`, for the mirror reason; `-inf` is left alone, since it is already below every real. At every finite nonzero value it is one `prevDown` step. Use it on every computed lower bound, including one of your own. |
+| `nextUp(x: f64) f64` | The **strict neighbour**: the smallest `f64` strictly greater than `x`. Not a bound. |
+| `prevDown(x: f64) f64` | The **strict neighbour**: the largest `f64` strictly less than `x`. Not a bound. |
+| `piDown() f64` | Lower bound on π, for certified range reduction. |
+| `piUp() f64` | Upper bound on π, for certified range reduction. |
+
+`roundUp` and `roundDown` are the pair to use when a value of yours feeds an
+`Interval`, because a bound *is* the non-strict question — the smallest `f64` at
+or above a value, the largest at or below it — and that is exactly what the
+library does to its own computed endpoints. The one place "non-strict" needs a
+word of its own is an infinity, and it is covered below.
 
 ```zig
 const interval = @import("interval");
 
 // Your own arithmetic, widened exactly the way the library widens its own.
 const iv = interval.Interval.init(
-    interval.prevDown(my_lower_bound),
-    interval.nextUp(my_upper_bound),
+    interval.roundDown(my_lower_bound),
+    interval.roundUp(my_upper_bound),
 );
 ```
+
+`nextUp` and `prevDown` answer a different question, and swapping them in for the
+pair above is a mistake worth naming precisely, because it is silent.
+
+**The two pairs are bit-identical at the infinities and at every finite non-zero
+value.** `nextUp(-inf)` and `roundUp(-inf)` both answer `-floatMax`, and
+`prevDown(+inf)` and `roundDown(+inf)` both answer `+floatMax`. That agreement is
+load-bearing rather than incidental: an `f64` computation only reaches `-inf` by
+overflowing, and the exact real it stands for is then a finite number below
+`-floatMax`, so a bound of `-inf` sits *below* the value it was meant to enclose;
+`+floatMax` is the mirror. Reading an infinity as a value to step inward from is
+the mistake, and it is a silent one — the result still looks like a bound.
+
+Those two arms are not the same width, and the difference is load-bearing: at a
+finite value there is a full ULP of outward step available, and at `+floatMax`
+there is none. It is why the overflow ray is written `[floatMax, +inf]` and why
+a result built from one comes back a whole ULP below the corner it rounded. A
+computed infinity is one thing; an infinity you supply as an operand is another,
+and this section is about the first. See
+[two kinds of infinity](#two-kinds-of-infinity) for the second.
+
+They differ **only at the pair of signed zeros**, and that is where the strict
+pair stops being a bound: `nextUp(-0.0)` is `+0.0` and `prevDown(+0.0)` is `-0.0`,
+so it hands back a different number from the one it was given, where
+`roundUp(-0.0)` is `-0.0` and `roundDown(+0.0)` is `+0.0`. A zero is already its
+own bound, and stepping across it substitutes a different value for the one you
+were bounding.
+
+Reach for the strict pair only when you genuinely want to stand on the
+adjacent representable value: the next sample above a value, the one below it,
+or a step off an endpoint whose neighbour you are enumerating. Both pairs are
+free functions of one `f64`, both are re-exported at the top level of the
+module, and all four of those names are the four a caller has.
 
 ## Usage
 
@@ -195,14 +304,26 @@ operations take endpoints as they find them. `total` and `rooted` are
 In your `build.zig`, wire that module into the module that needs it:
 
 ```zig
+const target = b.standardTargetOptions(.{});
+const optimize = b.standardOptimizeOption(.{});
+
 const dep = b.dependency("zig_interval", .{ .target = target, .optimize = optimize });
 const exe = b.addExecutable(.{
     .name = "app",
-    .root_module = b.createModule(.{ .root_source_file = b.path("src/main.zig") }),
+    .root_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    }),
 });
 exe.root_module.addImport("interval", dep.module("interval"));
 b.installArtifact(exe);
 ```
+
+The `target` and `optimize` on the module you CREATE are not optional in
+practice: `Module.create` panics with "the root Module of a Compile step must
+be created with a known 'target' field" without them, whatever the options type
+says. Pass the same pair to the dependency.
 
 The dependency key `zig_interval` is the package name; the module name
 `interval` is what `@import` resolves against. It is the only public module the
@@ -229,22 +350,22 @@ all. Every function fails differently — `sin` has extrema, `tan` has poles,
 `log` has a boundary, `acos` reverses the endpoints — and none of that work has
 a shape worth hiding behind a method call. They are functions from sets to
 sets, so they are free functions of an `Interval` and return `?Interval`
-whenever the result set can be empty.
+whenever the argument can reach outside a domain.
 
 ### Algebraic operations — methods on `Interval`
 
 | Method | Semantics |
 | --- | --- |
-| `init(lo: f64, hi: f64) Interval` | Construct an interval; requires `lo <= hi`. |
+| `init(lo: f64, hi: f64) Interval` | Construct an interval; requires `lo <= hi` and no NaN endpoint, and **normalises the two infinite shapes**: `init(+inf, +inf)` answers the closed overflow ray `[floatMax, +inf]` and `init(-inf, -inf)` its mirror `[-inf, -floatMax]`. The ordering is asserted **first**, so the check still sees the pair you wrote. A finite call, or a pair with one infinite end, is stored field for field. See [two kinds of infinity](#two-kinds-of-infinity). |
 | `add(self: Interval, other: Interval) Interval` | Endpointwise sum. |
 | `sub(self: Interval, other: Interval) Interval` | `self - other`, computed as `self + (-other)`, so `lo` subtracts the higher operand. |
 | `neg(self: Interval) Interval` | `[-hi, -lo]`. **Exact**: IEEE negation is exact and only the endpoints swap, so this is the one algebraic operation that pays no ULP. |
 | `mul(self: Interval, other: Interval) Interval` | Product of the four endpoint products, minimum and maximum. |
 | `div(self: Interval, other: Interval) Interval` | `self * other.recip()`. **`[-inf, inf]` when `other` contains zero.** |
 | `recip(self: Interval) Interval` | `1 / self`. **`[-inf, inf]` when `self` contains zero.** |
-| `abs(self: Interval) Interval` | `[0, max(abs lo, abs hi)]` when the interval straddles zero, otherwise the interval itself. |
+| `abs(self: Interval) Interval` | `[0, roundUp(max(abs lo, abs hi))]` when the interval reaches or straddles zero, and `[roundDown(min(abs lo, abs hi)), roundUp(max(abs lo, abs hi))]` otherwise. Widened outward at both ends either way — the magnitude is exact and the two steps are the whole of the widening — but the lower bound **stays at exactly `0.0`** when the interval contains zero, because a point of it maps to zero and no outward step can tighten a bound already at the truth. |
 | `sqr(self: Interval) Interval` | Square; nonnegative, and starting at `0` when the interval straddles zero. |
-| `contains(self: Interval, x: f64) bool` | Membership test, endpoints inclusive. |
+| `contains(self: Interval, x: f64) bool` | Membership test, endpoints inclusive, reading the stored fields. A non-finite `x` is just the comparison, so an upper-unbounded interval answers `contains(+inf)` — that value is on the closed bound, not outside it. Use `eql` to compare two intervals. |
 | `hull(self: Interval, other: Interval) Interval` | Smallest interval covering both. |
 | `hullOf(items: []const Interval) ?Interval` | Fold of `hull` over `items`; `null` for an empty slice. |
 | `intersect(self: Interval, other: Interval) ?Interval` | Shared region; `null` when disjoint. |
@@ -254,25 +375,66 @@ whenever the result set can be empty.
 | `subsetOf(self: Interval, other: Interval) bool` | True when `self` is contained in `other`. |
 | `midpoint(self: Interval) f64` | `(lo + hi) / 2`. |
 | `clamp(self: Interval, x: f64) f64` | Clamp `x` into `[lo, hi]`. |
-| `translate(self: Interval, delta: f64) Interval` | Shift both ends by `delta`. |
-| `scale(self: Interval, factor: f64) Interval` | Scale the width about the midpoint by `\|factor\|`. |
-| `expand(self: Interval, margin: f64) Interval` | Widen both ends by `margin`, or shrink both when it is negative; requires `margin >= -(hi - lo) / 2`, a more negative margin traps in Debug and ReleaseSafe. |
+| `translate(self: Interval, delta: f64) Interval` | Shift both ends by `delta`, by adding the point `[delta, delta]`. Finite delta numerics are unchanged. An **infinite** delta is the canonical scalar overflow ray and contributes its two endpoints rather than being read as a number. A NaN delta still violates the constructor precondition. |
+| `halve(self: Interval) Interval` | Image of `self` under `x -> x / 2`, widened outward. **Never wider than the bound `div` returns, and tighter in one case** — it is exact outside the subnormal range, so it spends no repair `div` needs, and it steps by `min_subnormal` only at an endpoint that is a lost subnormal. Use it rather than `div` by two wherever a halving is what is wanted. |
+| `scale(self: Interval, factor: f64) Interval` | Scale the width about the midpoint by `\|factor\|`. An **unbounded input has no finite midpoint**: `\|factor\| == 1` is the identity, and every other factor — `0` and every `\|factor\| < 1` included — answers `[-inf, +inf]`, which conservatively covers every finite-centre completion instead of fabricating a centre. Bounded-input numerics are unchanged. |
+| `expand(self: Interval, margin: f64) Interval` | Widen both ends by `margin`, or shrink both when it is negative; a finite margin requires `margin >= -(hi - lo) / 2`, and a more negative margin traps in Debug and ReleaseSafe. **`+inf` answers the whole line. `-inf` is refused for every bounded input**, `[-floatMax, floatMax]` included: it denotes every margin at or below `-floatMax`, so it is defined only for an interval already unbounded in some direction, where it answers `[roundDown(lo + floatMax), roundUp(hi - floatMax)]`. |
 | `distanceTo(self: Interval, x: f64) f64` | `0` inside the interval, else the distance to the nearest endpoint. |
 
 `scale` uses `|factor|` for the width, so a negative factor mirrors the width
 without inverting the endpoints and the `lo <= hi` invariant still holds. It is
-also the one operation here that is not a single rounded step: it encloses its
-midpoint and its half-width and composes the answer out of `add`, `sub`, `mul`
-and `div`, so it runs a few ULP wider than the exact image.
+also the one operation here that is not a single rounded step: for a **bounded**
+input it encloses its midpoint and its half-width and composes the answer out of
+`add`, `sub`, `mul` and `div`, so it runs a few ULP wider than the exact image.
+The unbounded case is not that composition at all, because the centre it needs
+does not exist; it is the identity at `|factor| == 1` and the whole line
+otherwise, which is loose by design rather than by rounding.
 
 The **set** operations — `hull`, `hullOf`, `intersect`, `intersectionOf` — do
 no arithmetic, so their endpoints are exact and the results need no widening.
 The **geometry** operations do arithmetic and do widen: `translate` and `expand`
-are one correctly rounded addition or subtraction per side, so they pay one ULP
-per endpoint exactly as `add` does, and `scale` pays whatever its composition
-pays. The algebraic operations pay one ULP per endpoint, with two exceptions
+are one correctly rounded addition or subtraction per side for a finite argument,
+so they pay one ULP per endpoint exactly as `add` does, and `scale` pays whatever
+its composition pays. The infinite cases are the rows above, not a wider version
+of this.
+The algebraic operations pay one ULP per endpoint, with two exceptions
 worth knowing: `neg` is exact, and `abs` and `sqr` of an interval straddling
 zero return a lower bound of exactly `0.0`, which is already exact.
+
+### Public struct fields
+
+Every public struct in the package, and every field it has. The vector types and
+the solver types have their own sections below, which say what the fields are
+for; this is the one table that lists all of them together.
+
+| Type | Field | Type | Meaning |
+| --- | --- | --- | --- |
+| `Interval` | `lo` | `f64` | The lower bound, inclusive. |
+| `Interval` | `hi` | `f64` | The upper bound, inclusive. `lo <= hi` holds for every interval the library builds; writing the endpoints yourself bypasses that. |
+| `Vec(n)` | `comps` | `[n]Interval` | The components, inline in the struct. No allocator, so the type cannot fail to build and cannot leak. |
+| `DynVec` | `gpa` | `std.mem.Allocator` | The allocator every result of this box is drawn from, and the one `deinit` frees with. |
+| `DynVec` | `comps` | `[]Interval` | The components, owned. Its `len` is the runtime dimension. **Do not replace the slice**: it is the storage `deinit` frees, and a write here names memory this box never allocated. |
+| `DynVec` | `own` | `[*]Interval` | The address `comps` had when the constructor returned the box. Read-only to you: `deinit` compares it against `comps.ptr` and panics in a checked build when the two differ. See [`one box, one owner`](#iadd-versus-add-who-owns-the-box). |
+| `lp.Lin` | `coeffs` | `[]Interval` | One coefficient per variable, borrowed from the system rather than owned. |
+| `lp.Lin` | `op` | `lp.Cmp` | The comparison. Always `.le` on a stored row, whatever you passed to `add`. |
+| `lp.Lin` | `rhs` | `Interval` | The right-hand side, enclosing the one unknown value the row constrains. |
+| `lp.System` | `gpa` | `std.mem.Allocator` | Where the system allocates, and what `deinit` frees with. |
+| `lp.System` | `var_count` | `usize` | The number of variables, fixed for the life of the system at `init`. |
+| `lp.System` | `coeffs` | `std.ArrayList(Interval)` | Every coefficient of every row in one row-major list, `var_count` entries per row. |
+| `lp.System` | `rhs` | `std.ArrayList(Interval)` | One right-hand side per row, parallel to `coeffs`, so `rhs.items.len` is the row count. |
+| `lp.System` | `alive` | `[]bool` | One flag per variable, cleared when that variable has been eliminated. |
+| `lp.System` | `unsat` | `bool` | Set once an elimination derives a contradiction. This is the field behind `isUnsat`, which returns it unchanged. |
+
+Treat the two `Interval` endpoints as read-only: writing `a.lo` directly
+bypasses the `lo <= hi` check that `init` and every operation rely on, and the
+inverted interval that produces is the caller's to carry.
+
+The two `DynVec` fields are read-only in the same sense, and for a sharper
+reason. `comps` is the storage `deinit` frees and `own` is the record of what
+that storage was, so writing either desynchronises the box from the allocator
+it came from. Zig 0.16 has no field privacy and the fields are public, so
+nothing in the type can stop the write — an assertion inside `deinit` is what
+catches it, and that assertion is compiled out in a release build.
 
 ### Elementary functions — free functions
 
@@ -294,8 +456,8 @@ All are reachable as `interval.<name>` and again as `interval.ext.<name>`.
 | `sin(x: Interval) Interval` | Image of the interval under `sin`. Exactly `[-1, 1]` when the interval spans a full period. |
 | `cos(x: Interval) Interval` | Image under `cos`. Exactly `[-1, 1]` over a full period. |
 | `tan(x: Interval) Interval` | **`[-inf, inf]` when the interval contains a pole** at `π/2 + kπ`. Monotone between poles. |
-| `asin(x: Interval) ?Interval` | Increasing on `[-1, 1]`. **`null` outside `[-1, 1]`.** |
-| `acos(x: Interval) ?Interval` | Decreasing, so the endpoints swap. **`null` outside `[-1, 1]`.** |
+| `asin(x: Interval) ?Interval` | Increasing on `[-1, 1]`. **The argument is clipped to `[-1, 1]`**, so `asin([-4, 0.5])` answers `[-pi/2, asin(0.5)]` rather than nothing. `null` exactly when the argument misses the domain whole, which is when its true image is empty. |
+| `acos(x: Interval) ?Interval` | Decreasing, so the endpoints swap — and a clip can cross them, which is why the shared envelope takes a min and a max rather than the two ends in order. **Clipped to `[-1, 1]`**; `null` exactly when the argument misses the domain whole. |
 | `atan(x: Interval) Interval` | Increasing into `(-π/2, π/2)`, real everywhere. |
 | `atan2(y: Interval, x: Interval) Interval` | Quadrant-aware arctangent of the point `(x, y)`. Unlike `atan`, it knows the signs of both coordinates and so covers the whole plane. Real everywhere, so it never returns `null`. |
 | `sinh(x: Interval) Interval` | Increasing, real everywhere. |
@@ -303,7 +465,7 @@ All are reachable as `interval.<name>` and again as `interval.ext.<name>`.
 | `tanh(x: Interval) Interval` | Increasing into `(-1, 1)`, real everywhere. |
 | `asinh(x: Interval) Interval` | Odd, increasing, real everywhere. |
 | `acosh(x: Interval) ?Interval` | **Domain is `[1, ∞)`, so `null` when `hi < 1`.** |
-| `atanh(x: Interval) ?Interval` | **`null` on or outside `[-1, 1]`**: at ±1 the limit is infinite, which is not a real value, and beyond ±1 there is no real result at all. |
+| `atanh(x: Interval) ?Interval` | Rising over the **open** `(-1, 1)`, and **clipped to it**: a clipped end sitting exactly on `±1` is the pole and answers the matching infinity, so `atanh([-2, -0.5])` is `[-inf, atanh(-0.5)]` and `atanh([-2, 2])` is the whole line. `null` when the argument misses the domain whole — **including the one shape a closed-domain clip would have accepted**: an argument whose only overlap with `(-1, 1)` is the endpoint itself, such as `atanh([1, 2])`, whose true image really is empty. |
 | `floor(x: Interval) Interval` | Monotone, so it is evaluated at both ends, combined with min/max, and widened. An **enclosure** of the integer values in the image, not a value snapped onto integers. |
 | `ceil(x: Interval) Interval` | Same construction with `ceil`. |
 | `trunc(x: Interval) Interval` | Same construction, toward zero. |
@@ -334,10 +496,10 @@ really there reports an unbounded tangent that still contains the finite one.
 The one failure that is not harmless is missing a point that is there, which is
 why the quotients are biased outward rather than inward.
 
-The endpoints of the argument are evaluated directly and widened by the same two
-ULP steps as every other computed bound. The payoff is that when an interval
-spans a full period the answer is exactly `[-1, 1]`, with no accumulated
-reduction error at all.
+The endpoints of the argument are evaluated directly and widened by the same
+three ULP steps as every other computed bound. The payoff is that when an
+interval spans a full period the answer is exactly `[-1, 1]`, with no
+accumulated reduction error at all.
 
 ### Comparisons — certain, not existential
 
@@ -352,7 +514,7 @@ being blunt: `Interval.init(1, 3).lt(Interval.init(2, 4))` is `false`, not
 
 | Method | True exactly when |
 | --- | --- |
-| `eql(self: Interval, other: Interval) bool` | The two intervals are the same set. |
+| `eql(self: Interval, other: Interval) bool` | The two intervals are the same set. Structural, on the stored fields: `Interval.init(+inf, +inf)` and `Interval.init(floatMax, +inf)` are the same interval, and a struct literal holding the point `+inf` is not the ray. |
 | `ne(self: Interval, other: Interval) bool` | `!eql` — the two intervals are not the same set. Note this is *not* the disjointness predicate: for that, use `!a.overlaps(b)`. |
 | `lt(self: Interval, other: Interval) bool` | `self.hi < other.lo`. **Not** `self.lo < other.hi`. |
 | `le(self: Interval, other: Interval) bool` | `self.hi <= other.lo`. |
@@ -378,11 +540,26 @@ easiest way to get a solver wrong.
 | **Unbounded** | Every real number is a possible answer. | `Interval{ .lo = -inf, .hi = inf }` |
 | **Bounded** | The usual case. | A finite interval |
 
-**Empty → `null`.** `sqrt` of an interval entirely below zero, `log` of an
-interval with `hi <= 0`, `asin`/`acos` outside `[-1, 1]`, `acosh` with `hi < 1`,
-and `atanh` on or outside `[-1, 1]`. Also `intersect` of disjoint intervals and
-the empty folds `hullOf` / `intersectionOf` of an empty slice. The question
-"what is `√x` for `x ∈ [-4, -1]`?" has no answer, and `null` says so.
+**Empty → `null`, and everything else clips.** `sqrt` of an interval entirely
+below zero, `log` / `log2` / `log10` / `log1p` of an interval wholly outside
+their domain, and `acosh` with `hi < 1` are `null` because the true image
+really is empty. Everything else **clips** the partly off-domain part and
+refuses only a wholly invalid one: `asin(Interval.init(-1.5, 0.5))` is
+`[-pi/2, asin(0.5)]` rather than `null`, and `atanh(Interval.init(-2, -0.5))`
+is `[-inf, atanh(-0.5)]` because the clipped end is the pole and a pole
+answers with an infinity. So `null` means exactly one thing in this package —
+the true image is empty in the reals — and a caller doing global
+reachability does not have to split the domain by hand at every call site to
+get a sound answer.
+
+`powf` is the exception, and it is an exception about the mathematics rather
+than about convenience: it is `null` when `x.lo < 0`, because a negative base
+raised to a general real exponent has no real value at **any** part of the
+argument, not only outside some part of it. There is nothing to clip to.
+
+`intersect` of disjoint intervals and the empty folds `hullOf` /
+`intersectionOf` of an empty slice are `null` too. The question "what is `√x`
+for `x ∈ [-4, -1]`?" has no answer, and `null` says so.
 
 **Unbounded → an infinite interval.** `div` and `recip` when the divisor
 contains zero (including a divisor that merely *touches* zero, such as
@@ -402,27 +579,101 @@ const r = interval.sqrt(Interval.init(-4.0, -1.0));               // null
 ```
 
 `[-inf, inf]` and `null` are not interchangeable, and neither is a third thing
-that happens to be spelled like them. There is no separate empty-interval
-representation, because `lo <= hi` always holds: an empty result is `null`, and
-a degenerate result is the single point `[x, x]`.
+that happens to be spelled like them. For an `Interval` this library *builds*
+there is no separate empty-interval representation, because `lo <= hi` always
+holds: an empty result is `null`, and a degenerate result is the single point
+`[x, x]`. The one way to hold an inverted interval is to write the endpoints
+yourself — `Interval{ .lo = 4.0, .hi = -2.0 }` — and `fromArray` will carry it
+into a box; see `isEmpty` in the vector section.
+
+### Two kinds of infinity
+
+An infinity reaches this library two ways, and they are not the same thing.
+
+A **computed** infinity is what finite `f64` arithmetic gives you when it
+overflows. It stands for a finite real past the end of the range, which is why
+`roundDown(+inf)` answers `floatMax` and `roundUp(-inf)` answers `-floatMax`:
+those are the outward bounds of a finite result the format cannot hold. That
+behaviour is unchanged.
+
+A **constructed** infinity is an operand you supplied, and it is not a number.
+It is a direction. This library gives it one shape.
+
+| Call | Fields you get back |
+| --- | --- |
+| `Interval.init(-inf, hi)` with finite `hi` | the ordinary lower-unbounded interval |
+| `Interval.init(lo, +inf)` with finite `lo` | the ordinary upper-unbounded interval |
+| `Interval.init(-inf, +inf)` | the whole line, unchanged |
+| `Interval.init(+inf, +inf)` | **`[floatMax, +inf]`** |
+| `Interval.init(-inf, -inf)` | **`[-inf, -floatMax]`** |
+
+The last two are the **overflow rays**: the closed rays of reals past the end of
+the format, in the one canonical closed form `f64` can hold. `init` checks that
+you passed `lo <= hi` **first** and normalises those two pairs afterwards, so the
+ordering is still your assertion and a NaN endpoint is still a caller error.
+
+**What this costs you, stated plainly.** `Interval.init(+inf, +inf)` used to hand
+back the point-shaped pair `[+inf, +inf]`. It now hands back a ray, and every
+answer that reads `.lo` or `.hi` — `neg`, `width`, `contains`, `eql`,
+`subsetOf`, your own code — observes the normalised fields. That is the
+observable price of the contract, and it is why the invariant below names the
+rays instead of leaving them implied. Two struct fields stay two struct fields,
+the finite path is untouched, and there is no second normalising entry point to
+learn.
+
+**Too wide is fine.** A sound answer wider than the truth is not a defect and is
+never reported as one. A whole line returned where a ray was asked for is sound.
+An answer that is too *narrow* is the defect, and that is what the soundness work
+in `docs/next-work-plan.md` is about.
+
+**Why the rays are finite at one end.** `roundDown` widens by a full ULP at a
+finite value, and `+floatMax` is the largest finite `f64`, so a lower bound of
+exactly `floatMax` has nowhere left to step. That is why the overflow ray is
+written `[floatMax, +inf]`, and it is why a result built from it comes back a
+whole ULP below the corner it rounded: `roundDown(floatMax + (-3.0))` computes
+`floatMax` and steps to `prevDown(floatMax)`, well below the real `floatMax - 3`
+the image contains. A ray starting at `+inf` instead would spend the one arm of
+the helper that cannot widen. See
+[widening your own arithmetic](#widening-your-own-arithmetic) for the other
+infinity mistake, which is reading one as a value to step inward from.
 
 ### Invariant
 
-Every `Interval` satisfies `lo <= hi`. That holds for every value the library
-returns, not only for ranges handed to `init`. `expand` builds its result
-through `init`, so a margin that would invert the interval traps instead of
-producing one; `hull` and `hullOf` take `lo` from a minimum and `hi` from a
-maximum; `intersect` and `intersectionOf` guard their result with an explicit
-`lo > hi` check; `translate` shifts both ends by the same delta; and `scale`
-grows the width about the midpoint with `|factor|`. No public function can
-return an inverted interval in a checked build.
+Every `Interval` **this library returns or accepts through `init`** satisfies
+`lo <= hi`, its `lo` is never `+inf`, its `hi` is never `-inf`, and neither
+endpoint is a NaN. The last three clauses are the canonical form the two
+overflow rays take; see [two kinds of infinity](#two-kinds-of-infinity). That
+holds for every value it returns, not only for ranges handed to `init`.
+`expand` builds its result through `init`, so a margin that would invert
+the interval traps instead of producing one; `hull` and `hullOf` take `lo` from
+a minimum and `hi` from a maximum; `intersect` and `intersectionOf` guard their
+result with an explicit `lo > hi` check; `translate` shifts both ends by the
+same delta; and `scale` grows the width about the midpoint with `|factor|`. No
+public function can return an inverted interval in a checked build.
+
+The four clauses are checked and then established, in that order: `init` asserts
+the ordering **before** it normalises, so the requirement is still yours and
+`init(+inf, -inf)` traps exactly as it always did. Everything after it holds for
+canonical inputs under their stated preconditions, and the arithmetic needs no
+branch of its own to keep it: a canonical pair carries no `+inf` at the low end
+and no `-inf` at the high end, so no corner can cancel into a NaN.
+
+The exceptions are both the caller's, and both are literal ones. `Interval` is a
+struct with public endpoints, so `Interval{ .lo = 4.0, .hi = -2.0 }` compiles and
+gives you an inverted interval with nothing to catch it; from there `fromArray`
+will carry it into a box. The library never hands you one; it can only let you
+make one. The same is true of a non-canonical infinite pair:
+`Interval{ .lo = inf, .hi = inf }` compiles and gives you the point `+inf`
+rather than the overflow ray, and nothing normalises it afterwards, because
+`hull`, `hullOf`, `intersect` and `intersectionOf` take canonicality from their
+inputs and repair nothing. If you want the ray, call `init`.
 
 `init` checks the invariant with `std.debug.assert`, which traps in Debug and
 ReleaseSafe builds. The check is elided in ReleaseFast, so in fast builds the
 caller is responsible for passing a valid range.
 
-Widening preserves the invariant: `prevDown` only ever decreases a lower bound
-and `nextUp` only ever increases an upper bound, so a valid input interval
+Widening preserves the invariant: `roundDown` only ever decreases a lower bound
+and `roundUp` only ever increases an upper bound, so a valid input interval
 produces a valid output interval.
 
 ## Vector forms
@@ -472,12 +723,12 @@ defer dyn.deinit();
 | Method | `Vec(n)` | `DynVec` |
 | --- | --- | --- |
 | `init(fill: Interval) Vec(n)` | Every component set to `fill`. | `init(gpa, n: usize, fill: Interval) !DynVec` |
-| `fromArray(comps: [n]Interval) Vec(n)` | Build from a literal. | `fromArray(gpa, comps: []const Interval) !DynVec` |
+| `fromArray(comps: [n]Interval) Vec(n)` | Build from a literal. Checks nothing, so this is where an inverted component can enter — see `isEmpty`. It normalises nothing either: the ray contract is `init`'s, so a component written as a struct literal keeps a non-canonical infinite pair. | `fromArray(gpa, comps: []const Interval) !DynVec`, which copies and checks nothing either. |
 | `dim(self) usize` | `n`. | The runtime length. |
 | `get(self, i: usize) Interval` | Component `i`. | Component `i`. |
 | `set(self: *Self, i: usize, v: Interval) void` | Overwrite component `i`, through a pointer. | Overwrite component `i`, through a pointer. |
 | `slice(self) []const Interval` | View of the components. | View of the components. |
-| `deinit(self: *DynVec) void` | — | Frees the storage. |
+| `deinit(self: *DynVec) void` | — | Frees the storage. Idempotent: a second call frees nothing. In a checked build it also panics, naming the mistake, if `comps` was replaced since construction. |
 | `eql(self, other) bool` | Same dimension and same components. | Same. |
 
 `DynVec` stores the allocator it was built with, so value-returning operations
@@ -499,7 +750,8 @@ over unchanged. Every result is an enclosure.
 | `distance` | `(self, p: [n]f64) f64` | `(self, p: []const f64) f64` |
 | `isEmpty` | `(self) bool` | `(self) bool` |
 
-Two shape differences from `DynVec`:
+Three shape differences from `Vec(n)`, and the third one is the one that costs
+you memory if you miss it:
 
 - **Value-returning operations allocate and return `!DynVec`.** They build a
   new value from `self.gpa`; they do not mutate. They fail with
@@ -509,6 +761,100 @@ Two shape differences from `DynVec`:
   `dyn` and hands back nothing, because there is nothing to hand back. For the
   binaries, `iadd`, `isub`, `imul` and `idiv` mutate in place and return
   `!void`.
+- **The value-returning forms hand you a box you own; the in-place forms hand
+  you nothing.** `add`, `sub`, `mul`, `div`, `hull` and `intersect` each
+  allocate one new box, which the caller must `deinit`. `iadd`, `isub`, `imul`,
+  `idiv`, `neg`, `recip`, `abs` and `sqr` allocate nothing at all.
+
+### `iadd` versus `add`: who owns the box
+
+This is the most actionable thing in the vector API, because the line that
+leaks is the line that reads best. `add` returns a **new** `DynVec` that the
+caller owns, and it leaves the receiver alone, so assigning the result over the
+receiver drops the previous box on the floor — one leak per iteration:
+
+```zig
+var acc = try interval.DynVec.init(gpa, n, fill);
+defer acc.deinit();
+
+for (others) |o| acc = try acc.add(o); // one leaked box per iteration
+```
+
+Two ways out, and the first is the one to reach for by default: take the
+in-place form, which allocates nothing and so has nothing to free.
+
+```zig
+for (others) |o| try acc.iadd(o); // in place, no allocation
+```
+
+Or free the previous box before overwriting it, which is the only way to keep
+the value-returning form when you need the old box to survive the step:
+
+```zig
+for (others) |o| {
+    const next = try acc.add(o);
+    acc.deinit();
+    acc = next;
+}
+```
+
+The same trap applies to `sub`, `mul`, `div` and `hull`. For `intersect` there
+is nothing to free on the `null` arm, because no box was built:
+
+```zig
+if (try acc.intersect(o)) |shared| {
+    acc.deinit();
+    acc = shared;
+}
+// else: no box, and acc is unchanged
+```
+
+`iadd` and its three siblings still return `!void` rather than `void` because
+they check the widths before they touch anything, so they can report
+`error.DimensionMismatch` having changed nothing. `neg`, `recip`, `abs` and
+`sqr` take no operand and so return plain `void`.
+
+One rule underpins all of it: **one box, one owner.** A constructor hands the box
+to the caller, and so does every method that returns a `DynVec`; the receiver
+keeps whatever it held, and the new owner frees that box once, with `deinit`,
+using the allocator the box was built from.
+
+`deinit` is **idempotent** — calling it twice on one box is safe and frees
+nothing the second time, because the component slice is swapped for an empty one
+before the free and freeing an empty slice is a no-op. A deinited box is a
+zero-dimensional box: `dim()` is 0 and `slice()` is empty.
+
+What idempotence does **not** buy is safety for a copy. `var b = a;` is a second
+reference to the *same* slice, not a second box, so freeing both is a double
+free, and nothing in the type can catch it — Zig has no move qualifier to forbid
+the copy with, and the copy carries the recorded address along with it, so the
+check below does not fire for it either. The assignment that honours the rule
+is the free-then-overwrite form above.
+
+There is one more mistake the type *can* catch, and it is caught by an
+assertion rather than by the type system: replacing `comps`. Both fields are
+public and Zig 0.16 has no field privacy — a private inner struct would hide
+nothing either, since the fields are reached through the same path either way —
+so a caller can point `comps` at a slice this box never allocated. Freeing that
+through `gpa` hands the allocator memory it never handed out: silent heap
+corruption under a release allocator, and under a checked one a death inside
+`Allocator.free` that names the allocator rather than the mistake. So **the
+slice must not be replaced after construction**, every constructor records the
+address it had in `own`, and `deinit` compares that record against `comps.ptr`:
+
+```text
+panic: DynVec.deinit: comps was replaced since construction: this box does not own the slice it holds, and freeing it hands the allocator memory it never allocated
+```
+
+**A release build does not catch it.** The check is an assertion, so
+ReleaseFast and ReleaseSmall elide it and free the wrong slice exactly as
+before; the rule is the caller's to keep in every build mode. It is the same
+trade every other check in this library makes, and the recorded address is also
+what makes idempotence hold — `deinit` swaps the slice for an empty one that
+keeps the address, so the comparison passes on every call after the first. It
+is an address rather than a length because a length check would also pass for a
+box reassigned a slice of the same width, which is the mistake the record
+exists to catch.
 
 ### Semantics worth stating outright
 
@@ -523,27 +869,100 @@ Two shape differences from `DynVec`:
   different question (how far can you move and stay inside the box). If you want
   the max metric, take the max of `distanceTo` yourself.
 
-- **`isEmpty` is always false.** It exists so that vector code can be written
-  against the same vocabulary as the scalar API, but there is no empty box: as
-  with `Interval`, emptiness is a `null` from `intersect` or a dimension
-  mismatch from a binary operation, never a value that exists and is empty.
+- **`isEmpty` is true when some component is inverted, `lo > hi`.** A box is the
+  product of its components, so one empty coordinate leaves the whole box
+  holding no point at all. Every box this library *builds* obeys `lo <= hi` in
+  every component, because `Interval.init` asserts it, the widening preserves
+  it, and `intersect` reports an empty result as a `null` rather than storing
+  one — so on any box you did not assemble yourself the answer is `false`, and
+  emptiness is still a `null` from `intersect` or a dimension mismatch from a
+  binary operation.
+
+  **`fromArray` is the one door an inverted component comes through.** It takes
+  the components as given and re-checks nothing, on both types, and it does not
+  normalise them either — the ray contract is `init`'s, and a box is not a second
+  place to enforce it — so an inverted interval, or a non-canonical infinite
+  pair, placed there produces a box that exists and holds what you put in it:
+
+  ```zig
+  // Interval.init asserts lo <= hi and traps, so an inverted component has
+  // to be written as a literal.
+  const inverted = Interval{ .lo = 4.0, .hi = -2.0 };
+  const empty = interval.Vec(2).fromArray(.{ Interval.init(0, 1), inverted });
+
+  empty.isEmpty();           // true: no point satisfies both components
+  empty.contains(.{ 0.5, 2.0 }); // false, and not merely because isEmpty said so
+  empty.overlaps(empty);     // false: it holds no point to share
+  ```
+
+  Writing a component through `set` has the same effect as building it that
+  way. Two things `isEmpty` is *not*: a NaN endpoint is not emptiness (`lo > hi`
+  is false for it — it is the poison the scalar contract names), and a deinited
+  `DynVec` is not empty either, since a zero-dimensional box has no component
+  to reach this fold.
 
 ### `mapResult`
 
 ```zig
-pub fn mapResult(v: anytype, f: *const fn (Interval) ?Interval) !?@TypeOf(v)
+pub fn mapResult(v: anytype, f: *const fn (Interval) ?Interval) MapResult(@TypeOf(v))
 ```
 
 Applies an elementary function to every component. The argument is a plain
 function pointer, so it must be a top-level function or a comptime-known
 declaration — closures are not accepted. The result is `null` if **any**
-component maps to `null`, since a single empty coordinate makes the whole
-image empty; the error is allocation for `DynVec`, which allocates from
-`v.gpa`. `Vec(n)` needs no allocator and cannot fail on allocation.
+component maps to `null`, since a single empty coordinate makes the whole image
+empty. The receiver is left alone either way.
+
+`MapResult` is the per-shape result type, and it is what follows the receiver:
+
+| Receiver | Result type | Why |
+| --- | --- | --- |
+| `Vec(n)` | `?Vec(n)` | It fills a stack array. There is no allocator to fail on and no error to return. |
+| `DynVec` | `DynVec.Error!?DynVec` — that is `error{DimensionMismatch, OutOfMemory}!?DynVec` | It allocates from `v.gpa`, so the fold can fail. |
+
+The split is per shape rather than one `!?V` because the error set of a single
+`!?V` is collected from *every* `try` in the body, reachable or not: one function
+with an arm per shape hands the `Vec(n)` arm an `error.OutOfMemory` it can
+neither produce nor catch, and makes every caller of that arm write a `try` that
+can never fire. `mapResult` on a `Vec(n)` therefore has **no error set at all**,
+and `try` on it does not compile:
+
+```
+error: expected error union type, found '?vector.Vec(2)'
+note: consider omitting 'try'
+```
+
+The `DynVec` arm carries the whole `DynVec.Error` even though a unary fold
+compares no widths, so only `error.OutOfMemory` is reachable there. Handle both
+at the call site, or the compiler will not let you forget one.
+
+The receiver is a box **by value**. A pointer is a compile error, and that is
+deliberate: a pointer says nothing about where the result should be built, and
+the shape that accepted one declared `var out: V = undefined` with `V` a pointer
+and wrote the components through it, which is a segfault in every build mode
+rather than a wrong answer.
+
+```
+error: mapResult takes a box by value: pass the box, not a pointer to it.
+```
+
+So a fixed box takes no `try`, and an owned box takes one **and hands you a box
+you now own**:
 
 ```zig
-const roots = try interval.mapResult(box, interval.sqrt);
+// Vec(3): the result is ?Vec(3), so no try.
+const roots = interval.mapResult(box, interval.sqrt);
+
+// DynVec: the result is an error union over the same optional, and the
+// non-null arm is a box you must deinit — hence `var`, because deinit
+// takes the box by pointer.
+var dyn_roots = (try interval.mapResult(dyn, interval.sqrt)).?;
+defer dyn_roots.deinit();
 ```
+
+On the `null` arm of the `DynVec` case there is nothing to free: the partial box
+is released before the `null` is returned, so a `null` costs nothing beyond the
+allocations already made.
 
 This is the reason the elementary functions are plain functions of an
 `Interval` rather than methods: with that shape, applying one across a vector
@@ -697,7 +1116,7 @@ pub fn main() !void {
     // x + y <= 10
     try sys.add(&.{ interval.Interval.init(1, 1), interval.Interval.init(1, 1) }, .le, interval.Interval.init(10, 10));
     // x - y <= 2
-    try sys.add(&.{ interval.Interval.init(1, 1), interval.Interval.init(1, -1) }, .le, interval.Interval.init(2, 2));
+    try sys.add(&.{ interval.Interval.init(1, 1), interval.Interval.init(-1, -1) }, .le, interval.Interval.init(2, 2));
     // -x + y <= 4
     try sys.add(&.{ interval.Interval.init(-1, -1), interval.Interval.init(1, 1) }, .le, interval.Interval.init(4, 4));
     // -x - y <= 6
@@ -776,6 +1195,25 @@ unsatisfiable.
 | `test` | Runs the interval test suite and the external consumer fixture. |
 | `consumer` | Builds and runs the external consumer fixture on its own. |
 | `docs` | Emits API documentation. |
+| `bench` | Runs all three benchmarks — scalar, vector and Fourier-Motzkin — in parallel. |
+| `bench-scalar` | Runs the scalar benchmark alone. |
+| `bench-vec` | Runs the vector benchmark alone. |
+| `bench-lp` | Runs the Fourier-Motzkin benchmark alone. |
+
+The three single-benchmark steps are pure aliases: each names the same run step
+`bench` already depends on, so nothing is built, compiled or installed
+differently, and `bench` still runs all three at once. They exist so one
+benchmark can be timed on its own — the LP one in particular sits next to a row
+budget that is worth tightening on its own.
+
+Two things about the benchmarks are deliberate and worth knowing before reading
+a number off them. They are pinned to **ReleaseFast** regardless of
+`-Doptimize`, because a figure from a Debug build of a numeric library measures
+the assertions and the register spills around them, and a benchmark whose
+numbers move when the flag moves cannot be compared with itself across a change
+to the library. And nothing depends on the `bench` step: `install` does not
+build the benchmarks and `test` does not run them, because a number is not a
+gate.
 
 ## Development
 
@@ -784,6 +1222,23 @@ Run the test suite with:
 ```
 zig build test
 ```
+
+On hosts with the local `cross-test` tool, also run the cross-target
+soundness gate:
+
+```sh
+cross-test --jobs 8 --build-jobs 2
+```
+
+Read the target logs and `zig-out/cross-test/cross-test-summary.json`.
+Compilation is not execution evidence: build-only targets remain untested
+at runtime, and `no_test_results` requires investigation of the runner log.
+Do not treat an incomplete runtime check as a passing soundness check.
+
+The child-process trap probes use the QEMU runner supplied by `cross-test`.
+This does not require a kernel binfmt handler for the child executable.
+Both probes retain their well-formed controls, so a failed launch cannot
+count as a successful trap check.
 
 The `test` step also depends on `consumer`, which builds the standalone package
 under `fixture/` against this one as a real dependency. That validates the

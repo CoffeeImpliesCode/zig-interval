@@ -30,16 +30,30 @@
 //! to be stepped inward from is the mistake, and it is a silent one: the
 //! result still looks like a bound.
 //!
+//! That is the role of an infinity a computation PRODUCED, and it answers a
+//! different question from the one an infinity answers as a stored
+//! endpoint. `Interval`'s constructor gives `init(+inf, +inf)` the closed
+//! overflow ray `[floatMax, +inf]` and `init(-inf, -inf)` its mirror
+//! `[-inf, -floatMax]`, so a canonical interval has no lower bound at
+//! `+inf` and no upper bound at `-inf`: the two infinities arrive as
+//! stored bounds only in those opposite directions. Neither pair of steps
+//! moves for it. A computed `+inf` is still answered by a lower bound of
+//! `+floatMax` and a computed `-inf` by an upper bound of `-floatMax`,
+//! exactly as above, while a stored ray endpoint is a bound in its own
+//! right that wants no step at all — which is why the constructor
+//! normalizes the two degenerate shapes rather than widening the steps
+//! here.
+//!
 //! How far it widens is not the same everywhere, because what computed the
 //! endpoint is not the same everywhere, and the two cases are not equally
 //! established.
 //!
-//! For the operations IEEE 754 defines as correctly rounded — addition,
-//! subtraction, multiplication, division and square root — the computed
-//! result is the nearest representable one to the exact result, so it lies
-//! within half a ULP of it. A single outward step strictly overshoots that
-//! error and the widened bound is a guarantee. That is the case the
-//! arithmetic in `interval.zig` is in.
+//! For IEEE 754 addition, subtraction, multiplication, division and square
+//! root, a correctly rounded result lies within half a ULP of the exact
+//! value. One outward step covers that error. `interval.zig` also repairs
+//! the subnormal quotients that Zig 0.16's software division flushes to
+//! zero; its scaled recovery has less than one subnormal ULP of error,
+//! so the same step covers it.
 //!
 //! For the elementary functions the premise fails: the `std.math`
 //! primitives behind them carry no documented error bound. Measured
@@ -75,6 +89,27 @@ const pos_zero: u64 = 0;
 /// identifies it, and the pattern neighbour lies on the wrong side of it.
 const neg_zero: u64 = sign_bit;
 
+/// The smallest positive subnormal f64, bit pattern 1, and so the least
+/// value above zero that the format can hold. A product or a quotient too
+/// small to represent comes back as a signed zero, and under
+/// round-to-nearest its true magnitude is at most half of this, so one
+/// step of this size is the smallest step that puts a bound back outside a
+/// value the machine has lost.
+///
+/// It lives here because it is a property of the layout rather than of
+/// any operation, and this file is where the layout is written down: the
+/// sign bit and the two zero patterns above are the same kind of fact.
+/// Three files need it, each for its own reason — `interval.zig` steps a
+/// bound out past a lost product, quotient or half, `interval_ext.zig`
+/// takes it as a two-sided slack around a rounded zero, `vector.zig`
+/// repairs a square that underflowed. Those are three policies and each
+/// file keeps its own; only the pattern is shared, and three copies of
+/// one bit pattern are three places for the format to be described
+/// wrongly. The dependency runs this way already, since all three import
+/// this file for the step beside it, so naming the constant here reaches
+/// no further than a local copy did.
+pub const min_subnormal: f64 = @bitCast(@as(u64, 1));
+
 /// Smallest f64 strictly greater than x, for an outward-rounded upper
 /// bound. NaN propagates unchanged and the infinities saturate: +inf has
 /// no successor, since the pattern after it is a NaN rather than a larger
@@ -85,8 +120,11 @@ pub fn nextUp(x: f64) f64 {
     if (x == -std.math.inf(f64)) return -std.math.floatMax(f64);
 
     const bits: u64 = @bitCast(x);
-    // Stepping the pattern of -0.0 would give the smallest negative
-    // subnormal, which is below -0.0, so the pair of zeros needs a guard.
+    // The pair of zeros needs a guard because it is 2^63 apart in pattern
+    // and adjacent in value, so a step of the pattern does not land on
+    // the other zero: from 0x8000...0 this direction SUBTRACTS one and
+    // reaches 0x7fff...f, whose exponent field is all ones and whose
+    // significand is not zero, so it is a quiet NaN and not a number.
     if (bits == neg_zero) return 0.0;
 
     // Patterns ascend with the value for positives and descend for
@@ -105,9 +143,13 @@ pub fn prevDown(x: f64) f64 {
     if (x == std.math.inf(f64)) return std.math.floatMax(f64);
 
     const bits: u64 = @bitCast(x);
-    // The predecessor of +0.0 is -0.0, not the smallest positive
-    // subnormal, which is above zero. -0.0 needs no guard of its own:
-    // stepping its pattern gives the smallest negative subnormal.
+    // The predecessor of +0.0 is -0.0, and the pattern does not get there:
+    // this direction subtracts one from 0x0000...0, which is an integer
+    // overflow at the bottom of the u64 rather than a step, and it panics
+    // in a checked build. The guard keeps the arithmetic inside the type
+    // as well as returning the neighbour. -0.0 needs no guard of its own:
+    // this direction ADDS one there and reaches 0x8000...1, the smallest
+    // negative subnormal, which is the value below it.
     if (bits == pos_zero) return -0.0;
 
     const stepped: u64 = if (bits & sign_bit != 0) bits + 1 else bits - 1;

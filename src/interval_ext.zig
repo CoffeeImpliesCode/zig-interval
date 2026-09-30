@@ -7,19 +7,20 @@
 //! of free functions rather than methods on the interval.
 //!
 //! The rigour rule is that every endpoint which came out of an f64
-//! computation is widened two ULP outward, with `rounding.roundDown` on
-//! the lower side and `rounding.roundUp` on the upper side. Two rather
+//! computation is widened THREE ULP outward, with `rounding.roundDown` on
+//! the lower side and `rounding.roundUp` on the upper side. Three rather
 //! than one, and `lower` below carries the measurement that forced it.
 //! The steps are the non-strict ones, which is what makes them bounds:
-//! the strict pair steps inward where a bound has to step outward, and
-//! it answers a zero with a wider one, which a primitive that underflowed
-//! to that zero does not deserve. So a computed zero steps past the pair
-//! of zeros here as well, since a primitive whose true value is too
-//! small to hold answers with a signed zero. Values that were never
-//! rounded are used as they stand: the exact numbers -1, 0 and 1, the
-//! infinities a pole produces, and the certified bounds on pi. Widening
-//! those would buy no guarantee, since there is no rounding error in
-//! them to absorb, and would cost tightness on every call.
+//! the strict pair asks for the neighbour of the argument where a bound
+//! asks for the bound itself, and at a zero it steps past a bound the
+//! argument already is. A computed zero is stepped past the pair of zeros
+//! here, since a primitive whose true value is too small to hold answers
+//! with a signed zero, and that zero is no bound of the real value
+//! behind it. Values that were never rounded are used as they stand:
+//! the exact numbers -1, 0 and 1, the infinities a pole produces, and
+//! the certified bounds on pi. Widening those would buy no guarantee,
+//! since there is no rounding error in them to absorb, and would cost
+//! tightness on every call.
 //!
 //! Two kinds of "no answer" are kept apart. `null` means the result is
 //! empty in the reals, which happens only when the whole interval lies
@@ -29,6 +30,31 @@
 //! across a pole, or a power with a negative exponent of a base
 //! reaching zero. Collapsing the two would either throw away a real
 //! answer or invent an empty one.
+//!
+//! Every function here reads the canonical bounds of `Interval`, so the two
+//! overflow rays arrive as the rays they are: an endpoint at `floatMax` or
+//! at `-inf` is read as the half-line it stands for, and nothing in this
+//! file re-derives, widens or re-asserts the conditions. What each one
+//! does with a ray is its own business, decided by its own domain and its
+//! own monotonicity, and the answer is not uniform across the file. A
+//! function whose domain sits entirely above zero — `sqrt`, `log`, `log2`,
+//! `log10`, `log1p`, `acosh` — is outside its domain over the whole of the
+//! negative ray and answers `null` there, which is also what it does for
+//! any argument below its domain. `cbrt` and `asinh` are defined on all of
+//! the reals and are rising, so `envelope` carries them to an unbounded
+//! endpoint of the matching sign: `[-inf, ...]` over the negative ray,
+//! where the image runs down without a lower bound, and `[..., +inf]` over
+//! the positive ray. An unbounded argument is not in itself a reason for
+//! an infinite endpoint, and the functions that saturate are the
+//! counterexamples: `tanh` answers either ray with a bounded range near 1,
+//! `atan` with a bounded range below pi/2, and `sin` and `cos` with the
+//! whole `[-1, 1]`, their `phaseResolvable` guard rejecting an argument
+//! that large before any endpoint is read.
+//!
+//! `asin`, `acos` and `atanh` reject an argument that leaves their domain
+//! rather than only one that leaves it entirely, so a `null` from those
+//! three is not a claim that the image is empty in the reals. Nothing here
+//! is clipped or widened to suit the rays, and no domain changes with them.
 //!
 //! The trigonometric functions read their range off the endpoints and
 //! the critical points instead of reducing the argument, because the
@@ -68,67 +94,111 @@ const CriticalRange = struct {
     last: i64,
 };
 
-/// The smallest positive subnormal f64, bit pattern 1. A computed zero
-/// is not always an exact zero: a primitive whose true value is a number
-/// too small to hold answers with a signed zero, and a bound stopping on
-/// that zero leaves the value out. Two subnormals is the width the
-/// strict pair gave at the zeros, so nothing that was an answer before
-/// this repair changes.
-const min_subnormal: f64 = @bitCast(@as(u64, 1));
+/// Two subnormals, the width the zero case takes: one
+/// `rounding.min_subnormal` to each side of the pair, kept as a single
+/// value so the two sides cannot drift apart.
+///
+/// A computed zero is not always an exact zero. A primitive whose true
+/// value is a number too small to hold answers with a signed zero, and a
+/// bound stopping on that zero leaves the value out. A rounded zero
+/// stands for a real of magnitude at most half the smallest positive
+/// subnormal, so one subnormal on each side already covers it, and the
+/// width is symmetric about zero because it is one value rather than
+/// two steps that happen to agree.
+const zero_slack: f64 = 2 * rounding.min_subnormal;
 
-/// Two subnormals, the width the zero case takes, kept as one value so
-/// the two sides of the pair cannot drift apart.
-const zero_slack: f64 = 2 * min_subnormal;
-
-/// A lower bound on a computed value, widened two ULP outward, and the
-/// place the reason the whole file widens by two rather than by one is
-/// written down.
+/// A lower bound on a computed value, widened three ULP outward, and the
+/// place the step count of the whole file is written down and defended.
 ///
 /// The steps are the non-strict ones, which is what makes this a bound
 /// and not a neighbour. `rounding.prevDown` answers a different question,
-/// the largest f64 strictly below its argument, and it answers -inf with
-/// -floatMax. -floatMax is above -inf and above every real past the end
-/// of the range, so a lower bound built from it stops short of the truth
-/// and drops the value that overflowed into -inf along with every real
-/// below -floatMax. `rounding.roundDown` is the largest f64 at or below
-/// its argument, and steps outward at the ends of the range where that
-/// one steps inward, which is the whole difference between the pairs
-/// there.
+/// the largest f64 strictly below its argument, and the two pairs agree
+/// at both infinities and at every finite nonzero value, so the only
+/// place the choice shows is the pair of signed zeros. There the
+/// non-strict form hands the zero back unchanged: right for a zero that
+/// is exact, wrong for one that is an underflow, which is what the
+/// `zero_slack` case above settles.
 ///
-/// They differ at the two zeros too, and there the non-strict form hands
-/// the zero back unchanged: right for a zero that is exact, wrong for one
-/// that is an underflow, which is what the `min_subnormal` case above
-/// settles.
+/// The agreement at the ends of the range is what keeps the bound
+/// holding. A computed +inf stands for a finite real above +floatMax, and
+/// both forms answer +floatMax, which is below that real and below +inf
+/// itself, so a lower bound of +floatMax keeps it where a lower bound of
+/// +inf would drop it. -inf is below every real, so it is left as it
+/// stands, by both forms alike.
 ///
-/// Two steps rather than one, because the `std.math` primitives the
-/// elementary functions are built on are not among the operations IEEE
-/// 754 defines as correctly rounded and carry no documented error
-/// bound. Measured against exact arithmetic over 300 arguments per
-/// function at magnitudes from 1e-8 to 1e8, the point primitives this
-/// file calls landed within about 1.1 ULP, with `tanh` the worst at
-/// 1.07: past what one step absorbs. That is a sample of those
-/// primitives, not a bound on them, and it does not hold for all of
-/// them: `std.math.pow` measured 1.52 ULP, and its error is proportional
-/// to the integer part of the exponent and so grows without limit there,
-/// which is why `powf` no longer goes through it. The extra ULP of width
-/// is paid on purpose, since a result one ULP too wide is merely loose
-/// while one ULP too narrow is silently wrong and nothing downstream can
-/// detect it.
+/// Three steps, and the number is a measurement rather than a rule anyone
+/// could have guessed. The `std.math` primitives every elementary
+/// function here is built on are not among the operations IEEE 754
+/// defines as correctly rounded and carry no documented error bound, so
+/// the count has to clear the worst of what they actually do. Measured
+/// against exact arithmetic in seventy decimal digits, the worst signed
+/// error of each primitive this file calls, in ULPs of the true value,
+/// with what is left of the margin under the three steps here:
 ///
-/// Two steps are still a margin taken from that measurement, not a proof
-/// of it. Establishing the bound would take a correctly rounded or
-/// formally verified implementation of every elementary function, which
-/// this library neither provides nor claims to.
+///     tanh 2.14 -> 0.86    sinh 1.75 -> 1.25    log  1.50 -> 1.50
+///     log10 1.37 -> 1.63   log2 1.22 -> 1.78    cosh 1.10 -> 1.90
+///     exp  0.87 -> 2.13    tan  0.83 -> 2.17    log1p 0.78 -> 2.22
+///     sin  0.77 -> 2.23    atan 0.76 -> 2.24    cos  0.74 -> 2.26
+///     exp2 0.50 -> 2.50
+///
+/// `tanh` is the one that was wrong, and it is why the count is three and
+/// not two. The file previously widened by two on the strength of a
+/// sample of 300 arguments per function that put every primitive within
+/// about 1.1 ULP, `tanh` the worst at 1.07. That figure was a guess
+/// about the family, and a dense sweep over |x| <= 0.5 put `tanh` at
+/// 2.14: not inside two steps. At x = 0.23139395412799124 the true value
+/// is 0.227350673456281817160566003737 and `std.math.tanh` answers
+/// 0.22735067345628188, two ULP and a seventh above it, so the widened
+/// lower bound sat a seventh of a ULP above the real answer and cut it
+/// out. That is a hole in the one guarantee this package makes, and no
+/// oracle built out of `f64` can see it, because the nearest `f64` to
+/// that true value IS the bound that was returned.
+///
+/// Provenance, because a table of samples that does not say which pass
+/// produced each row is worth very little. The `tanh` and `cosh` rows were
+/// re-measured for this change, over a dyadic grid and a linear sweep on
+/// |x| <= 0.5 and |x| <= 3, and came back at 2.14 — the witness above is
+/// the worst argument found — and 1.10. The `sinh` row was re-measured on
+/// the same bands and came back at 1.45, below the 1.75 the earlier pass
+/// reported; the table keeps 1.75, the higher of the two, because a margin
+/// is only as good as the worst figure anyone holds for a primitive, and a
+/// re-measurement that finds less is evidence that the earlier pass
+/// sampled a worse case rather than that the primitive improved. Every
+/// other row is the earlier pass unchallenged, and the argument bands that
+/// pass used are not recorded in this file, which is itself a reason to
+/// read the whole table as a sample and not as a bound.
+///
+/// A per-function step was the alternative and it is the wrong one. The
+/// count is what makes the margin auditable — one number, one place, one
+/// table to check a new primitive against — and a margin taken from a
+/// sample has now been shown wrong about one member of the family, which
+/// is exactly the state in which a second, narrower rule for `tanh`
+/// alone would be least trustworthy. The extra step costs two ULPs of
+/// width, 4.4e-16 relative on a value near one, and is paid on purpose:
+/// a result one ULP too wide is merely loose, while one ULP too narrow is
+/// silently wrong and nothing downstream can detect it.
+///
+/// None of that makes three a bound. These are samples of these
+/// primitives over the argument bands named above, not worst cases over
+/// the reals, and they do not cover every primitive here: `asin`, `acos`,
+/// `acosh`, `atanh`, `cbrt`, `expm1` and `sqrt` are not in the table,
+/// and `std.math.pow`, which `powf` no longer calls, measured 1.52 ULP
+/// with an error proportional to the integer part of the exponent and so
+/// growing without limit there. Establishing the bound would take a
+/// correctly rounded or formally verified implementation of every
+/// elementary function, which this library neither provides nor claims
+/// to. `rounding.zig` still quotes the superseded 1.1 ULP figure of its
+/// own and should be brought into line with this table.
 fn lower(v: f64) f64 {
     if (v == 0.0) return -zero_slack;
-    return rounding.roundDown(rounding.roundDown(v));
+    return rounding.roundDown(rounding.roundDown(rounding.roundDown(v)));
 }
 
-/// An upper bound on a computed value, two ULP outward for the reason
+/// An upper bound on a computed value, three ULP outward for the reason
 /// `lower` gives, and out past the pair of zeros for the same one.
 fn upper(v: f64) f64 {
     if (v == 0.0) return zero_slack;
-    return rounding.roundUp(rounding.roundUp(v));
+    return rounding.roundUp(rounding.roundUp(rounding.roundUp(v)));
 }
 
 /// The pattern every monotone function here follows. The two values
@@ -288,8 +358,8 @@ pub fn powf(x: Interval, y: Interval) ?Interval {
 ///
 /// What the answer rests on instead is the premise the rest of the file
 /// rests on, applied in series: `log` widens the rounding of its own
-/// primitive by two ULP, `mul` widens the correctly rounded product by
-/// one, `exp` widens two and rises, and the image of a rising function
+/// primitive by three ULP, `mul` widens the correctly rounded product by
+/// one, `exp` widens three and rises, and the image of a rising function
 /// over an enclosure is the enclosure of its two ends. So an enclosure
 /// of `y * log x` encloses `x^y` for every y in the interval, and the
 /// result is a hull of enclosures rather than four points read off a
@@ -375,7 +445,7 @@ pub fn sin(x: Interval) Interval {
     // The endpoint of a narrower interval may be the low one or the
     // high one, so both are taken as both, and the two widened values
     // are hulled rather than crossed. These two are the only computed
-    // bounds in the function, so they carry the two-ULP widening that
+    // bounds in the function, so they carry the three-ULP widening that
     // `lower` sets out, and the critical points below are exact.
     const a = @sin(x.lo);
     const b = @sin(x.hi);
@@ -439,19 +509,41 @@ pub fn tan(x: Interval) Interval {
     return envelope(@tan(x.lo), @tan(x.hi));
 }
 
-/// The arc sine, or null unless the interval lies inside [-1, 1],
-/// where it is rising.
+/// The arc sine, rising over `[-1, 1]`.
+///
+/// **The argument is clipped to the domain rather than refused.** `null` is
+/// therefore the answer exactly when the true image is empty in the reals,
+/// which is when the whole interval lies outside `[-1, 1]` — so `null` here
+/// means what the package prose says `null` means everywhere else. A partly
+/// valid argument used to be refused as well, which was sound and lossy:
+/// `asin([-4, 0.5])` has the true image `[-pi/2, asin(0.5)]` and answered
+/// nothing at all. Clipping is what `sqrt`, `log*` and `acosh` already do
+/// for a partial violation, and it costs the caller nothing.
+///
+/// The domain is closed, so a clipped end is the endpoint itself rather than
+/// a pole: `asin(-1)` is a finite `-pi/2` and the bound is the usual three
+/// ULP outward. Nothing here runs off to an infinity, and that is the whole
+/// difference from `atanh`.
 pub fn asin(x: Interval) ?Interval {
-    if (x.lo < -1.0 or x.hi > 1.0) return null;
-    return envelope(std.math.asin(x.lo), std.math.asin(x.hi));
+    const lo = @max(x.lo, -1.0);
+    const hi = @min(x.hi, 1.0);
+    // The clip is empty exactly when the argument misses the domain whole.
+    if (lo > hi) return null;
+    return envelope(std.math.asin(lo), std.math.asin(hi));
 }
 
-/// The arc cosine, or null unless the interval lies inside [-1, 1].
-/// It falls where the arc sine rises, and `envelope` swaps the two ends
-/// on its own.
+/// The arc cosine, falling where the arc sine rises, so `envelope` swaps
+/// the two ends on its own.
+///
+/// **Clipped to `[-1, 1]` rather than refused**, on the same rule and for
+/// the same reason `asin` gives: `acos([0.5, 4])` has the true image
+/// `[0, acos(0.5)]` and used to answer nothing. `null` is the answer only
+/// when the argument misses the domain whole.
 pub fn acos(x: Interval) ?Interval {
-    if (x.lo < -1.0 or x.hi > 1.0) return null;
-    return envelope(std.math.acos(x.lo), std.math.acos(x.hi));
+    const lo = @max(x.lo, -1.0);
+    const hi = @min(x.hi, 1.0);
+    if (lo > hi) return null;
+    return envelope(std.math.acos(lo), std.math.acos(hi));
 }
 
 /// The arc tangent, rising over all of the reals.
@@ -525,12 +617,35 @@ pub fn acosh(x: Interval) ?Interval {
     return envelope(std.math.acosh(@max(1.0, x.lo)), std.math.acosh(x.hi));
 }
 
-/// The inverse hyperbolic tangent, or null unless the interval lies
-/// strictly inside (-1, 1). The domain is open there, and the ends
-/// are not a limit the function reaches.
+/// The inverse hyperbolic tangent, rising over the OPEN interval
+/// `(-1, 1)`.
+///
+/// **The argument is clipped to the domain rather than refused, and the pole
+/// does what a pole does**: a clipped end sitting exactly on `±1` runs off to
+/// the matching infinity. So `atanh([-2, -0.5])` answers `[-inf,
+/// atanh(-0.5)]` where it used to answer nothing, and an argument spanning
+/// the whole domain answers the whole line.
+///
+/// One shape stays `null` that a closed-domain clip would have accepted: an
+/// argument whose only overlap with the domain is the endpoint `±1` itself,
+/// such as `atanh([1, 2])`. Its true image really is empty, because `1` is
+/// not in `(-1, 1)`, and answering `[floatMax, +inf]` for it would be a bound
+/// of nothing wearing an interval's clothes. So the emptiness test is
+/// two-sided — the clip must still reach a point strictly inside — and not
+/// `lo <= hi`.
 pub fn atanh(x: Interval) ?Interval {
-    if (x.lo <= -1.0 or x.hi >= 1.0) return null;
-    return envelope(std.math.atanh(x.lo), std.math.atanh(x.hi));
+    const lo = @max(x.lo, -1.0);
+    const hi = @min(x.hi, 1.0);
+    if (lo > hi) return null;
+    // The domain is open, so a clip that reaches no further than the endpoint
+    // from inside it overlaps nothing at all.
+    if (hi <= -1.0 or lo >= 1.0) return null;
+    // A clipped end ON the pole is the infinite one. std.math already
+    // answers the matching infinity there; naming it keeps the pole out of
+    // the arithmetic rather than leaning on that.
+    const out_lo = if (lo <= -1.0) -inf else std.math.atanh(lo);
+    const out_hi = if (hi >= 1.0) inf else std.math.atanh(hi);
+    return envelope(out_lo, out_hi);
 }
 
 /// The largest integer not above each end. These four land on exact

@@ -4,6 +4,19 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Child probes need the same user-mode emulator as their test parent.
+    // A host can run a test through QEMU without a binfmt handler for its
+    // children. cross-test supplies this runner explicitly.
+    const probe_runner_options = b.addOptions();
+    const runner_kind = b.graph.environ_map.get("CROSS_TEST_RUNNER_KIND") orelse "";
+    const runner_reason = b.graph.environ_map.get("CROSS_TEST_RUNNER_REASON") orelse "";
+    const probe_runner = if (std.mem.eql(u8, runner_kind, "exec") and
+        std.mem.startsWith(u8, runner_reason, "qemu_user"))
+        b.graph.environ_map.get("CROSS_TEST_RUNNER")
+    else
+        null;
+    probe_runner_options.addOption(?[]const u8, "runner", probe_runner);
+
     // A public module, so a dependent package can reach it through the
     // dependency module graph with `dep.module("interval")`. `createModule`
     // would only produce a private one that no external build can name.
@@ -77,6 +90,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     vector_tests.root_module.addImport("interval", interval);
+    vector_tests.root_module.addOptions("probe_runner_options", probe_runner_options);
     const run_vector_tests = b.addRunArtifact(vector_tests);
     test_step.dependOn(&run_vector_tests.step);
 
@@ -102,6 +116,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     soundness_tests.root_module.addImport("interval", interval);
+    soundness_tests.root_module.addOptions("probe_runner_options", probe_runner_options);
     const run_soundness_tests = b.addRunArtifact(soundness_tests);
     test_step.dependOn(&run_soundness_tests.step);
 
@@ -143,10 +158,20 @@ pub fn build(b: *std.Build) void {
     // internal test above cannot exercise because it is handed the module
     // object directly.
     //
-    // The nested build gets private cache directories. The parent build is
-    // still running and holds the shared global cache lock, so reusing the
-    // default global cache would deadlock. The paths are relative to the
-    // working directory below, so both caches stay inside `fixture/`.
+    // The nested build gets private cache directories, and NOT because a
+    // shared global cache would deadlock: `Cache.Manifest.hit` locks ONE
+    // manifest file at a time, with `lock_nonblocking = want_shared_lock`,
+    // which defaults to true and downgrades to a shared lock for the rest
+    // of the build, so a parent and a nested build can share one global
+    // cache. Measured on 0.16.0, with both flags dropped and the nested
+    // build left on the parent's default global cache, this step finishes
+    // in about the same time and prints the same `readme examples ok: 31
+    // checks`. The
+    // flags are kept for containment, which is the real reason: both paths
+    // are relative to the working directory set below, so the roughly 50 MB
+    // the fixture build writes to a global cache lands in
+    // `fixture/.zig-cache` and goes away with it, instead of joining the
+    // machine-wide cache this build shares with every other project.
     const run_consumer = b.addSystemCommand(&.{
         "zig",
         "build",
@@ -180,21 +205,25 @@ pub fn build(b: *std.Build) void {
     // benchmark whose numbers move when the flag moves cannot be
     // compared with itself across a change to the library.
     //
-    // The benchmarks therefore take a SECOND registration of
-    // `src/root.zig`, this one private and this one at ReleaseFast,
-    // because `addModule` fixes the mode at the moment the module is
-    // created and the public `interval` module belongs to a library
-    // built in whatever mode was asked for. Registering a file twice is
-    // the error the comment at the top of this file warns about, and it
-    // is not what is happening here: the constraint is one module per
-    // COMPILATION, and no step in this build compiles both. Each
-    // benchmark executable is its own compilation, containing its own
-    // root file, `bench/timing.zig`, and this one module.
-    const bench_interval = b.createModule(.{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = .ReleaseFast,
-    });
+    // The benchmarks take the public `interval` module, the one every
+    // other artifact takes, and no second registration is needed to pin
+    // the mode. The rule is that a compilation is compiled in the mode of
+    // its ROOT module: a module's own `.optimize` does not choose the
+    // machine code its files are compiled into, it only decides what
+    // `builtin.mode` reads inside that module. Measured on 0.16.0 with a
+    // root in one mode importing a module declared in another, a root at
+    // ReleaseFast emits no safety check for an imported module that
+    // declared Debug or ReleaseSafe, and a root at Debug or ReleaseSafe
+    // emits one, and panics, for an imported module that declared
+    // ReleaseFast. Each of the three executables below is its own
+    // compilation and its root module is already ReleaseFast, so the
+    // library compiles in ReleaseFast with or without a private
+    // registration: the three emitted binaries hash the same either way.
+    // To pin a mode, pin the root module, which is what these three
+    // already do; a second registration of `src/root.zig` would be
+    // redundant, and it is also the "file exists in modules" error the
+    // comment at the top of this file warns about the moment any two of
+    // these compilations are merged into one.
 
     // `bench/timing.zig` is reached by a relative import from each
     // benchmark file and is NOT registered as a module of its own. A
@@ -213,7 +242,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseFast,
         }),
     });
-    bench_scalar.root_module.addImport("interval", bench_interval);
+    bench_scalar.root_module.addImport("interval", interval);
 
     const bench_vec = b.addExecutable(.{
         .name = "bench-vec",
@@ -223,7 +252,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseFast,
         }),
     });
-    bench_vec.root_module.addImport("interval", bench_interval);
+    bench_vec.root_module.addImport("interval", interval);
 
     const bench_lp = b.addExecutable(.{
         .name = "bench-lp",
@@ -233,7 +262,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseFast,
         }),
     });
-    bench_lp.root_module.addImport("interval", bench_interval);
+    bench_lp.root_module.addImport("interval", interval);
 
     // The step depends on RUNNING all three, not merely on building
     // them: a benchmark nobody runs has measured nothing. Three
@@ -256,4 +285,26 @@ pub fn build(b: *std.Build) void {
     bench_step.dependOn(&run_bench_scalar.step);
     bench_step.dependOn(&run_bench_vec.step);
     bench_step.dependOn(&run_bench_lp.step);
+
+    // The combined step above takes no argument and runs all three in
+    // parallel, so it cannot name one benchmark on its own. These three
+    // steps exist for the LP benchmark in particular: its measurements sit
+    // next to a row budget that can be tightened on its own, and the second,
+    // independent guard is an address-space limit around the step that runs
+    // it. A limit wrapped around `zig build bench` would also cover the other
+    // two, and those are the benchmarks that stay runnable while the LP budget
+    // is still being fixed, so they must be reachable without it.
+    //
+    // Pure aliases. Each one names a run step that already exists, so
+    // nothing is built, compiled or installed differently, and the combined
+    // `bench` step still depends on all three and still runs them in
+    // parallel.
+    const bench_scalar_step = b.step("bench-scalar", "Run the scalar benchmarks");
+    bench_scalar_step.dependOn(&run_bench_scalar.step);
+
+    const bench_vec_step = b.step("bench-vec", "Run the vector benchmarks");
+    bench_vec_step.dependOn(&run_bench_vec.step);
+
+    const bench_lp_step = b.step("bench-lp", "Run the Fourier-Motzkin benchmarks");
+    bench_lp_step.dependOn(&run_bench_lp.step);
 }

@@ -24,4 +24,40 @@ pub fn build(b: *std.Build) void {
     const run = b.addRunArtifact(exe);
     const run_step = b.step("run", "Run the consumer smoke checks");
     run_step.dependOn(&run.step);
+
+    // The second consumer, and the reason this fixture exists twice over: the
+    // README's own examples, as an executable that is compiled and run here.
+    // The repository's tests are handed the `interval` module object
+    // directly, so nothing in them can tell whether the code a reader copies
+    // out of the README still compiles, and two of them did not.
+    //
+    // It is wired the way the README's `build.zig` snippet wires an
+    // executable — the module created with `target` and `optimize` on it,
+    // the import added afterwards with `addImport` rather than through
+    // `createModule`'s `imports` field — so the snippet is compiled by this
+    // file instead of only being quoted by it. Two of the lines it writes
+    // down are the ones whose absence used to panic at build-script time.
+    const readme = b.addExecutable(.{
+        .name = "readme",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/readme.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    readme.root_module.addImport("interval", dep.module("interval"));
+    b.installArtifact(readme);
+
+    const run_readme = b.addRunArtifact(readme);
+    // After the consumer rather than beside it. Two run steps with no
+    // dependency on each other are independent, so the build runner may
+    // start them in parallel and interleave their output; making the second
+    // one depend on the first keeps the log in the order the README states
+    // its examples in.
+    run_readme.step.dependOn(&run.step);
+
+    const readme_step = b.step("readme", "Run the README examples against this package");
+    readme_step.dependOn(&run_readme.step);
+    // `run` is what the parent build invokes, and it runs both consumers.
+    run_step.dependOn(&run_readme.step);
 }

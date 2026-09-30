@@ -1,5 +1,7 @@
 const std = @import("std");
-const Interval = @import("interval").Interval;
+const interval = @import("interval");
+const Interval = interval.Interval;
+const builtin = @import("builtin");
 
 /// Assert that an interval returned by the public API respects the
 /// lo <= hi invariant.
@@ -172,6 +174,54 @@ test "expand: negative margin on an asymmetric interval" {
     // there and a margin of -2.5 leaves [2.5, 7.5]. Both are f64.
     try expectEnclosure(Interval.init(0.0, 10.0).expand(-5.0), 5.0, 5.0, .representable);
     try expectEnclosure(Interval.init(0.0, 10.0).expand(-2.5), 2.5, 7.5, .representable);
+}
+
+test "halve: a subset of div by two, and tighter where div is cautious" {
+    // The property `halve`'s own doc claims, over a sweep chosen for the
+    // shapes where the two answers can differ at all: subnormal endpoints,
+    // where halving a lost magnitude rounds to a signed zero; the signed
+    // zeros themselves; both infinities; and the ends of the range.
+    //
+    // They differ because `div` pays its underflow repair on every endpoint
+    // and `halve` pays it only where its own endpoint actually lost the half.
+    // So on a box whose OTHER end is a lost magnitude, `div` steps further out
+    // than the truth needs and `halve` does not. The subset relation is what
+    // makes the public version the better one to reach for, and it is the
+    // whole of what making it public claims.
+    // The smallest positive subnormal, spelled out rather than imported.
+    // `rounding.min_subnormal` is not re-exported at the package root, and a
+    // test is not a reason to widen the public surface for it.
+    const tiny: f64 = @bitCast(@as(u64, 1));
+    const fmax = std.math.floatMax(f64);
+    const cases = [_]Interval{
+        Interval.init(1.0, 2.0),
+        Interval.init(-2.0, -1.0),
+        Interval.init(1.0, 1.0),
+        Interval.init(-1.0, -1.0),
+        Interval.init(0.0, 1.0),
+        Interval.init(-1.0, 1.0),
+        Interval.init(-0.0, 1.0),
+        Interval.init(0.0, -0.0),
+        Interval.init(tiny, tiny),
+        Interval.init(-tiny, tiny),
+        Interval.init(-tiny, -tiny),
+        Interval.init(tiny, 4.0 * tiny),
+        Interval.init(-4.0 * tiny, tiny),
+        Interval.init(fmax, fmax),
+        Interval.init(-fmax, fmax),
+        Interval.init(0.0, fmax),
+        Interval.init(-std.math.inf(f64), fmax),
+        Interval.init(-fmax, std.math.inf(f64)),
+    };
+    const two = Interval.init(2.0, 2.0);
+    for (cases) |c| {
+        const h = c.halve();
+        const d = c.div(two);
+        // Never wider: each end of the halving is inside the division's.
+        try std.testing.expect(h.lo >= d.lo);
+        try std.testing.expect(h.hi <= d.hi);
+        try std.testing.expect(h.lo <= h.hi);
+    }
 }
 
 test "distanceTo: zero inside the interval" {
@@ -784,15 +834,828 @@ test "div: a zero dividend over an infinite divisor is an exact zero" {
     // The product side of this file has a rule about a zero factor, and the
     // question is whether the quotient needs the same one. It does not, and
     // the reason is that IEEE 754 defines 0 / inf: it is a zero, not an
-    // invalid operation. Both sources of a NaN quotient, 0 / 0 and
-    // inf / inf, need a zero in the divisor, and the divisor check that
-    // returns the whole line has already removed every one of them. So the
-    // zero quotient here is exact and a bound at zero is the truth.
+    // invalid operation. Only two divisions are invalid, 0 / 0 and
+    // inf / inf, and of those only the first needs a zero in the divisor,
+    // so the divisor check that returns the whole line has removed it and
+    // nothing else. The second needs an infinity in the divisor, survives
+    // that check, and is what cornerQuotient answers. So the zero quotient
+    // here is exact and a bound at zero is the truth.
     const zero = Interval.init(0.0, 0.0);
     for ([_]f64{ std.math.inf(f64), -std.math.inf(f64) }) |d| {
         const q = zero.div(Interval.init(d, d));
         try expectOrdered(q);
         try std.testing.expect(q.eql(zero));
         try expectEnclosure(q, 0.0, 0.0, .representable);
+    }
+}
+
+test "div: infinite operands on both sides give the whole line, not a NaN" {
+    // The one IEEE-invalid division the divisor check does not remove.
+    // 0 / 0 needs a zero in the divisor and is answered above; inf / inf
+    // needs an infinity in it, so it reaches all four corners as a NaN.
+    // A NaN corner cannot be reduced — @min and @max have no order to
+    // apply to it, and four of them reduce to a NaN — so the bounds came
+    // out as [-nan, -nan]. That interval contains nothing, which is the
+    // worst answer available: every membership query a verification caller
+    // makes against it reads "no".
+    const inf = std.math.inf(f64);
+    const neg_inf = -std.math.inf(f64);
+    const pairs = [_][2]Interval{
+        .{ Interval.init(inf, inf), Interval.init(inf, inf) },
+        .{ Interval.init(neg_inf, neg_inf), Interval.init(neg_inf, neg_inf) },
+        .{ Interval.init(inf, inf), Interval.init(neg_inf, neg_inf) },
+    };
+    for (pairs) |pair| {
+        const a = pair[0];
+        const b = pair[1];
+        const q = a.div(b);
+        try expectOrdered(q);
+        // A NaN compares false against everything, so lo <= hi passes on
+        // one and the ordering check alone cannot see the failure.
+        try std.testing.expect(!std.math.isNan(q.lo));
+        try std.testing.expect(!std.math.isNan(q.hi));
+        // A real divided by itself is 1. The first two pairs hold a common
+        // value outright, and the third reaches 1 as the quotient of two
+        // magnitudes that grow together, so 1 is in all three true images.
+        try std.testing.expect(q.contains(1.0));
+    }
+
+    // The other way a corner comes back a NaN is a NaN OPERAND, and it is not
+    // the same thing. inf / inf is the indeterminate form: neither operand is
+    // a real number, each stands for an unbounded set of finite reals, and the
+    // quotient of two unbounded magnitudes is unbounded in both directions.
+    // 1 / nan is not indeterminate — one operand is a value that compares
+    // false against everything — and the contract for it is the `lo <= hi`
+    // check in Interval.init, which a NaN endpoint fails. Answering it with
+    // the whole line as well would hand a caller the one answer an enclosure
+    // can always use and report no trap at all, so the NaN would be swallowed
+    // rather than caught.
+    //
+    // The endpoint pair below is observable only where that check is elided.
+    // In Debug the call aborts, as it is meant to, and a test that made it in
+    // this process would take every other test in the file down with it. The
+    // abort itself is watched from a child process in every mode, by
+    // tests/soundness_test.zig; what is pinned here is the pair of endpoints
+    // the elided build hands back, which is the same NaN either way.
+    const checked = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
+    if (!checked) {
+        const nan = std.math.nan(f64);
+        // inf / nan and nan / inf are here beside the other two on purpose:
+        // one infinite operand is not the indeterminate form, and a check
+        // that asked only about one side would swallow both.
+        const poisoned = [_][2]Interval{
+            .{ Interval.init(1.0, 2.0), .{ .lo = nan, .hi = nan } },
+            .{ .{ .lo = nan, .hi = nan }, Interval.init(1.0, 2.0) },
+            .{ Interval.init(inf, inf), .{ .lo = nan, .hi = nan } },
+            .{ .{ .lo = nan, .hi = nan }, Interval.init(inf, inf) },
+        };
+        for (poisoned) |pair| {
+            const q = pair[0].div(pair[1]);
+            // A NaN compares false against everything, so nothing else can be
+            // asked of these endpoints. What they must not be is the whole
+            // line, which is what the loop above gets and this must not.
+            try std.testing.expect(std.math.isNan(q.lo));
+            try std.testing.expect(std.math.isNan(q.hi));
+        }
+    }
+}
+
+test "div: an infinite endpoint beside a finite one keeps the true quotient" {
+    // The shapes that reach the guard from one corner rather than all
+    // four. [1, inf] over [inf, inf] has two corners of 1 / inf beside two
+    // indeterminate ones, and [-inf, -1] over [-inf, -1] has one
+    // indeterminate corner beside three finite ones, where -inf / -1 is
+    // itself a value the reduction has to carry. The witness on each row
+    // is a quotient the true image attains, attained by the pair of values
+    // named in the comment beside it.
+    const inf = std.math.inf(f64);
+    const neg_inf = -std.math.inf(f64);
+    const cases = [_]struct { a: Interval, b: Interval, witness: f64 }{
+        // x / x for any x past the end of the range, so x = y.
+        .{ .a = Interval.init(1.0, inf), .b = Interval.init(inf, inf), .witness = 1.0 },
+        // (-1) / (-1) = 1.
+        .{ .a = Interval.init(neg_inf, -1.0), .b = Interval.init(neg_inf, -1.0), .witness = 1.0 },
+        // 1 / (-1) = -1.
+        .{ .a = Interval.init(1.0, inf), .b = Interval.init(neg_inf, -1.0), .witness = -1.0 },
+        // (-1) / 1 = -1.
+        .{ .a = Interval.init(neg_inf, -1.0), .b = Interval.init(1.0, inf), .witness = -1.0 },
+    };
+    for (cases) |c| {
+        const q = c.a.div(c.b);
+        try expectOrdered(q);
+        try std.testing.expect(!std.math.isNan(q.lo));
+        try std.testing.expect(!std.math.isNan(q.hi));
+        try std.testing.expect(q.contains(c.witness));
+    }
+}
+
+/// Whether the constructor has already normalized the two overflow rays.
+/// Every frontier call that would otherwise form an indeterminate sum
+/// needs that to have happened first, and needs it to be CHECKED first:
+/// read as the points they used to be, those calls hand the constructor a
+/// NaN and its ordering check aborts, which in a checked build takes
+/// every later test in this process down with it. A failed assertion is
+/// the other half of that answer, and the right one — the test fails, the
+/// process lives, and the calls below still get their chance to be judged.
+fn expectCanonicalRays() !void {
+    const inf = std.math.inf(f64);
+    const fmax = std.math.floatMax(f64);
+    const pos = Interval.init(inf, inf);
+    const neg = Interval.init(-inf, -inf);
+    try std.testing.expectEqual(fmax, pos.lo);
+    try std.testing.expectEqual(inf, pos.hi);
+    try std.testing.expectEqual(-inf, neg.lo);
+    try std.testing.expectEqual(-fmax, neg.hi);
+}
+
+/// The exact real sum of two finite f64 values, as the pair (s, err) of an
+/// f128 TwoSum: s + err IS that real sum, with no rounding left in it.
+///
+/// The pair is not decoration. The sum of two f64 values is exact in f128
+/// as long as the span between their exponents fits in f128's 113
+/// significand bits, which is the usual case and covers every small
+/// integer sum. It stops being exact when that span is wide enough to
+/// cross 113, and M - 3 crosses it by a long way: M = (2^53 - 1) * 2^971,
+/// so M - 3 needs 971 + 53 = 1024 significand bits and rounds straight
+/// back onto M in f128 as well. A comparator built on the rounded sum alone
+/// would therefore report the unsafe [M, M] as the right answer for M - 3,
+/// and the residual is what says otherwise. Overflow and underflow of f128
+/// cannot happen for a sum of finite f64s or for its residual, so the
+/// whole argument is arithmetic rather than a range assumption.
+fn twoSum(a: f64, b: f64) [2]f128 {
+    const fa: f128 = a;
+    const fb: f128 = b;
+    const s: f128 = fa + fb;
+    const bb: f128 = s - fa;
+    const err: f128 = (fa - (s - bb)) + (fb - bb);
+    return .{ s, err };
+}
+
+/// Whether `bound` is at or below the exact real sum of `a` and `b`, judged
+/// without rounding the sum.
+///
+/// A bound off the rounded sum cannot be carried back across it by the
+/// residual: the residual is at most half a step of f128 and a step of f64
+/// is 2^60 times wider, so an f64 strictly below the rounded sum is
+/// strictly below the exact one as well. A bound sitting ON the rounded sum
+/// is the case the residual exists for, and its sign is the whole answer: a
+/// positive residual is the part of the truth that the rounding dropped
+/// BELOW the sum, so a lower bound there is above the sum it was asked to
+/// bound.
+fn sumBoundLe(bound: f64, a: f64, b: f64) bool {
+    const pair = twoSum(a, b);
+    const w: f128 = bound;
+    if (w != pair[0]) return w < pair[0];
+    return pair[1] >= 0;
+}
+
+/// Whether `bound` is at or above the exact real sum of `a` and `b`, the
+/// mirror of sumBoundLe.
+fn sumBoundGe(bound: f64, a: f64, b: f64) bool {
+    const pair = twoSum(a, b);
+    const w: f128 = bound;
+    if (w != pair[0]) return w > pair[0];
+    return pair[1] <= 0;
+}
+
+test "overflow ray: canonical constructor" {
+    // A box whose two ends point the same way holds no real member that an
+    // f64 can name, and the only sound thing an f64 can say about it is the
+    // ray that reaches the end of the format. `init(+inf, +inf)` supplies
+    // the closed overflow ray [floatMax, +inf] and `init(-inf, -inf)` its
+    // mirror [-inf, -floatMax]. Both are conservative, and both are
+    // CANONICAL, which is the property every consumer reads: no lower bound
+    // is +inf and no upper bound is -inf.
+    //
+    // This is also why the frontier calls below do not abort. Read as the
+    // points the ends used to be, +inf meets -inf as inf - inf and
+    // inf + (-inf), and in a checked build the constructor's own ordering
+    // check refuses the NaN it was handed.
+    const inf = std.math.inf(f64);
+    const neg_inf = -inf;
+    const fmax = std.math.floatMax(f64);
+
+    const pos = Interval.init(inf, inf);
+    try expectOrdered(pos);
+    try std.testing.expectEqual(fmax, pos.lo);
+    try std.testing.expectEqual(inf, pos.hi);
+    try std.testing.expect(pos.lo != inf);
+    try std.testing.expect(pos.hi != neg_inf);
+    try std.testing.expect(pos.signOf() == .positive);
+
+    const neg = Interval.init(neg_inf, neg_inf);
+    try expectOrdered(neg);
+    try std.testing.expectEqual(neg_inf, neg.lo);
+    try std.testing.expectEqual(-fmax, neg.hi);
+    try std.testing.expect(neg.lo != inf);
+    try std.testing.expect(neg.hi != neg_inf);
+    try std.testing.expect(neg.signOf() == .negative);
+
+    // A ray carries the whole half-line it stands for. Each one contains
+    // the finite frontier it is named for, reaches no further, and stops
+    // short of zero, which is what makes it a ray and not a line.
+    try std.testing.expect(pos.contains(fmax));
+    try std.testing.expect(!pos.contains(0.0));
+    try std.testing.expect(!pos.contains(-fmax));
+    try std.testing.expect(neg.contains(-fmax));
+    try std.testing.expect(!neg.contains(0.0));
+    try std.testing.expect(!neg.contains(fmax));
+
+    // Equality reads the normalized fields, which is the observable half
+    // of the change: the ray denotes the same set as the wider pair an
+    // unbounded box could be written as, and `eql` says so rather than
+    // comparing two bit patterns a caller has to interpret.
+    try std.testing.expect(pos.eql(Interval.init(fmax, inf)));
+    try std.testing.expect(neg.eql(Interval.init(-inf, -fmax)));
+
+    // Nothing else moved. The whole line has both ends canonical already,
+    // a bounded pair is handed back field for field, and a ray with ONE
+    // infinite end is a different thing from the ray above: [1, +inf) is
+    // an upper-unbounded half-line and is left exactly as it was.
+    const line = Interval.init(neg_inf, inf);
+    try std.testing.expectEqual(neg_inf, line.lo);
+    try std.testing.expectEqual(inf, line.hi);
+    const bounded = Interval.init(1.0, 3.0);
+    try std.testing.expectEqual(@as(f64, 1.0), bounded.lo);
+    try std.testing.expectEqual(@as(f64, 3.0), bounded.hi);
+    const wide = Interval.init(-fmax, fmax);
+    try std.testing.expectEqual(-fmax, wide.lo);
+    try std.testing.expectEqual(fmax, wide.hi);
+    const upper_half = Interval.init(1.0, inf);
+    try std.testing.expectEqual(@as(f64, 1.0), upper_half.lo);
+    try std.testing.expectEqual(inf, upper_half.hi);
+    const lower_half = Interval.init(neg_inf, -1.0);
+    try std.testing.expectEqual(neg_inf, lower_half.lo);
+    try std.testing.expectEqual(@as(f64, -1.0), lower_half.hi);
+}
+
+test "overflow ray: the exact sum comparator sees past the f128 rounding" {
+    // The comparator is the oracle for the three bounds below, so it is
+    // checked against the two answers it exists to disagree with.
+    //
+    // M - 3 is the frontier one: f128 rounds it back onto M, and M is the
+    // nearest f64 at or above it as well, so [M, M] is the answer every
+    // rounded comparison in this file would accept and the one the exact
+    // sum refuses.
+    const m = std.math.floatMax(f64);
+    try std.testing.expectEqual(@as(f128, m), twoSum(m, -3.0)[0]);
+    try std.testing.expect(!sumBoundLe(m, m, -3.0));
+    try std.testing.expect(sumBoundLe(-m, m, -3.0));
+    try std.testing.expect(sumBoundGe(m, m, -3.0));
+    // The one step below M is where the sound lower bound has to sit.
+    try std.testing.expect(sumBoundLe(oneStepBelow(m), m, -3.0));
+
+    // And a residual that is not a frontier artefact at all: the sum of
+    // 1e300 and -1e-300 rounds onto 1e300 in f128 and the true sum is
+    // below it by 1e-300, so the same signed decision applies. Both
+    // operands are named as f64 values on purpose: the literal written
+    // here is a decimal with more digits than f64 holds, so widening the
+    // literal directly and letting twoSum round it are two different
+    // numbers, and the reference has to be the one the operands actually
+    // carry.
+    const big: f64 = 1e300;
+    const small: f64 = -1e-300;
+    try std.testing.expectEqual(@as(f128, big), twoSum(big, small)[0]);
+    try std.testing.expect(!sumBoundLe(big, big, small));
+    try std.testing.expect(sumBoundGe(big, big, small));
+}
+
+test "div: a quotient past the end of the range keeps the unbounded answer" {
+    // The OTHER use of the two outward steps, and a different case from
+    // the constructor's rays. Every operand here is finite, so nothing is
+    // read as a ray: the corner itself overflows, and what it stands for
+    // is the finite real +/-2 * floatMax that no f64 holds. A lower bound
+    // of -floatMax would sit ABOVE that real and a lower bound of +floatMax
+    // on the positive side would sit above it too, so the step at the end
+    // of the range has to go outward to the infinities rather than back
+    // to the finite frontier.
+    //
+    // The exact quotient is exact in f128 and no oracle is reused: the
+    // divisor is a power of two, so scaling floatMax by it doubles the
+    // value without any rounding at all. Containment against that widened
+    // real is the whole requirement, and it fails on a bound pulled back
+    // into the range without demanding any particular width.
+    const fmax = std.math.floatMax(f64);
+    const half: f64 = 0.5;
+    const twice_max: f128 = 2.0 * @as(f128, fmax);
+    const down = Interval.init(-fmax, -fmax).div(Interval.init(half, half));
+    try expectOrdered(down);
+    try std.testing.expect(!std.math.isNan(down.lo));
+    try std.testing.expect(!std.math.isNan(down.hi));
+    try std.testing.expect(@as(f128, down.lo) <= -twice_max);
+    try std.testing.expect(-twice_max <= @as(f128, down.hi));
+    const up = Interval.init(-fmax, -fmax).div(Interval.init(-half, -half));
+    try expectOrdered(up);
+    try std.testing.expect(!std.math.isNan(up.lo));
+    try std.testing.expect(!std.math.isNan(up.hi));
+    try std.testing.expect(@as(f128, up.lo) <= twice_max);
+    try std.testing.expect(twice_max <= @as(f128, up.hi));
+}
+
+/// The f64 one representable step below x, written out here rather than
+/// imported so the comparator's own oracle does not come from the file
+/// under test. Patterns ascend with the value for positives and descend
+/// for negatives, so the step this direction takes is the other one in
+/// each half of the format.
+fn oneStepBelow(x: f64) f64 {
+    const bits: u64 = @bitCast(x);
+    return @bitCast(if (bits & (@as(u64, 1) << 63) != 0) bits + 1 else bits - 1);
+}
+
+test "overflow ray: a sum of the positive ray is bounded from below under M-3" {
+    const inf = std.math.inf(f64);
+    const fmax = std.math.floatMax(f64);
+    const pos = Interval.init(inf, inf);
+
+    // No f64 witnesses any of these three, which is exactly why they are
+    // worth a regression. The image of [floatMax, +inf) added to
+    // [-3, +inf) runs from floatMax - 3 upward, and floatMax - 3 lies in
+    // the gap between floatMax and the step below it: the ULP there is
+    // 2^971, so every f64 at or above floatMax - 3 is floatMax or more. A
+    // lower bound sitting on floatMax therefore EXCLUDES the real value
+    // floatMax - 3 and passes every membership query a consumer working in
+    // f64 can ask. Only exact arithmetic sees the gap, which is what the
+    // comparator above is for.
+    const sum = pos.add(Interval.init(-3.0, inf));
+    try expectOrdered(sum);
+    try std.testing.expect(sumBoundLe(sum.lo, fmax, -3.0));
+    try std.testing.expect(std.math.isInf(sum.hi) and sum.hi > 0.0);
+
+    // A shift is an add against the point [delta, delta], so the same real
+    // value is at stake and the same bound has to be under it.
+    const shift = pos.translate(-3.0);
+    try expectOrdered(shift);
+    try std.testing.expect(sumBoundLe(shift.lo, fmax, -3.0));
+    try std.testing.expect(std.math.isInf(shift.hi) and shift.hi > 0.0);
+
+    // A margin comes off the low end, so the real value is the same one.
+    const wide = pos.expand(3.0);
+    try expectOrdered(wide);
+    try std.testing.expect(sumBoundLe(wide.lo, fmax, -3.0));
+    try std.testing.expect(std.math.isInf(wide.hi) and wide.hi > 0.0);
+
+    // What they do owe is the half-line they stand for: each answer starts
+    // below the ray it was built from and reaches up without a bound.
+    try std.testing.expect(sum.contains(fmax));
+    try std.testing.expect(!sum.contains(0.0));
+}
+
+test "overflow ray: a sum of the negative ray is bounded from above over -M+3" {
+    const inf = std.math.inf(f64);
+    const neg_inf = -inf;
+    const fmax = std.math.floatMax(f64);
+    const neg = Interval.init(neg_inf, neg_inf);
+
+    // The mirror of the case above, and the same gap from the other side.
+    // The image of [-inf, -floatMax] added to [-inf, 3] runs up to
+    // -floatMax + 3, and that value lies between -floatMax and the step
+    // above it: the ULP there is 2^971 as well. A bound sitting on
+    // -floatMax therefore excludes a real value the image takes.
+    const sum = neg.add(Interval.init(neg_inf, 3.0));
+    try expectOrdered(sum);
+    try std.testing.expect(sum.lo == neg_inf);
+    try std.testing.expect(sumBoundGe(sum.hi, -fmax, 3.0));
+
+    const shift = neg.translate(3.0);
+    try expectOrdered(shift);
+    try std.testing.expect(sumBoundGe(shift.hi, -fmax, 3.0));
+    try std.testing.expect(shift.lo == neg_inf);
+
+    // A negative margin takes -floatMax - 3 off the high end. That value
+    // rounds onto -floatMax, so the outward step is what has to put the
+    // bound past it rather than on it.
+    const narrow = neg.expand(-3.0);
+    try expectOrdered(narrow);
+    try std.testing.expect(sumBoundGe(narrow.hi, -fmax, -3.0));
+    try std.testing.expect(narrow.lo == neg_inf);
+}
+
+test "overflow ray: neg reflects one ray onto the other" {
+    const inf = std.math.inf(f64);
+    const neg_inf = -inf;
+    const fmax = std.math.floatMax(f64);
+    const pos = Interval.init(inf, inf);
+    const neg = Interval.init(neg_inf, neg_inf);
+
+    // IEEE negation is exact at an infinity, so nothing is widened here.
+    // What the constructor adds is that the reflected box is ITSELF
+    // canonical, which is the whole difference between a negative ray and
+    // the degenerate pair the reflection would otherwise produce: -floatMax
+    // has to be the new upper bound, and -inf cannot be an upper bound of
+    // anything at all.
+    const to_neg = pos.neg();
+    try expectOrdered(to_neg);
+    try std.testing.expectEqual(neg_inf, to_neg.lo);
+    try std.testing.expectEqual(-fmax, to_neg.hi);
+    try std.testing.expect(to_neg.hi != neg_inf);
+    try std.testing.expect(to_neg.eql(neg));
+
+    // The round trip closes, from either end, and each reflection starts
+    // from a ray rather than from a point.
+    try std.testing.expect(neg.neg().eql(pos));
+    try std.testing.expect(pos.neg().neg().eql(pos));
+    try std.testing.expect(neg.neg().neg().eql(neg));
+}
+
+test "overflow ray: recip of a ray reaches the reciprocal of its near end" {
+    const inf = std.math.inf(f64);
+    const neg_inf = -inf;
+    const pos = Interval.init(inf, inf);
+    const neg = Interval.init(neg_inf, neg_inf);
+
+    // 1 / [floatMax, +inf) is [0, 1/floatMax], and 1/floatMax is an
+    // ordinary subnormal f64 of about 5.6e-309. The reciprocal of the ray
+    // read as a POINT is a signed zero that the underflow repair widens to
+    // one subnormal either side, which is a pair around zero and excludes
+    // 1e-310 outright. The reciprocal of the ray as a ray reaches its near
+    // end, and the witness is an ordinary membership query.
+    const r_pos = pos.recip();
+    try expectOrdered(r_pos);
+    try std.testing.expect(r_pos.contains(0.0));
+    try std.testing.expect(r_pos.contains(1e-310));
+    try std.testing.expect(r_pos.hi > 1e-310);
+    try std.testing.expect(r_pos.lo < 0.0);
+
+    // The mirror: 1 / (-inf, -floatMax] is [-1/floatMax, 0].
+    const r_neg = neg.recip();
+    try expectOrdered(r_neg);
+    try std.testing.expect(r_neg.contains(0.0));
+    try std.testing.expect(r_neg.contains(-1e-310));
+    try std.testing.expect(r_neg.lo < -1e-310);
+    try std.testing.expect(r_neg.hi > 0.0);
+}
+
+test "overflow ray: same-ray subtraction and opposite-ray addition enclose the line" {
+    try expectCanonicalRays();
+    const inf = std.math.inf(f64);
+    const neg_inf = -inf;
+    const pos = Interval.init(inf, inf);
+    const neg = Interval.init(neg_inf, neg_inf);
+    const witnesses = [_]f64{ 0.0, 1.0, -1.0, 1e308, -1e308, 1e-310, -1e-310 };
+
+    // R - R is every real for R = [floatMax, +inf): take the divisor to be
+    // floatMax and the dividend to be t * floatMax, which is in the ray for
+    // every t there is. Read as the two points the ends used to be, the
+    // same call is inf - inf, which a checked build refuses at init.
+    const same = pos.sub(pos);
+    try expectOrdered(same);
+    try std.testing.expect(same.lo == neg_inf and same.hi == inf);
+    for (witnesses) |w| try std.testing.expect(same.contains(w));
+
+    // The mirror, and the same line from the other end of the format.
+    const same_neg = neg.sub(neg);
+    try expectOrdered(same_neg);
+    try std.testing.expect(same_neg.lo == neg_inf and same_neg.hi == inf);
+    for (witnesses) |w| try std.testing.expect(same_neg.contains(w));
+
+    // The two rays added together: either operand can outrun the other by
+    // any amount, so the image is every real and the line is the only
+    // answer a bound can be. A negative ray added to a positive one is the
+    // order in which inf + (-inf) is formed under the point reading.
+    const across = neg.add(pos);
+    try expectOrdered(across);
+    try std.testing.expect(across.lo == neg_inf and across.hi == inf);
+    for (witnesses) |w| try std.testing.expect(across.contains(w));
+
+    // Both orders, then, because they are the same image and not two
+    // different ones: write the operands as floatMax + a and -floatMax - b
+    // with a and b at or above zero and the sum is a - b, which is every
+    // real there is. Neither order can return a narrower answer than that,
+    // so both have to come back as the line.
+    const across_up = pos.add(neg);
+    try expectOrdered(across_up);
+    try std.testing.expect(across_up.lo == neg_inf and across_up.hi == inf);
+    for (witnesses) |w| try std.testing.expect(across_up.contains(w));
+}
+
+test "overflow ray: an infinite shift moves a box by the ray, not by a point" {
+    const inf = std.math.inf(f64);
+    const neg_inf = -inf;
+    const fmax = std.math.floatMax(f64);
+    const pos = Interval.init(inf, inf);
+    const neg = Interval.init(neg_inf, neg_inf);
+
+    // An infinite delta is the scalar overflow ray, so it carries two
+    // endpoints and the shift is the sum against both of them. The witness
+    // is a plain membership query: [-floatMax, floatMax] shifted by
+    // [floatMax, +inf) has an image running from -floatMax + floatMax = 0
+    // upward, so the answer has to contain 0. Shifted by the NUMBER +inf
+    // instead, the low end comes back at floatMax, which is above every
+    // value the image takes below it.
+    const up = Interval.init(-fmax, fmax).translate(inf);
+    try expectOrdered(up);
+    try std.testing.expect(up.contains(0.0));
+    try std.testing.expect(!up.contains(-1.0));
+    try std.testing.expect(up.hi == inf);
+
+    // The mirror: shifted by (-inf, -floatMax] the image runs from -inf up
+    // to floatMax + (-floatMax) = 0, so the answer has to contain 0 and
+    // must not reach past it.
+    const down = Interval.init(-fmax, fmax).translate(neg_inf);
+    try expectOrdered(down);
+    try std.testing.expect(down.contains(0.0));
+    try std.testing.expect(!down.contains(1.0));
+    try std.testing.expect(down.lo == neg_inf);
+    try std.testing.expect(down.hi <= 0.0);
+
+    // The rays shifted by themselves. [floatMax, +inf) added to itself runs
+    // from 2 * floatMax upward, which is past every finite f64, so no finite
+    // witness of the image exists and the claim is about the bounds: no
+    // lower bound may sit above floatMax, which is the tightest sound one,
+    // and no upper bound may stand at all. The mirror is the same two
+    // claims from the other end of the format.
+    const ray_up = pos.translate(inf);
+    try expectOrdered(ray_up);
+    try std.testing.expect(ray_up.lo == fmax);
+    try std.testing.expect(ray_up.hi == inf);
+
+    const ray_down = neg.translate(neg_inf);
+    try expectOrdered(ray_down);
+    try std.testing.expect(ray_down.lo == neg_inf);
+    try std.testing.expect(ray_down.hi == -fmax);
+}
+
+test "overflow ray: expand by the positive margin ray is the whole line" {
+    try expectCanonicalRays();
+    const inf = std.math.inf(f64);
+    const neg_inf = -inf;
+    const fmax = std.math.floatMax(f64);
+    const pos = Interval.init(inf, inf);
+    const neg = Interval.init(neg_inf, neg_inf);
+    const witnesses = [_]f64{ 0.0, 1.0, -1.0, 1e308, -1e308 };
+
+    // A margin of +inf is the ray [floatMax, +inf), and widening any box by
+    // it reaches without a bound in both directions: the canonical body
+    // already walks the low end to -inf and leaves the high one at +inf,
+    // so no branch is needed for it. Read as the NUMBER +inf instead, the
+    // two ends of the positive ray meet as inf - inf at the low end, and
+    // a checked build refuses that NaN.
+    const from_pos = pos.expand(inf);
+    try expectOrdered(from_pos);
+    try std.testing.expect(from_pos.lo == neg_inf and from_pos.hi == inf);
+    for (witnesses) |w| try std.testing.expect(from_pos.contains(w));
+
+    const from_neg = neg.expand(inf);
+    try expectOrdered(from_neg);
+    try std.testing.expect(from_neg.lo == neg_inf and from_neg.hi == inf);
+    for (witnesses) |w| try std.testing.expect(from_neg.contains(w));
+
+    // A bounded box widens to the same line, and it is the margin that
+    // takes it there rather than the box: -floatMax - +inf is -inf and
+    // floatMax + +inf is +inf whatever pair the box has.
+    const from_bounded = Interval.init(-fmax, fmax).expand(inf);
+    try expectOrdered(from_bounded);
+    try std.testing.expect(from_bounded.lo == neg_inf and from_bounded.hi == inf);
+    for (witnesses) |w| try std.testing.expect(from_bounded.contains(w));
+}
+
+test "overflow ray: expand by the negative margin ray needs an unbounded input" {
+    try expectCanonicalRays();
+    const inf = std.math.inf(f64);
+    const neg_inf = -inf;
+    const fmax = std.math.floatMax(f64);
+
+    // A margin of -inf is the ray of margins (-inf, -floatMax], every one
+    // of which is a legal narrowing of a box wide enough to take it. Its
+    // image is the union over that whole ray rather than the answer for the
+    // NUMBER -inf, which is the pair (+inf, -inf) and inverts. A bounded
+    // box takes no margin that large, which is why the branch there demands
+    // an unbounded one. That is a PRECONDITION rather than an unconditional
+    // trap: the checked builds diagnose the violation and the unchecked
+    // ones answer outside the contract, as for every other invalid interval
+    // in this library.
+    //
+    // [-floatMax, +inf) narrowed by every margin in that ray reaches down
+    // to -floatMax - (-floatMax) = 0 and up to +inf, so the union is
+    // [0, +inf) and 0 is a bound it attains at the last margin in the ray.
+    const up = Interval.init(-fmax, inf).expand(neg_inf);
+    try expectOrdered(up);
+    try std.testing.expect(up.contains(0.0));
+    try std.testing.expect(!up.contains(-1.0));
+    try std.testing.expect(up.lo <= 0.0);
+    try std.testing.expect(up.hi == inf);
+
+    // The mirror: (-inf, floatMax] narrowed by every such margin reaches
+    // down to -inf and up to floatMax - (-floatMax) = 0.
+    const down = Interval.init(neg_inf, fmax).expand(neg_inf);
+    try expectOrdered(down);
+    try std.testing.expect(down.contains(0.0));
+    try std.testing.expect(!down.contains(1.0));
+    try std.testing.expect(down.lo == neg_inf);
+    try std.testing.expect(down.hi >= 0.0);
+
+    // The whole line narrowed by the ray is still the whole line: at least
+    // one of the two ends is unbounded in each direction at every margin.
+    const line = Interval.init(neg_inf, inf).expand(neg_inf);
+    try expectOrdered(line);
+    try std.testing.expect(line.lo == neg_inf and line.hi == inf);
+}
+
+test "overflow ray: scale of an unbounded box is the identity or the whole line" {
+    try expectCanonicalRays();
+    const inf = std.math.inf(f64);
+    const neg_inf = -inf;
+    const line = Interval.init(neg_inf, inf);
+
+    // An unbounded box has no finite midpoint: the sum of its two ends
+    // overflows on one side or the other, and the half of it that survives
+    // is not the centre of anything. The bounded algorithm would carry
+    // that infinity into the sum it forms the centre from and hand the
+    // constructor a NaN pair, so the case is answered before the algebra
+    // starts — after the factor itself has been checked, because a NaN
+    // factor is a scalar the caller got wrong and not an unbounded box.
+    //
+    // Both answers are forced rather than chosen. At |factor| == 1 a scale
+    // maps every box onto itself, and this scale discards the sign of the
+    // factor the way it always has, so the identity is the whole image for
+    // every finite completion of an unbounded box as well. At any other
+    // factor a completion [1, c] grows a half-width proportional to c
+    // about a centre that moves with it, and the union over every
+    // completion runs out in both directions at once — which is what the
+    // line covers, without a centre having been invented for the box.
+    for ([_]f64{ 0.0, 1.0, -1.0, 2.0, 0.5, -2.0, 1e308, 1e-308 }) |factor| {
+        const scaled = line.scale(factor);
+        try expectOrdered(scaled);
+        try std.testing.expect(scaled.lo == neg_inf and scaled.hi == inf);
+    }
+
+    // The identity, from both ends and under both signs.
+    for ([_]f64{ 1.0, -1.0 }) |factor| {
+        const upper = Interval.init(1.0, inf);
+        const lower = Interval.init(neg_inf, -1.0);
+        try std.testing.expect(upper.scale(factor).eql(upper));
+        try std.testing.expect(lower.scale(factor).eql(lower));
+        try std.testing.expect(line.scale(factor).eql(line));
+    }
+
+    // A half-unbounded box at any other factor takes the line, and the two
+    // signs of it are the same line. [1, +inf) at 2 has the exact image
+    // [2, +inf) and (-inf, -1] at 2 has (-inf, -2], both inside it.
+    for ([_]f64{ 0.0, 2.0, -2.0, 0.5 }) |factor| {
+        const upper = Interval.init(1.0, inf).scale(factor);
+        try expectOrdered(upper);
+        try std.testing.expect(upper.lo == neg_inf and upper.hi == inf);
+        const lower = Interval.init(neg_inf, -1.0).scale(factor);
+        try expectOrdered(lower);
+        try std.testing.expect(lower.lo == neg_inf and lower.hi == inf);
+    }
+}
+
+test "overflow ray: the algebraic operations agree with the rays" {
+    const inf = std.math.inf(f64);
+    const neg_inf = -inf;
+    const fmax = std.math.floatMax(f64);
+    const pos = Interval.init(inf, inf);
+    const neg = Interval.init(neg_inf, neg_inf);
+    const witnesses = [_]f64{ 0.0, 1.0, -1.0, 1e308, -1e308, fmax, -fmax };
+
+    // Canonical in, canonical out: every one of these is fed two rays and
+    // has to hand back a pair with no lower bound at +inf and no upper
+    // bound at -inf. That is the invariant every consumer now reads, so it
+    // is asserted rather than assumed.
+    const derived = [_]Interval{
+        pos.mul(pos),
+        pos.mul(neg),
+        neg.mul(pos),
+        neg.mul(neg),
+        pos.div(pos),
+        pos.div(neg),
+        pos.abs(),
+        neg.abs(),
+        pos.sqr(),
+        neg.sqr(),
+    };
+    for (derived) |d| {
+        try expectOrdered(d);
+        try std.testing.expect(d.lo != inf);
+        try std.testing.expect(d.hi != neg_inf);
+        try std.testing.expect(!std.math.isNan(d.lo));
+        try std.testing.expect(!std.math.isNan(d.hi));
+    }
+
+    // Squaring either ray squares to the positive ray and the magnitude of
+    // either is the positive ray. Both images start past the end of the
+    // format — floatMax squared is well beyond it — so no finite f64 is a
+    // member of either and the claim is about the bounds instead: no lower
+    // bound may sit above floatMax, the tightest sound one, and no upper
+    // bound may stand at all.
+    const sq = pos.sqr();
+    try std.testing.expect(sq.lo <= fmax);
+    try std.testing.expect(sq.hi == inf);
+    try std.testing.expect(neg.sqr().eql(sq));
+    const magnitude = pos.abs();
+    try std.testing.expect(magnitude.lo <= fmax);
+    try std.testing.expect(magnitude.hi == inf);
+    try std.testing.expect(neg.abs().eql(magnitude));
+
+    // A same-ray quotient is the indeterminate form, and its image is every
+    // real: x / x = 1 for x in the ray, and x / floatMax is every real x
+    // above floatMax. The line is the only sound answer, so it is the only
+    // one there is.
+    const quotient = pos.div(pos);
+    try std.testing.expect(quotient.lo == neg_inf and quotient.hi == inf);
+    for (witnesses) |w| try std.testing.expect(quotient.contains(w));
+
+    // The hull of the two rays is the line, which no narrower answer holds
+    // together, and they are disjoint, so the intersection is empty: their
+    // common part would have to be at once above floatMax and below
+    // -floatMax. Both answers are forced.
+    const hulled = pos.hull(neg);
+    try std.testing.expect(hulled.lo == neg_inf and hulled.hi == inf);
+    try std.testing.expect(pos.intersect(neg) == null);
+    const items = [_]Interval{ pos, neg };
+    const hulled_of = Interval.hullOf(&items).?;
+    try std.testing.expect(hulled_of.lo == neg_inf and hulled_of.hi == inf);
+    try std.testing.expect(Interval.intersectionOf(&items) == null);
+}
+
+/// The 28 names `interval.ext` publishes, in the order `src/root.zig`
+/// writes them, so the two lists can be read against each other. The
+/// comparison is a set comparison, so the order carries no meaning.
+const ext_names = [_][]const u8{
+    "sqrt",  "cbrt",  "pow",   "powf",  "exp",  "exp2",  "expm1",
+    "log",   "log2",  "log10", "log1p", "sin",  "cos",   "tan",
+    "asin",  "acos",  "atan",  "atan2", "sinh", "cosh",  "tanh",
+    "asinh", "acosh", "atanh", "floor", "ceil", "trunc", "round",
+};
+
+/// The five names `interval.lp` publishes, in the order `src/root.zig`
+/// writes them. A name that reaches the namespace without a line written
+/// for it there fails this test, and a name that does not is unreachable
+/// from outside the package at all.
+const lp_names = [_][]const u8{ "System", "Lin", "Cmp", "Part", "Partition" };
+
+/// Assert that the namespace `namespace` publishes exactly `expected`,
+/// naming the namespace `what` in the message when it does not.
+///
+/// Both halves are needed and neither is enough alone. The names cannot
+/// see a declaration added beside the set, because every expected name
+/// would still be there; the count cannot see one swapped for another.
+/// Equal counts together with every expected name present is equality of
+/// the two sets.
+///
+/// The count is read off `@typeInfo(...).decls` and the names off
+/// `@hasDecl`, because only the length of that slice folds: it is a slice
+/// of compiler-generated data, so indexing it at compile time does not
+/// resolve. The two spellings answer about the same declarations, the
+/// public ones, which is the whole of what a namespace publishes.
+///
+/// `expected` is taken as an array rather than as a slice of names: a
+/// comptime-known name is what `@hasDecl` asks for, and a name reached
+/// through a slice is not comptime-known however comptime the slice is.
+fn expectExactDecls(
+    comptime what: []const u8,
+    comptime namespace: type,
+    comptime expected: anytype,
+) !void {
+    const published = @typeInfo(namespace).@"struct".decls.len;
+    if (published != expected.len) {
+        std.debug.print("{s} publishes {d} names, expected {d}:\n", .{
+            what,
+            published,
+            expected.len,
+        });
+        for (@typeInfo(namespace).@"struct".decls) |d| {
+            std.debug.print("  {s}\n", .{d.name});
+        }
+        return error.UnexpectedPublicNames;
+    }
+    inline for (expected) |want| {
+        if (!@hasDecl(namespace, want)) {
+            std.debug.print("{s} does not publish {s}\n", .{ what, want });
+            return error.MissingPublicName;
+        }
+    }
+}
+
+test "ext and lp publish exactly the enumerated names" {
+    // The public shape of `ext` and `lp`: exactly the names listed above,
+    // and nothing else.
+    //
+    // This is what guards against a stray `pub`. Both namespaces are
+    // written out one name at a time in `src/root.zig` rather than aliased
+    // to the whole of `interval_ext.zig` and `lp.zig`, because a module
+    // alias republishes every `pub` in the file it names and leaves the
+    // question of which of them are meant to be public to nothing at all.
+    // The declarations are read here off the namespaces as they are
+    // published, so a name reaching either of them without a line written
+    // for it in `src/root.zig` fails this test. A `pub` added to either
+    // source file is not what this catches, and does not need catching: a
+    // name absent from the two lists is unreachable from outside the
+    // package, which is what enumerating them bought.
+    // `interval.ext` and `interval.lp` are struct types, and a type is
+    // passed as itself: `@TypeOf` of either one answers `type`, which is
+    // the type of the namespace rather than the namespace.
+    try expectExactDecls("ext", interval.ext, ext_names);
+    try expectExactDecls("lp", interval.lp, lp_names);
+
+    // The other side of the same check, and why this is a test rather than
+    // a comment: every name in both lists has to keep resolving, and
+    // `@field` is the probe that says so. A name gone missing is a compile
+    // error here, which is the right severity for a public name that no
+    // longer exists rather than one that answers wrongly.
+    comptime {
+        for (ext_names) |name| _ = @field(interval, name);
+        for (lp_names) |name| _ = @field(interval.lp, name);
     }
 }

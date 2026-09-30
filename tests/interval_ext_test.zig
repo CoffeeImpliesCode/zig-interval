@@ -7,12 +7,43 @@
 //! values that are exact in binary floating point, the integers and the
 //! infinities, are compared for equality.
 //!
-//! Two of the tests below do reach into the width, and deliberately. The
-//! enclosure is the whole point of the library, and the elementary
-//! functions are widened by two ULP rather than one because a measured
-//! worst case of 1.07 ULP no longer fits in one. A test that quietly
-//! stopped caring about that would let the margin be narrowed away by
-//! someone tidying up, so the width is pinned as well as the containment.
+//! Five of the tests below reach into the width, and deliberately, and
+//! the table names every bound they pin. Four of them pin a step COUNT,
+//! the number of ULP steps that stand between a bound and the value the
+//! library must contain. The fifth pins a width that is a constant
+//! rather than a count, and the table says so on that row.
+//!
+//! The enclosure is the whole point of the library, and the elementary
+//! functions are widened THREE ULP outward because the worst measured
+//! primitive is `tanh` at 2.14 ULP. Two steps did not absorb it: at
+//! x = 0.23139395412799124 the two-step lower bound sat above the true
+//! value and excluded it. A test that quietly stopped caring about that
+//! would let the margin be narrowed away by someone tidying up, so the
+//! width is pinned as well as the containment. The pins are gathered
+//! into the table below so that a deliberate one-ULP tightening reads as
+//! a decision rather than as a mystery failure, and so that the count is
+//! one place to check.
+//!
+//!      op        bound             steps  side   why this row is a width pin
+//!      --------  ----------------  -----  -----  ---------------------------
+//!      sqrt      2.0, 3.0          3      both   the roots of four and nine are exact in
+//!                                                binary, so every ULP of this answer is
+//!                                                the widening and nothing else: the count is
+//!                                                read off here
+//!      tanh      std.math.tanh(x)  3      both   the worst primitive of the family at
+//!                                                2.14 ULP, the one the three steps are for
+//!      sin, cos  @sin(x), @cos(x)  3      both   they do not go through the shared
+//!                                                envelope, so they carry their own margin
+//!      log       @log(2.0)         3      upper  only the far end of a one-sided path is
+//!                                                computed, and it takes the same steps
+//!      log       0.0               -      upper  a computed zero is widened by `zero_slack`
+//!                                                and not by steps, so this row pins that
+//!                                                constant, which two tests assert
+//!
+//! Three more, `floor`, `ceil` and `trunc`, say only that the answer is
+//! not snapped onto the exact integer. That is a one-step floor with no
+//! count in it, so they are the strictest of the containment tests rather
+//! than width pins, and the table does not claim them.
 
 const std = @import("std");
 const interval = @import("interval");
@@ -36,14 +67,57 @@ fn check(x: ?Interval) !void {
     _ = try answer(x);
 }
 
+/// Which way a bound moves. A lower bound moves down, towards minus
+/// infinity, and an upper bound moves up. Every width below is counted
+/// in one of these two directions, so a table row can name the side it
+/// is talking about and mean exactly one thing by it.
+const side = enum { down, up };
+
+/// `v` three ULP outward in the given direction: the bound the elementary
+/// widening of `src/interval_ext.zig` gives an endpoint whose value is
+/// exactly `v`. A bound compared against this has been moved at most
+/// three steps, so the comparison is what notices the widening being
+/// widened as well as what pins the count.
+fn outward(v: f64, comptime s: side) f64 {
+    return switch (s) {
+        .down => interval.prevDown(interval.prevDown(interval.prevDown(v))),
+        .up => interval.nextUp(interval.nextUp(interval.nextUp(v))),
+    };
+}
+
+/// The nearest bound a three-step answer does NOT reach: `outward` with
+/// one step taken back off. A bound strictly beyond this line has been
+/// moved the full three steps, so a margin narrowed to one or two steps
+/// fails against it and a three-step margin passes.
+fn inward(v: f64, comptime s: side) f64 {
+    return switch (s) {
+        .down => interval.prevDown(interval.prevDown(v)),
+        .up => interval.nextUp(interval.nextUp(v)),
+    };
+}
+
+/// The width a computed zero gets, and the one bound in this file that
+/// is not a step count. A computed zero stands for a real of magnitude
+/// at most half the smallest positive subnormal, so one subnormal to
+/// each side of the pair of zeros already covers it, and the library
+/// holds that width as the single value below rather than as roundings
+/// that happen to agree. The pins that use this are pins of the
+/// constant, not of the widening, which is why the table gives this row
+/// no step count.
+const zero_slack: f64 = 2 * std.math.floatTrueMin(f64);
+
 test "sqrt: the roots of a positive interval sit inside the result" {
     const s = try answer(ext.sqrt(Interval.init(4.0, 9.0)));
     try std.testing.expect(s.lo <= 2.0);
     try std.testing.expect(s.hi >= 3.0);
-    // Two ULP out at each end, which is what the widening rule costs an
-    // elementary function.
-    try std.testing.expect(s.lo >= interval.prevDown(interval.prevDown(2.0)));
-    try std.testing.expect(s.hi <= interval.nextUp(interval.nextUp(3.0)));
+    // Three ULP out at each end, which is what the widening rule costs
+    // an elementary function. The roots of four and nine are exact in
+    // binary floating point, so every ULP of movement in this answer is
+    // the widening and nothing else: it is the cheapest place in the
+    // file to read the count off, and a widening to four steps would
+    // fail here first.
+    try std.testing.expect(s.lo >= outward(2.0, .down));
+    try std.testing.expect(s.hi <= outward(3.0, .up));
 }
 
 test "sqrt: a lower end below zero contributes only the bound at zero" {
@@ -103,9 +177,26 @@ test "asin: the angles of the ends sit inside the result" {
     try std.testing.expect(a.hi >= 1.5707963267948966);
 }
 
-test "asin: outside [-1, 1] there is no real angle" {
-    try std.testing.expect(ext.asin(Interval.init(-2.0, 0.0)) == null);
-    try std.testing.expect(ext.asin(Interval.init(0.0, 1.5)) == null);
+test "asin: the argument is clipped to [-1, 1], and null only when it misses it whole" {
+    // Misses the domain whole: the true image is empty, so `null`.
+    try std.testing.expect(ext.asin(Interval.init(2.0, 4.0)) == null);
+    try std.testing.expect(ext.asin(Interval.init(1.5, 4.0)) == null);
+
+    // Straddling the low end. The clip replaces the FAR end with -1 and
+    // leaves the near one where it was, so the answer is exactly the span
+    // between the two point answers. Comparing those point enclosures is
+    // this file's rule and not a convenience: a rounded literal here would
+    // pin the width of the widening rather than the clipping, and a literal
+    // argument to `std.math.asin` is folded at comptime, where it does not
+    // exist.
+    const far = try answer(ext.asin(Interval.init(-1.0, -1.0)));
+    const near = try answer(ext.asin(Interval.init(0.5, 0.5)));
+    const clipped = try answer(ext.asin(Interval.init(-4.0, 0.5)));
+    try std.testing.expectEqual(far.lo, clipped.lo);
+    try std.testing.expectEqual(near.hi, clipped.hi);
+    // -pi/2 is exact in binary, so the far end is pinned against the literal
+    // as well: the clip really did reach the domain boundary.
+    try std.testing.expect(clipped.lo <= -1.5707963267948966);
 }
 
 test "acos: the angles of the ends sit inside the result, falling" {
@@ -116,9 +207,19 @@ test "acos: the angles of the ends sit inside the result, falling" {
     try std.testing.expect(a.hi >= 1.5707963267948966);
 }
 
-test "acos: outside [-1, 1] there is no real angle" {
-    try std.testing.expect(ext.acos(Interval.init(1.5, 2.0)) == null);
-    try std.testing.expect(ext.acos(Interval.init(-2.0, -1.5)) == null);
+test "acos: the argument is clipped to [-1, 1], and null only when it misses it whole" {
+    try std.testing.expect(ext.acos(Interval.init(2.0, 4.0)) == null);
+
+    // Straddling the upper end, and acos FALLS, so the far end of the clip
+    // is the LOW one. That crossing is what a clip can get wrong that a
+    // refusal could not: there was no answer to cross before.
+    const far = try answer(ext.acos(Interval.init(1.0, 1.0)));
+    const near = try answer(ext.acos(Interval.init(0.5, 0.5)));
+    const clipped = try answer(ext.acos(Interval.init(0.5, 4.0)));
+    try std.testing.expectEqual(far.lo, clipped.lo);
+    try std.testing.expectEqual(near.hi, clipped.hi);
+    // acos(1) is exactly zero.
+    try std.testing.expect(clipped.lo <= 0.0);
 }
 
 test "atanh: the angles of the ends sit inside the result" {
@@ -127,9 +228,58 @@ test "atanh: the angles of the ends sit inside the result" {
     try std.testing.expect(a.hi >= 0.5493061443340548);
 }
 
-test "atanh: the domain is open, and its ends are not on it" {
-    try std.testing.expect(ext.atanh(Interval.init(0.0, 1.0)) == null);
-    try std.testing.expect(ext.atanh(Interval.init(-1.0, 0.0)) == null);
+test "atanh: the argument is clipped to (-1, 1) and the pole answers" {
+    // Past the pole on one side, the clipped end IS the pole, so the answer
+    // runs off to the matching infinity and the near end is untouched.
+    const near = try answer(ext.atanh(Interval.init(-0.5, -0.5)));
+    const clipped = try answer(ext.atanh(Interval.init(-2.0, -0.5)));
+    try std.testing.expectEqual(-inf, clipped.lo);
+    try std.testing.expectEqual(near.hi, clipped.hi);
+
+    const near_pos = try answer(ext.atanh(Interval.init(0.5, 0.5)));
+    const clipped_pos = try answer(ext.atanh(Interval.init(0.5, 2.0)));
+    try std.testing.expectEqual(inf, clipped_pos.hi);
+    try std.testing.expectEqual(near_pos.lo, clipped_pos.lo);
+
+    // The whole open domain is the whole line: atanh rises out of both
+    // poles, so nothing bounds either end.
+    const all = try answer(ext.atanh(Interval.init(-2.0, 2.0)));
+    try std.testing.expectEqual(-inf, all.lo);
+    try std.testing.expectEqual(inf, all.hi);
+
+    // An argument whose ONLY overlap with the domain is the endpoint itself
+    // has an empty true image and stays null: 1 is not in (-1, 1), so
+    // answering `[floatMax, +inf]` would be a bound of nothing wearing an
+    // interval's clothes. This is the one shape where an OPEN domain answers
+    // differently from a closed one, and it is why the emptiness test is
+    // two-sided rather than `lo <= hi`.
+    try std.testing.expect(ext.atanh(Interval.init(1.0, 2.0)) == null);
+    try std.testing.expect(ext.atanh(Interval.init(-2.0, -1.0)) == null);
+}
+
+test "domain: clipping must not have merged null into an answer" {
+    // `mapResult` folds a scalar `?Interval` over a box. Its null has always
+    // meant "some component's TRUE IMAGE IS EMPTY", never "some component
+    // reached a boundary", and clipping to the domain is exactly the change
+    // that could have merged the two. Two components below would clip and
+    // answer on their own; the third has no real image at all, so the fold
+    // must still be null.
+    const partly_outside = interval.Vec(3).fromArray(.{
+        Interval.init(-4.0, 0.5),
+        Interval.init(0.0, 0.5),
+        Interval.init(2.0, 4.0),
+    });
+    try std.testing.expect(interval.mapResult(partly_outside, ext.asin) == null);
+
+    // The same box with the third component in the domain answers, which is
+    // what makes the null above about that third component and not about the
+    // fold refusing to answer at all.
+    const all_in_domain = interval.Vec(3).fromArray(.{
+        Interval.init(-4.0, 0.5),
+        Interval.init(0.0, 0.5),
+        Interval.init(-1.0, 1.0),
+    });
+    try std.testing.expect(interval.mapResult(all_in_domain, ext.asin) != null);
 }
 
 test "acosh: the values of the ends sit inside the result" {
@@ -313,9 +463,14 @@ test "tanh: the result encloses the true value across a spread of arguments" {
     // `nextUp`, so it tracks the magnitude of the value rather than a
     // fixed decimal scale.
     //
-    // tanh is the function the two-ULP widening was chosen for: it is
-    // the worst of the measured primitives at 1.07 ULP, which a single
-    // step does not absorb.
+    // tanh is the function the three-ULP widening is chosen for.
+    // Measured against exact arithmetic in seventy decimal digits it is
+    // the worst of the primitives this file calls, at 2.14 ULP. Two
+    // steps did not absorb it: at x = 0.23139395412799124 the two-step
+    // lower bound sat above the true value and cut it out, which is a
+    // hole in the one guarantee this package makes and one that no
+    // oracle built out of f64 can see, because the nearest f64 to that
+    // true value IS the bound that was returned.
     const cases = [_]struct { x: f64, ref: f64 }{
         .{ .x = 0.1, .ref = 0.09966799462495582261 },
         .{ .x = 0.5, .ref = 0.46211715726000975850 },
@@ -331,46 +486,61 @@ test "tanh: the result encloses the true value across a spread of arguments" {
     }
 }
 
-test "tanh: the result reaches past a one-ULP step, so a narrower one fails" {
+test "tanh: the bound is three ULP out, so a narrower one fails" {
     // The argument is read out of a table rather than written as a
     // literal because the `std.math` primitives have no comptime path:
     // a compile-time float would be folded and rejected. What the table
     // buys is a run-time value the primitive can be asked about, which
-    // is the only way to name the single-step bound to compare against.
-    const cases = [_]f64{ 0.1, 0.5, 1.0, 2.0, 10.0 };
+    // is the only way to name the bound to compare against.
+    //
+    // `inward` is the line a three-step answer has already crossed, so
+    // this pins the margin from below: one or two steps would not reach
+    // it. The first argument is the one the two-step widening failed on,
+    // where the bound sat a fraction of a ULP above the true value and
+    // excluded it.
+    const cases = [_]f64{ 0.23139395412799124, 0.1, 0.5, 1.0, 2.0, 10.0 };
     for (cases) |x| {
         const computed = std.math.tanh(x);
         const t = try answer(ext.tanh(Interval.init(x, x)));
-        try std.testing.expect(t.lo < interval.prevDown(computed));
-        try std.testing.expect(t.hi > interval.nextUp(computed));
+        try std.testing.expect(t.lo < inward(computed, .down));
+        try std.testing.expect(t.hi > inward(computed, .up));
     }
 }
 
-test "sin and cos: the endpoint evaluation widens two ULP, not one" {
+test "sin and cos: the endpoint evaluation carries the three-step margin" {
     // These two do not go through the shared envelope, so the margin
-    // they carry is pinned on its own here.
+    // they carry is pinned on its own here. The pin is from below, at
+    // the `inward` line, so a one- or two-step margin on either of them
+    // fails even though the shared step count would never reach them.
     const cases = [_]f64{ 0.1, 0.5, 1.0, 2.0, 10.0 };
     for (cases) |x| {
         const s = try answer(ext.sin(Interval.init(x, x)));
         const sine = @sin(x);
-        try std.testing.expect(s.lo < interval.prevDown(sine));
-        try std.testing.expect(s.hi > interval.nextUp(sine));
+        try std.testing.expect(s.lo < inward(sine, .down));
+        try std.testing.expect(s.hi > inward(sine, .up));
 
         const c = try answer(ext.cos(Interval.init(x, x)));
         const cosine = @cos(x);
-        try std.testing.expect(c.lo < interval.prevDown(cosine));
-        try std.testing.expect(c.hi > interval.nextUp(cosine));
+        try std.testing.expect(c.lo < inward(cosine, .down));
+        try std.testing.expect(c.hi > inward(cosine, .up));
     }
 }
 
-test "log: the one-sided bound widens two ULP, not one" {
-    // The unbounded side of a logarithm is exact, and only the far end
-    // is computed, so it takes the same two steps as everything else.
-    // The logarithm of one is zero, and two steps up from zero are two
-    // representable subnormals, so this pins the exact count.
-    const l = try answer(ext.log(Interval.init(-1.0, 1.0)));
+test "log: the one-sided bound widens three ULP, not two" {
+    // The unbounded side of a logarithm is exact, and only the far end is
+    // computed, so it takes the same three steps as everything else. The
+    // argument is two rather than one for that reason alone: the
+    // logarithm of one is zero, and a computed zero is the one value the
+    // widening settles with `zero_slack` rather than by rounding, so a
+    // count taken there would be a count of that constant instead.
+    const l = try answer(ext.log(Interval.init(-1.0, 2.0)));
     try std.testing.expectEqual(-inf, l.lo);
-    try std.testing.expectEqual(interval.nextUp(interval.nextUp(0.0)), l.hi);
+    try std.testing.expectEqual(outward(@log(2.0), .up), l.hi);
+
+    // The zero case, pinned at the width it really has.
+    const one = try answer(ext.log(Interval.init(-1.0, 1.0)));
+    try std.testing.expectEqual(-inf, one.lo);
+    try std.testing.expectEqual(zero_slack, one.hi);
 }
 
 test "floor: the ends go down, then outward" {
@@ -583,8 +753,10 @@ test "invariant: an unbounded answer is still an interval, not a null" {
 
     const vanishing = try answer(ext.log(Interval.init(-1.0, 1.0)));
     try std.testing.expectEqual(-inf, vanishing.lo);
-    // The far end is the logarithm of 1, which is zero, so only the
-    // lower side of this answer runs off.
+    // The far end is the logarithm of one, which is zero, so only the
+    // lower side of this answer runs off. A computed zero is widened by
+    // `zero_slack` rather than by three steps, so this brackets that
+    // width; the table's last row says why it is not a step count.
     try std.testing.expect(vanishing.hi > 0.0);
-    try std.testing.expect(vanishing.hi <= interval.nextUp(interval.nextUp(0.0)));
+    try std.testing.expect(vanishing.hi <= zero_slack);
 }

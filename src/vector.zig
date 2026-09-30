@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const Interval = @import("interval.zig").Interval;
+const rounding = @import("rounding.zig");
 
 /// Elementwise binary scalar operation: add, sub, mul, div, hull.
 const Binary = *const fn (Interval, Interval) Interval;
@@ -48,6 +49,15 @@ const UnaryOpt = *const fn (Interval) ?Interval;
 // The two helpers that take a point are the exception: the point comes
 // from the caller and the receiver does not fix its length, so they
 // compare lengths for real, in every build mode.
+//
+// There is no `errdefer` after an `allocLike` for the same statement
+// read from the other side. `add`, `sub`, `mul`, `div` and `hull`
+// allocate, and the only statement between that allocation and
+// `return out` is a `map2` returning void, so no path exists on
+// which a box has been allocated and the operation then fails. An
+// `errdefer` there is dead code that reads as if it were carrying
+// weight, and a reader who believed it would be hunting a second
+// failure that the code cannot have.
 
 /// out[i] = a[i] op b[i].
 fn map2(out: []Interval, a: []const Interval, b: []const Interval, op: Binary) void {
@@ -117,6 +127,28 @@ fn allContains(comps: []const Interval, p: []const f64) bool {
     return true;
 }
 
+/// One component's distance squared, widened upward into a bound the
+/// accumulation below can hold.
+///
+/// A square whose true magnitude falls below the smallest positive
+/// subnormal computes to a signed zero, and `roundUp` answers a zero
+/// with the zero it was handed, because a zero is already its own
+/// smallest bound. That is right for a bound which WAS computed as
+/// zero and wrong here, where the true square is a positive real the
+/// format cannot hold: a bound of zero on it is no bound at all, the
+/// root of the accumulated sum comes back below the distance, and a
+/// point a subnormal away from the box reads as being inside it. Every
+/// square that underflowed is below the smallest positive subnormal, so
+/// substituting it bounds all of them. That subnormal is
+/// `rounding.min_subnormal`, shared with `Interval.sqr` rather than
+/// written out again, so the two cannot disagree about the format.
+/// `Interval.sqr` takes the same guard for the same reason.
+fn squareBound(d: f64) f64 {
+    const sq = d * d;
+    if (sq == 0.0 and d != 0.0) return rounding.min_subnormal;
+    return rounding.roundUp(sq);
+}
+
 /// Euclidean norm of the per-component distances from the point to the
 /// box. The infinity norm, the max of the component distances, is the
 /// other natural box metric; this is not it.
@@ -126,18 +158,39 @@ fn allContains(comps: []const Interval, p: []const f64) bool {
 /// the promise that the distance is zero exactly for a point in the
 /// box, which the length check rules out, and it never reports a
 /// distance below the true one.
+///
+/// The accumulation is enclosed as it grows, not rounded once at the
+/// end. Every step here is a single correctly rounded operation, so
+/// one outward step is the whole of the widening at that step, and
+/// squaring, adding and the root are all monotone in their
+/// non-negative arguments, so enclosing each term and the running
+/// total encloses the root. Rounding the sum once at the end left all
+/// three steps at round-to-nearest, which is half a ULP the wrong way
+/// about as often as not at each of them, and the errors added: the
+/// answer came back one ULP below the true distance in three per cent
+/// of random 2-D cases, and in a third of the cases the sweep in
+/// `tests/vector_test.zig` draws, which puts subnormals in on purpose.
+///
+/// `roundUp` at every step and `roundDown` nowhere, because a distance
+/// is nonnegative and there is no lower end here to round. The zero is
+/// the one answer the widening must not move, since the promise above
+/// is stated in terms of it, and no nonzero square can widen a sum
+/// down to it.
 fn normDistance(comps: []const Interval, p: []const f64) f64 {
     if (comps.len != p.len) return std.math.inf(f64);
     var squares: f64 = 0.0;
     for (comps, p) |c, x| {
-        const d = c.distanceTo(x);
-        squares += d * d;
+        squares = rounding.roundUp(squares + squareBound(c.distanceTo(x)));
     }
-    return @sqrt(squares);
+    return rounding.roundUp(@sqrt(squares));
 }
 
-/// A box in a dimension fixed at compile time. Every component obeys
-/// lo <= hi, so the box is never empty; see `isEmpty`.
+/// A box in a dimension fixed at compile time. Every box this library
+/// builds has canonical components — `lo <= hi`, no lower bound at `+inf`,
+/// no upper bound at `-inf`, neither endpoint a NaN — so no box it returns
+/// is empty. A component that breaks those conditions can reach a box
+/// through any of the constructors or through the public `comps` field
+/// itself, all of which take values as given. See `isEmpty`.
 pub fn Vec(comptime n: usize) type {
     return struct {
         const Self = @This();
@@ -150,9 +203,15 @@ pub fn Vec(comptime n: usize) type {
             return .{ .comps = @splat(fill) };
         }
 
-        /// A box over components taken as given. They must already obey
-        /// lo <= hi; this constructor does not re-check them, so it is
-        /// the one way to place an inverted interval in a box.
+        /// A box over the components as they stand, copied in with no check
+        /// and no normalization. The caller holds the `Interval` contract for
+        /// every component it passes, the same contract a caller of
+        /// `Interval.init` holds and the same one `init(fill)` and a write to
+        /// `comps[i]` assume; an implicit per-element pass here would be a
+        /// second place deciding what a canonical interval is, and the two
+        /// could drift apart. An invalid component therefore reaches the box
+        /// unchanged, and it can equally be written in afterwards. See
+        /// `isEmpty`.
         pub fn fromArray(comps: [n]Interval) Self {
             return .{ .comps = comps };
         }
@@ -303,14 +362,26 @@ pub fn Vec(comptime n: usize) type {
             return normDistance(&self.comps, &p);
         }
 
-        /// Always false. A box is the product of its components, and
-        /// every component of every box obeys lo <= hi, so a box always
-        /// holds at least one point and cannot be empty. There is no
-        /// box state for this to detect: emptiness is only observable
-        /// as the null that `intersect` returns, and that null is never
-        /// stored in a box.
+        /// True when some component is inverted, lo > hi. A box is the
+        /// product of its components, so one empty component leaves the
+        /// whole box holding no point at all, and that is the only empty box
+        /// there is: every box this library builds keeps its components
+        /// ordered, because `Interval.init` checks the ordering and supplies
+        /// the two overflow rays, the widening preserves the ordering, and
+        /// `intersect` reports an empty result as a null instead of storing
+        /// one.
+        ///
+        /// It detects THAT condition and nothing else, so it is not a check
+        /// that a component is canonical. A NaN endpoint is not emptiness: it
+        /// is the poison the scalar contract names, and lo > hi is false for
+        /// it, so a poisoned box reads as non-empty. Neither is a lower bound
+        /// at `+inf` or an upper bound at `-inf` looked at; a box holding
+        /// either reads as non-empty here. The caller who breaks the
+        /// precondition owns what the rest of the box then computes.
         pub fn isEmpty(self: Self) bool {
-            _ = self;
+            for (self.comps) |c| {
+                if (c.lo > c.hi) return true;
+            }
             return false;
         }
     };
@@ -328,6 +399,40 @@ pub fn Vec(comptime n: usize) type {
 /// can reuse the receiver is in place, takes a `*DynVec`, and returns
 /// `void`. So `add` leaves the receiver alone, `iadd` overwrites it,
 /// and `neg` is in place because there is no second box worth keeping.
+///
+/// Ownership: one box, one owner. A constructor hands the box to the
+/// caller, and so does every method that returns a `DynVec`: the
+/// returned box is the new owner's, the receiver keeps whatever it
+/// held, and the new owner frees that box once, with `deinit`, using
+/// the allocator the box was built from. A copy, `var b = a;`, is a
+/// second reference to the SAME slice rather than a second box, so
+/// freeing both is a double free, and nothing in the type can catch
+/// it: the language has no move qualifier to forbid the copy with.
+/// The convention above is the whole of the rule, and the assignment
+/// that honours it frees the old box before overwriting it:
+///
+///     const next = try acc.add(o);
+///     acc.deinit();
+///     acc = next;
+///
+/// `deinit` is idempotent, so the one mistake the type CAN catch, a
+/// second `deinit` on one box, costs nothing.
+///
+/// The slice must not be REPLACED, and the type cannot say so. `gpa`
+/// and `comps` are public fields and the language has no field
+/// privacy, so a caller can point `comps` at a slice this box never
+/// allocated; a private inner struct hides nothing either, because the
+/// fields are reached through the same path either way. Every
+/// constructor records the address its slice had, and `deinit`
+/// compares that record with the address the slice has now, so the
+/// mistake is caught by an assertion in this file that NAMES it,
+/// rather than by `Allocator.free` further down the stack naming the
+/// allocator, or, under a release allocator, not at all.
+///
+/// That is an assertion, so ReleaseFast and ReleaseSmall elide it,
+/// which is the trade every other check in this library makes and the
+/// same one: the caller keeps the slice it was given, because the
+/// rule cannot be carried by the type.
 pub const DynVec = struct {
     const Self = @This();
 
@@ -339,26 +444,76 @@ pub const DynVec = struct {
     /// frees with it, so it must be the one `init` was handed.
     gpa: std.mem.Allocator,
 
-    /// The components, one per coordinate axis.
+    /// The components, one per coordinate axis, and the box's own
+    /// allocation. Replace it and `deinit` frees a slice this box
+    /// never allocated; see the ownership note on this type.
     comps: []Interval,
+
+    /// The address `comps` had when the constructor returned the box,
+    /// and the only thing `deinit` trusts. Private by convention
+    /// alone, since the language has no field privacy: a caller can
+    /// read and write it, and a write to `comps` that leaves this
+    /// behind is exactly what `deinit` checks for.
+    own: [*]Interval,
 
     /// A box of n components, all set to fill.
     pub fn init(gpa: std.mem.Allocator, n: usize, fill: Interval) !Self {
         const comps = try gpa.alloc(Interval, n);
         @memset(comps, fill);
-        return .{ .gpa = gpa, .comps = comps };
+        return .{ .gpa = gpa, .comps = comps, .own = comps.ptr };
     }
 
     /// A box over components copied from comps, which the caller still
-    /// owns.
+    /// owns. The copy is neither a check nor a normalization: the caller
+    /// holds the `Interval` contract for every component exactly as it does
+    /// for `Vec(n).fromArray`, for `init(fill)`, and for a write to
+    /// `comps[i]`, and an invalid component is stored here unchanged. See
+    /// `isEmpty`.
     pub fn fromArray(gpa: std.mem.Allocator, comps: []const Interval) !Self {
-        return .{ .gpa = gpa, .comps = try gpa.dupe(Interval, comps) };
+        const owned = try gpa.dupe(Interval, comps);
+        return .{ .gpa = gpa, .comps = owned, .own = owned.ptr };
     }
 
-    /// Free the components. The box is unusable afterwards.
+    /// Free the components, and safe to call a second time on the same
+    /// box: the slice is swapped for an empty one before the free, and
+    /// `Allocator.free` returns on an empty slice, so a second call
+    /// frees nothing rather than freeing twice. The box is left as a
+    /// zero-dimensional box, where `dim()` is 0 and `slice()` is empty,
+    /// which is exactly the state that second call reads, and a third
+    /// call is as safe as the second.
+    ///
+    /// The empty slice keeps the address the owned slice had, so `own`
+    /// still matches it and the check below passes on every call after
+    /// the first. That is the whole of the idempotence, and the
+    /// recorded address is what makes it hold: a check on the LENGTH
+    /// alone would also pass for a box reassigned a slice of the same
+    /// width, which is the mistake the record exists to catch.
+    ///
+    /// This does not make a COPY safe to free, and cannot: the copy
+    /// holds the same slice, so the second free is a double free. One
+    /// box, one owner; see the ownership note on this type.
     pub fn deinit(self: *Self) void {
-        self.gpa.free(self.comps);
-        self.* = undefined;
+        // A box owns one slice, the one its constructor allocated, and
+        // `own` is the address of that slice. Both fields are public,
+        // so `comps` can name a slice this box never allocated, and
+        // freeing that through `gpa` hands the allocator memory it
+        // never handed out: a silent heap corruption under a release
+        // allocator, and under a checked one a death inside
+        // `Allocator.free` that names the allocator rather than the
+        // mistake. So the check is here, and it names the mistake.
+        //
+        // `runtime_safety` is the elision every other check in this
+        // library gets from `std.debug.assert`, spelled out because an
+        // `assert` reports "reached unreachable code", which names the
+        // symptom rather than the mistake.
+        if (std.debug.runtime_safety) {
+            if (self.comps.ptr != self.own) {
+                std.debug.panic("DynVec.deinit: comps was replaced since construction: this box does not own the slice it holds, and freeing it hands the allocator memory it never allocated", .{});
+            }
+        }
+        const comps = self.comps;
+        self.comps = comps[0..0];
+        self.gpa.free(comps);
     }
 
     /// The runtime component count.
@@ -405,7 +560,8 @@ pub const DynVec = struct {
 
     /// A new box of the same width, with uninitialised components.
     fn allocLike(self: Self) !Self {
-        return .{ .gpa = self.gpa, .comps = try self.gpa.alloc(Interval, self.comps.len) };
+        const comps = try self.gpa.alloc(Interval, self.comps.len);
+        return .{ .gpa = self.gpa, .comps = comps, .own = comps.ptr };
     }
 
     /// The shared width check of every binary box operation.
@@ -432,8 +588,7 @@ pub const DynVec = struct {
     /// Componentwise `Interval.add`, as a new box.
     pub fn add(self: Self, other: Self) Error!Self {
         try self.sameWidth(other);
-        var out = try self.allocLike();
-        errdefer out.deinit();
+        const out = try self.allocLike();
         map2(out.comps, self.comps, other.comps, Interval.add);
         return out;
     }
@@ -441,8 +596,7 @@ pub const DynVec = struct {
     /// Componentwise `Interval.sub`, as a new box.
     pub fn sub(self: Self, other: Self) Error!Self {
         try self.sameWidth(other);
-        var out = try self.allocLike();
-        errdefer out.deinit();
+        const out = try self.allocLike();
         map2(out.comps, self.comps, other.comps, Interval.sub);
         return out;
     }
@@ -450,8 +604,7 @@ pub const DynVec = struct {
     /// Componentwise `Interval.mul`, as a new box.
     pub fn mul(self: Self, other: Self) Error!Self {
         try self.sameWidth(other);
-        var out = try self.allocLike();
-        errdefer out.deinit();
+        const out = try self.allocLike();
         map2(out.comps, self.comps, other.comps, Interval.mul);
         return out;
     }
@@ -460,8 +613,7 @@ pub const DynVec = struct {
     /// other must avoid zero.
     pub fn div(self: Self, other: Self) Error!Self {
         try self.sameWidth(other);
-        var out = try self.allocLike();
-        errdefer out.deinit();
+        const out = try self.allocLike();
         map2(out.comps, self.comps, other.comps, Interval.div);
         return out;
     }
@@ -515,8 +667,7 @@ pub const DynVec = struct {
     /// Per-component `Interval.hull`, as a new box.
     pub fn hull(self: Self, other: Self) Error!Self {
         try self.sameWidth(other);
-        var out = try self.allocLike();
-        errdefer out.deinit();
+        const out = try self.allocLike();
         map2(out.comps, self.comps, other.comps, Interval.hull);
         return out;
     }
@@ -567,16 +718,43 @@ pub const DynVec = struct {
         return normDistance(self.comps, p);
     }
 
-    /// Always false. A box is the product of its components, and every
-    /// component of every box obeys lo <= hi, so a box always holds at
-    /// least one point and cannot be empty. There is no box state for
-    /// this to detect: emptiness is only observable as the null that
-    /// `intersect` returns, and that null is never stored in a box.
+    /// True when some component is inverted, lo > hi: a box is the
+    /// product of its components, so one empty component leaves the whole
+    /// box holding no point at all. No box this library builds has one,
+    /// because `Interval.init` checks the ordering and supplies the two
+    /// overflow rays, the widening preserves the ordering, and `intersect`
+    /// reports an empty result as a null instead of storing one.
+    ///
+    /// It detects THAT condition and nothing else, so it is not a check that
+    /// a component is canonical. A NaN endpoint is not emptiness, and lo > hi
+    /// is false for it, so a poisoned box reads as non-empty; neither is a
+    /// lower bound at `+inf` or an upper bound at `-inf` looked at.
+    ///
+    /// A deinited box is a zero-dimensional box and no component
+    /// reaches this fold, so it is not empty. `deinit` frees memory; it
+    /// does not build a box that holds nothing.
     pub fn isEmpty(self: Self) bool {
-        _ = self;
+        for (self.comps) |c| {
+            if (c.lo > c.hi) return true;
+        }
         return false;
     }
 };
+
+/// The result `mapResult` gives for a receiver of type V: a plain
+/// optional for a `Vec(n)`, which fills a stack array and cannot fail,
+/// and an error union for a `DynVec`, which allocates.
+///
+/// The split lives here rather than in an inferred return type because
+/// the error set of a `!?V` is collected from every `try` in the body,
+/// whether or not the branch holding it can run on this instantiation.
+/// One function with one arm per shape therefore hands the stack arm an
+/// `error.OutOfMemory` it can neither produce nor catch, and makes
+/// every caller of that arm write a `try` that can never fire.
+fn MapResult(comptime V: type) type {
+    if (V == DynVec) return DynVec.Error!?DynVec;
+    return ?V;
+}
 
 /// Applies f to every component of v and collects the results into a
 /// box of the same shape, so a transcendental is written once and used
@@ -585,10 +763,23 @@ pub const DynVec = struct {
 /// component leaves the domain: there is no component to put in the
 /// result and none of the other components can rescue it.
 ///
-/// A `Vec(n)` fills a stack array and cannot fail. A `DynVec` allocates
-/// from the allocator it carries, and frees the partial box again when
-/// the fold leaves the domain, so a null costs nothing but the
-/// allocations already made.
+/// The receiver is a box BY VALUE, and the result type follows it: a
+/// `Vec(n)` fills a stack array and cannot fail, so its result is a
+/// plain `?Vec(n)`; a `DynVec` allocates from the allocator it carries
+/// and frees the partial box again when the fold leaves the domain, so a
+/// null there costs nothing but the allocations already made, and its
+/// result is an error union over the same optional. `MapResult` says
+/// why the two arms have different types.
+///
+/// A POINTER is a compile error, and that is deliberate. A pointer
+/// names a box the caller owns and says nothing about where a result
+/// should be built: `Vec(n)` has no allocator to draw one from, and
+/// the shape that compiled before this check existed declared
+/// `var out: V = undefined` with V a pointer and wrote the components
+/// through it, which is a segfault in every build mode rather than a
+/// wrong answer. A call site that says `mapResult(&box, f)` has made a
+/// mistake about ownership, and the cheapest thing to hand it is an
+/// error naming the mistake rather than a wild write.
 ///
 /// f is a `fn (Interval) ?Interval`, which is the signature of the
 /// elementary functions that can report an EMPTY result: `sqrt`, `log`,
@@ -596,8 +787,11 @@ pub const DynVec = struct {
 /// `powf`. The remaining eighteen return a plain `Interval` and are not
 /// coercible here; to fold one of those, wrap it so that its result is
 /// lifted into an optional.
-pub fn mapResult(v: anytype, f: UnaryOpt) !?@TypeOf(v) {
+pub fn mapResult(v: anytype, f: UnaryOpt) MapResult(@TypeOf(v)) {
     const V = @TypeOf(v);
+    if (comptime @typeInfo(V) == .pointer) {
+        @compileError("mapResult takes a box by value: pass the box, not a pointer to it.");
+    }
     if (comptime V == DynVec) {
         var out = try v.allocLike();
         if (!mapOpt(out.comps, v.comps, f)) {
