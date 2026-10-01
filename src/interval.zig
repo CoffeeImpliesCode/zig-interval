@@ -4,6 +4,35 @@ const rounding = @import("rounding.zig");
 /// Top bit of the f64 layout, set on every negative value.
 const sign_mask: u64 = 1 << 63;
 
+/// The two ends of the format and the last finite value below them, as bit
+/// patterns rather than as `std.math.inf(f64)` and `std.math.floatMax(f64)`.
+///
+/// Those two accessors assemble their value one place at a time inside
+/// `reconstructFloat`, and that loop is the entire comptime cost of the two
+/// comparisons in `init` — charged once per endpoint per call, so a caller
+/// that builds a table of intervals at comptime pays it per row, and the
+/// benchmark tables in `bench/bench_vec.zig` are enough of them to exhaust
+/// the evaluator's branch budget on their own.
+///
+/// These are the same three numbers: `pos_inf` is `inf(f64)`, `float_max` is
+/// `floatMax(f64)`, and IEEE negation is exact, so `neg_inf` and `-float_max`
+/// are the other two. Only what the comparisons cost moved.
+const pos_inf: f64 = @bitCast(@as(u64, 0x7FF0_0000_0000_0000));
+const neg_inf: f64 = -pos_inf;
+const float_max: f64 = @bitCast(@as(u64, 0x7FEF_FFFF_FFFF_FFFF));
+
+comptime {
+    // A mistyped digit above would move the finite end of a ray by a ULP at
+    // the top of the format, and every answer built on that ray moves with
+    // it, so the identity is checked rather than asserted in a comment. It
+    // costs three `reconstructFloat` evaluations once per translation unit,
+    // against the per-call cost the patterns above exist to remove.
+    @setEvalBranchQuota(2_000);
+    std.debug.assert(pos_inf == std.math.inf(f64));
+    std.debug.assert(neg_inf == -std.math.inf(f64));
+    std.debug.assert(float_max == std.math.floatMax(f64));
+}
+
 /// The product of two corner operands, taken as an exact zero whenever
 /// either factor is zero.
 ///
@@ -265,8 +294,8 @@ pub const Interval = struct {
     pub fn init(lo: f64, hi: f64) Interval {
         std.debug.assert(lo <= hi);
         return .{
-            .lo = if (lo == std.math.inf(f64)) std.math.floatMax(f64) else lo,
-            .hi = if (hi == -std.math.inf(f64)) -std.math.floatMax(f64) else hi,
+            .lo = if (lo == pos_inf) float_max else lo,
+            .hi = if (hi == neg_inf) -float_max else hi,
         };
     }
 

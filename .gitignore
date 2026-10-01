@@ -8,3 +8,12 @@ zig-pkg/
 # External consumer fixture build artifacts
 fixture/.zig-cache/
 fixture/zig-out/
+
+# QEMU core dumps from cross-target test runs. The NaN-trap probe ABORTS by
+# design — that is the contract the reproducers test — so every cross-target
+# run writes one of these per trap, about 67 MB each. They are build
+# artifacts, not source, and the 1 MB size guard refuses them anyway, which
+# blocks any commit in the tree until they are deleted by hand.
+qemu_*.core
+core
+core.*

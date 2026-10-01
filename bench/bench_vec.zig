@@ -161,6 +161,11 @@ fn componentAt(shape: Shape, s: *u64) Interval {
 }
 
 fn makeVecTable(comptime n: usize, comptime shape: Shape) [kCases]Vec(n) {
+    // Paying for the LCG loop itself, not for `Interval.init`: the two
+    // comparisons in the constructor used to cost enough per row to push
+    // this past six figures, and the whole table at the widest dimension
+    // now lands between ten and twenty thousand. The default is a
+    // thousand, so the line stays.
     @setEvalBranchQuota(100_000);
     var s: u64 = lcg_state;
     var out: [kCases]Vec(n) = undefined;
