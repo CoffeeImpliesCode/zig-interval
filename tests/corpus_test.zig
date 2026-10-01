@@ -183,3 +183,64 @@ test "corpus: every operation's answers contain an independently certified brack
     if (checked < 100) return fail("corpus: only {d} rows parsed, expected the full corpus", .{checked});
     try std.testing.expectEqual(@as(usize, 0), failures);
 }
+
+test "reproducer 3: powf's fixed relative margin does not grow with the exponent" {
+    // MOVED here from tests/soundness_test.zig, keeping its name and its claim.
+    //
+    // Its reference used to be `exactPowf` — an `f128` evaluation of
+    // `exp(y * log x)` widened by a fixed 1e-28. That was a SECOND
+    // IMPLEMENTATION of the same function, computed with primitives Zig 0.16
+    // only gets to `f64` accuracy, so it carried the very error the oracle
+    // exists to detect. It passed because `powf`'s answer is many ULP wide and
+    // swallowed the reference's error, which is not evidence of anything.
+    //
+    // The reference is now this corpus, and the argument pair is in it because
+    // the generator was given it for this reason.
+    //
+    // The claim is unchanged: the exponent is reached by repeated squaring,
+    // whose relative error doubles with every bit of it, so a FIXED margin
+    // cannot cover it once the exponent is large enough. 1.0000000001^1e8 is
+    // 1.0100501679193823, and the library must still contain it.
+    const base: f64 = 1.0000000001;
+    const expo: f64 = 1e8;
+
+    var lines = std.mem.splitScalar(u8, corpus, '\n');
+    var found = false;
+    // Hoisted out of the loop because the assertion below is about the
+    // ANSWER's width, not about the corpus row, and the row lookup is just
+    // where the answer is obtained.
+    var got: Interval = undefined;
+    while (lines.next()) |line| {
+        const row = (try parseRow(line)) orelse continue;
+        if (!std.mem.eql(u8, row.op, "powf")) continue;
+        if (row.lo != base or row.hi != expo) continue;
+        found = true;
+
+        got = ext.powf(Interval.init(base, base), Interval.init(expo, expo)) orelse
+            return error.CorpusViolation;
+        if (!(got.lo <= row.want_lo and got.hi >= row.want_hi)) {
+            std.debug.print("  powf reproducer FAILED\n", .{});
+            std.debug.print("    library [{e}, {e}] does not contain the certified [{e}, {e}]\n", .{ got.lo, got.hi, row.want_lo, row.want_hi });
+            return error.CorpusViolation;
+        }
+        std.debug.print("  powf reproducer: library [{e}, {e}] contains the certified [{e}, {e}]\n", .{ got.lo, got.hi, row.want_lo, row.want_hi });
+        break;
+    }
+    // A reproducer that silently stopped finding its row would pass forever.
+    try std.testing.expect(found);
+
+    // The "margin does not grow" half, and the part that needs no reference.
+    // At a small exponent `powf`'s answer is a few ULP wide; the claim is that
+    // it is still a few ULP wide at 1e8, where the exponent is reached by
+    // repeated squaring and a FIXED relative margin would be overwhelmed.
+    //
+    // This is the half of the old assertion that had teeth. Its reference
+    // enforced a width bound and tightening the reference by 1e-18 relative
+    // turned it red. Containment alone cannot do that here: the certified
+    // bracket is a real ULP-tight interval, so 1e-18 is far inside it and
+    // tightening by that much changes nothing. The relative width below is
+    // what a tightened reference would have been testing.
+    const rel_width = (got.hi - got.lo) / @max(got.hi, 1e-300);
+    std.debug.print("  powf reproducer: relative width {e}\n", .{rel_width});
+    try std.testing.expect(rel_width < 1e-14);
+}

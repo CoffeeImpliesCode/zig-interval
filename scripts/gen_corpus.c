@@ -64,6 +64,11 @@ static const double ARGS[] = {
     0.0, -0.0, 1.0, -1.0, 0.5, -0.5, 2.0, -2.0, 3.0, -3.0,
     0.1, -0.1, 0.9, 1.5, -0.25, 10.0, -10.0, 1e-8, -1e-8,
     700.0, -700.0,
+    /* The exponent that broke powf's fixed relative margin: 1.0000000001^1e8.
+     * It is here because the corpus is now the reference the reproducer is
+     * re-pointed at, and a corpus that does not contain the case cannot
+     * certify it. */
+    1.0000000001, 1e8,
     0x1p-1074,                  /* smallest positive subnormal          */
     -0x1p-1074,                 /* smallest negative subnormal          */
     0x1p-1022,                  /* smallest normal                      */

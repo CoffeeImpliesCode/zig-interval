@@ -759,7 +759,49 @@ no outward step must make the new case fail. Nothing here is written yet: `pow`
 is still uncovered, and this item closes with T4's corpus rather than ahead of
 it.
 
-### T7 — OPEN: replace `powf`'s reference, do not reuse it
+### T7 — DONE: `powf`'s reference replaced, not reused
+
+**Done.** `exactPowf` and `powf_slack` are deleted from
+`tests/soundness_test.zig`. The `reproducer 3` test has MOVED to
+`tests/corpus_test.zig`, keeping its name and its claim, and now reads its
+reference from the MPFR corpus instead of from an `f128` evaluation of
+`exp(y * log x)` — which was a second implementation of the same function,
+computed with primitives Zig 0.16 only reaches `f64` accuracy with, so it
+inherited the very error the oracle exists to detect. It passed because
+`powf`'s answer is many ULP wide and swallowed the reference's error.
+
+The argument pair `1.0000000001, 1e8` is now in the corpus because the
+generator was given it for this reason: a corpus that does not contain the case
+cannot certify it. The certified bracket is `[1.010050167919382,
+1.0100501679193823]`, and the library answers `[1.0100501679193816,
+1.010050167919383]`.
+
+#### The mutation this item specifies does not fire, and the reason matters
+
+The acceptance says "tightening that reference by `1e-18` relative must make
+`powf` report `FAILED`". Run against the corpus, it does **not**:
+
+- tightening that row by **1e-18** relative leaves the build **green**
+- tightening it by **1e-15** relative turns it **red**
+
+The item's number was written for the OLD reference and does not transfer.
+`exactPowf` widened by `powf_slack = 1e-28`, which on a value near 1 is far
+below one `f64` ULP — so its bracket was, in practice, a **point** at the
+rounded `f128` value, and "tightening by 1e-18" was a large relative change to
+that point. The corpus bracket is a genuine interval about 1e-16 wide, so 1e-18
+is deep inside it and tightening by that much changes nothing at all.
+
+**What keeps the reproducer honest instead.** The half of the old assertion
+that had teeth was its WIDTH check, and the reference is what supplied the
+scale for it. So the reproducer now asserts the claim directly, with no
+reference: `powf`'s answer is 1.319e-15 relatively wide at an exponent of
+1e8, and the test requires that to stay under 1e-14. That is "the fixed margin
+does not grow with the exponent" stated as a fact about the answer. Tightening
+that bound to 1e-16 turns it red, which is the same evidence the old width
+check produced and is recorded here so the number in the acceptance is not
+reused as-is.
+
+**What it was.**
 
 `powf` has **exactly one** containment assertion in the whole tree, at the
 `reproducer 3` test. Its reference, `exactPowf`, is unsound and must be

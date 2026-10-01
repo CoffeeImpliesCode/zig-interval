@@ -1424,23 +1424,6 @@ fn widthOk(got: Interval, r: Range) bool {
     return w <= @max((r.hi - r.lo) * width_rel, floor);
 }
 
-/// Relative slack applied to a `powf` oracle value. The value comes from
-/// an `f128` evaluation of `exp(y * log x)`, which is accurate to roughly
-/// 1e-30 relative here, so the exact value is bracketed by that much
-/// before the comparison. A pass is then a genuine pass rather than a
-/// comparison against a number that is merely close.
-const powf_slack: f128 = 1e-28;
-
-/// Oracle for `x^y` at a positive base: the exact value to within
-/// `powf_slack`. `f128` carries 34 significant decimal digits, and the
-/// argument `y * log(x)` is formed there, so the error is some 1e-30
-/// relative — many orders below the margin the library applies and far
-/// below any difference the reproducers turn on.
-fn exactPowf(x: f64, y: f64) Range {
-    const v = @exp(ex(y) * @log(ex(x)));
-    return .{ .lo = v * (1.0 - powf_slack), .hi = v * (1.0 + powf_slack) };
-}
-
 // ---------------------------------------------------------------------------
 // Fuzz machinery
 // ---------------------------------------------------------------------------
@@ -3771,15 +3754,23 @@ test "reproducer 2: translate has no outward widening - the exact 0.1 + 0.2 is a
     try expectSumEnclosure("translate excludes the exact 0.1 + 0.2", got, exactTranslate(a, 0.2), true);
 }
 
-test "reproducer 3: powf's fixed relative margin does not grow with the exponent" {
-    // The exponent is reached by repeated squaring, whose relative error
-    // doubles with every bit of it, so a fixed margin cannot cover it once
-    // the exponent is large enough. 1.0000000001^1e8 is 1.0100501679193823.
-    const base = Interval.init(1.0000000001, 1.0000000001);
-    const expo = Interval.init(1e8, 1e8);
-    const got = interval.ext.powf(base, expo) orelse return error.PowfRefused;
-    try expectEnclosure("powf excludes the true 1.0000000001^1e8", got, exactPowf(1.0000000001, 1e8), true);
-}
+// "reproducer 3: powf's fixed relative margin does not grow with the exponent"
+// has MOVED, and the reason it moved is the reason it was ever a defect worth
+// keeping.
+//
+// Its reference was `exactPowf`: an `f128` evaluation of `exp(y * log x)`
+// widened by a fixed `1e-28`. That is a SECOND IMPLEMENTATION of the same
+// function, evaluated with primitives Zig 0.16 only computes to `f64`
+// accuracy, so it inherited the very error the oracle exists to detect. It
+// passed only because `powf`'s answer is many ULP wide and swallowed the
+// reference's error, which is not evidence of anything.
+//
+// The reference is now the MPFR corpus, which is not written in this tree and
+// carries no such assumption. The test itself is unchanged in substance and
+// keeps its name: it lives in `tests/corpus_test.zig`, where the corpus is
+// read, and it asserts the same thing — that the fixed margin holds at an
+// exponent of 1e8. The argument pair is in the corpus because the generator
+// was given it for this reason.
 
 // ---------------------------------------------------------------------------
 // The div and recip forms, and the guards
