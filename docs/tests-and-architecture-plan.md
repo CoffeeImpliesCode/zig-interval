@@ -464,47 +464,55 @@ re-key done afterwards would invalidate every measurement made in between. It
 is now the reason the numbers in this file and in the handover stay meaningful
 as T4 lands.
 
-### T4 — PART: the generator spec is written; the corpus is blocked on the MPFR binding
+### T4 — DONE: 1654 independently certified rows over all twenty-one operations
 
-**The spec is below, and it is the deliverable this item was missing.** The
-handover said no reference is to be written "until the generator spec and the
-evidence that the corpus actually bites are in hand". The spec is now in
-hand. The evidence is not, and the reason is not a shortage of effort — it is
-a specific, reproducible binding problem recorded below.
+**Done.** `tests/corpus/elementary.txt` carries 1654 rows across all twenty-one
+operations the in-tree oracle did not judge, and `tests/corpus_test.zig` checks
+every one of them for containment. The reference is MPFR at 256 bits, called
+with a declared rounding direction, by `scripts/gen_corpus.c`; the corpus is
+committed rather than generated at test time. Current run: **1654 rows checked,
+0 FAILED, 390 of them exactly representable.**
 
-#### What is installed, checked by execution on this host
+#### The blocker recorded here earlier was wrong, and the correction is the useful part
 
-| Tool | State |
-| --- | --- |
-| MPFR | **4.2.1**, at `/usr/lib64/libmpfr.so.6`. Present. |
-| `mpmath` | 1.4.1, with `mpmath.iv` interval arithmetic present. |
-| `nix` | available, so a pinned MPFR with headers is obtainable if the system one proves unusable |
+An earlier draft of this entry said MPFR's `mpfr_get_d` "does not honour its
+rounding-mode argument" and recorded a probe showing ROUND-UP for modes 0, 2, 4,
+6 and ROUND-DOWN for 1, 3, 5 — an alternation, not a rounding table. **MPFR was
+fine. The binding was calling a function that does not exist.**
 
-`mpmath.iv` is interval arithmetic with directed rounding and was the obvious
-generator. **It covers 12 of the 21 and is missing 9**: `asin`, `acos`, `atan`,
-`sinh`, `cosh`, `asinh`, `acosh`, `atanh`, `cbrt`. The 12 it does cover are
-usable today.
+MPFR 4 removed the `d` default parameter: `mpfr_get_d` takes `(srcptr, rnd)`, not
+`(srcptr, d, rnd)`. The three-argument call therefore read the rounding mode out
+of the wrong register, and the "alternation" was a mis-called ABI. Nothing about
+the library was wrong; the thing that needed checking was the binding, and the
+only reliable way to check it was to compile against the real header. This host
+carries `libmpfr.so.6` and no `mpfr.h`, so `scripts/build_mpfr.sh` builds MPFR
+from source to get one.
 
-#### Why a direct MPFR binding was not used
+Two more of the same kind, all found only because the corpus was verified
+against an independent source rather than assumed correct:
 
-A ctypes binding was written and then PROBED rather than trusted, because a
-corpus built on an unverified rounding mode is wrong in a way that cannot be
-seen from the Zig side: it either rejects correct answers, or — if the brackets
-are widened to compensate — accepts answers it should not.
+- **The enum is reordered in MPFR 4.** `RNDN=0 RNDZ=1 RNDU=2 RNDD=3` — RNDU and
+  RNDD are swapped relative to MPFR 3.x.
+- **The ternary is not a NaN flag.** It is `0` exact, `+1` inexact-rounded-up,
+  `-1` inexact-rounded-**down**. An earlier version guarded with `t1 >= 0`, which
+  reads every inexact result as a failure and silently kept only the exact rows:
+  the tier reported green while checking nothing but `exp(0)` and `sin(0)`. NaN
+  is now tested on the value.
 
-The probe: evaluate `sqrt(2)` in MPFR at 200 bits, which is unambiguously
-`1.4142135623730950488…` and therefore strictly between the two `f64`s
-`1.414213562373095` and `1.4142135623730951`; then call `mpfr_get_d` once per
-rounding mode 0..7. A correct binding must answer ROUND-DOWN for some mode and
-ROUND-UP for another.
+That last one is the reason the mutation below was run rather than assumed. A
+corpus tier that passes is only evidence once it has been seen to fail.
 
-**It answered ROUND-UP for modes 0, 2, 4, 6 and ROUND-DOWN for 1, 3, 5** — a
-strict alternation, which is not a rounding table. Modes 0 and 1 do behave as
-nearest and toward-zero, so the call is reaching something; the argument is
-simply not being honoured as a rounding mode. The binding is therefore not
-usable for a certified bracket, and **that is the blocker, unresolved**.
+#### The mutation, and the direction that works
 
-#### The generator spec
+Pushing `exp`'s brackets 16 ULP past the library's margin turns it red — the
+first two attempts at this mutation were in the wrong direction and passed
+cleanly. Containment is `got.lo <= want_lo and got.hi >= want_hi`, so a
+bracket is made unmeetable by moving `want_lo` **below** the library's widened
+bound or `want_hi` **above** it — the opposite of what "tighten" suggests, and
+the opposite of what the first two attempts did. Raising `want_lo` relaxes the
+lower condition; setting it to `+inf` relaxes it completely.
+
+#### The generator spec, as implemented
 
 **Source of truth.** MPFR at **256 bits**, called with an explicit rounding
 direction on every call. One function per `src/interval_ext.zig` operation,

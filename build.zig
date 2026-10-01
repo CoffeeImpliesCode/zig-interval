@@ -120,6 +120,22 @@ pub fn build(b: *std.Build) void {
     const run_soundness_tests = b.addRunArtifact(soundness_tests);
     test_step.dependOn(&run_soundness_tests.step);
 
+    // The corpus tier is a separate binary from the in-tree oracle, for the
+    // reason the corpus file's own header gives: its reference is not written
+    // in this tree. It is MPFR, at 256 bits, via scripts/gen_corpus.c, and the
+    // corpus is committed rather than generated at test time — a test that
+    // shells out to a C library is not a gate.
+    const corpus_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/corpus_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    corpus_tests.root_module.addImport("interval", interval);
+    const run_corpus_tests = b.addRunArtifact(corpus_tests);
+    test_step.dependOn(&run_corpus_tests.step);
+
     // The NaN-trap probe is a separate executable rather than a test,
     // because the contract it pins is that a NaN scalar operand ABORTS, and
     // an abort inside a test binary takes every other test down with it. As
