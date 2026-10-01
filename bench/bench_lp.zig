@@ -23,7 +23,7 @@
 //! The second is that the row count is a design choice, not a constant.
 //! Eliminating a variable emits exactly `num_lower * num_upper` rows, so
 //! which variable goes first decides whether a system stays at four rows or
-//! reaches tens of thousands. `eliminateAll` is only cheap because Tupper's
+//! reaches tens of thousands. The greedy sweep is only cheap because Tupper's
 //! heuristic picks the cheapest variable each round, and the number worth
 //! having is the one where the same system is also solved the other way
 //! round, to see what that heuristic is actually worth.
@@ -46,7 +46,7 @@
 //! Where this file drives the elimination itself - `eliminateOne`, and every
 //! round of `eliminateNaive` - the check is on the round about to happen. The
 //! sweeps that live inside `System` (`eliminationOrder`,
-//! `eliminateInOrderOfChoice`, `eliminateAll`, `bounds`, `box`) have no
+//! `eliminateInOrderOfChoice`, `bounds`, `box`) have no
 //! per-step hook from out here, so they are checked once on their FIRST
 //! round. A first-round refusal is definitive, because no later round can
 //! have fewer rows than the one before it; a first-round PASS is not, and
@@ -354,7 +354,7 @@ fn requireRowBudget(comptime what: []const u8, sys: System, k: usize) void {
     if (predicted <= row_budget) return;
     std.debug.print(
         "bench_lp: {s}: eliminating x_{d} of a {d}-variable, {d}-row system predicts {d} rows, over the {d}-row budget\n",
-        .{ what, k, sys.varCount(), sys.count(), predicted, row_budget },
+        .{ what, k, sys.varCount(), sys.rowCount(), predicted, row_budget },
     );
     trap(what, error.RowBudgetExceeded);
 }
@@ -422,9 +422,9 @@ fn costliest(sys: System) !?usize {
 /// Guards a sweep whose per-step elimination lives inside `System`, so there
 /// is no per-step hook to put a guard in.
 ///
-/// `System.eliminationOrder`, `System.eliminateInOrderOfChoice` and
-/// `System.eliminateAll` choose their own variable and loop internally, so
-/// the sweep can only be checked up front. What is checked is the FIRST
+/// `System.eliminationOrder` and `System.eliminateInOrderOfChoice` both
+/// choose their own variable and loop internally, so the sweep can only be
+/// checked up front. What is checked is the FIRST
 /// elimination, and a refusal there is definitive: if the very first round
 /// already predicts more than the budget, no later round can be cheaper,
 /// because each round's input contains every row the previous round
@@ -487,13 +487,13 @@ fn requireProjectionFirst(comptime what: []const u8, sys: System, k: usize) void
 fn add8x4(ctx: *timing.Ctx, i: usize) void {
     var sys = buildMixed(@intCast(i), 4, 8) catch |e| trap("add 8x4", e);
     defer sys.deinit();
-    ctx.keep(@floatFromInt(sys.count()));
+    ctx.keep(@floatFromInt(sys.rowCount()));
 }
 
 fn add64x8(ctx: *timing.Ctx, i: usize) void {
     var sys = buildMixed(@intCast(i), 8, 64) catch |e| trap("add 64x8", e);
     defer sys.deinit();
-    ctx.keep(@floatFromInt(sys.count()));
+    ctx.keep(@floatFromInt(sys.rowCount()));
 }
 
 /// Control for the `eliminate` benchmark below: the same system, built but
@@ -502,7 +502,7 @@ fn add64x8(ctx: *timing.Ctx, i: usize) void {
 fn build6x4(ctx: *timing.Ctx, i: usize) void {
     var sys = buildMixed(@intCast(i), 4, 6) catch |e| trap("build 6x4", e);
     defer sys.deinit();
-    ctx.keep(@floatFromInt(sys.count()));
+    ctx.keep(@floatFromInt(sys.rowCount()));
 }
 
 /// The one elimination this file drives directly, so the guard is exact:
@@ -514,9 +514,9 @@ fn eliminateOne(ctx: *timing.Ctx, i: usize) void {
     var sys = buildMixed(@intCast(i), 4, 6) catch |e| trap("eliminate k=0, 6x4", e);
     defer sys.deinit();
     requireRowBudget("eliminate k=0, 6x4", sys, 0);
-    const before = sys.count();
+    const before = sys.rowCount();
     sys.eliminate(0) catch |e| trap("eliminate k=0, 6x4", e);
-    ctx.keep(@floatFromInt(before + sys.count()));
+    ctx.keep(@floatFromInt(before + sys.rowCount()));
 }
 
 /// The ordering decision on its own, with no answer read back.
@@ -544,7 +544,7 @@ fn inOrderOfChoice(ctx: *timing.Ctx, i: usize) void {
     defer sys.deinit();
     requireGreedyFirst("eliminateInOrderOfChoice", sys);
     const sat = sys.eliminateInOrderOfChoice() catch |e| trap("eliminateInOrderOfChoice", e);
-    ctx.keep(@as(f64, @floatFromInt(sys.count())) + @as(f64, if (sat) 1.0 else 0.0));
+    ctx.keep(@as(f64, @floatFromInt(sys.rowCount())) + @as(f64, if (sat) 1.0 else 0.0));
 }
 
 /// One projection, on the mixed generator.
@@ -621,18 +621,17 @@ fn boxStraddle(ctx: *timing.Ctx, i: usize) void {
 
 /// End-to-end, chosen order, on the system built to make the choice matter.
 ///
-/// `System.eliminateAll` runs the whole sweep internally, so the guard covers
-/// the first elimination. At 4 vars x 2 pairs the chosen order predicts one
+/// `System.eliminateInOrderOfChoice` runs the whole sweep internally, so the
+/// guard covers the first elimination. At 4 vars x 2 pairs the chosen order predicts one
 /// row for its first round and peaks at 4 rows over the whole sweep.
 fn eliminateAllHeuristic(ctx: *timing.Ctx, i: usize) void {
     _ = i;
     var sys = buildHeuristic(heuristic.vars, heuristic.pairs) catch |e| trap("eliminateAll chosen, heuristic", e);
     defer sys.deinit();
     requireGreedyFirst("eliminateAll chosen, heuristic", sys);
-    const before = sys.count();
-    var sat = true;
-    sys.eliminateAll(&sat) catch |e| trap("eliminateAll chosen, heuristic", e);
-    ctx.keep(@as(f64, @floatFromInt(before + sys.count())) + @as(f64, if (sat) 1.0 else 0.0));
+    const before = sys.rowCount();
+    const sat = sys.eliminateInOrderOfChoice() catch |e| trap("eliminateAll chosen, heuristic", e);
+    ctx.keep(@as(f64, @floatFromInt(before + sys.rowCount())) + @as(f64, if (sat) 1.0 else 0.0));
 }
 
 /// The same system and the same seed with the other elimination order. The
@@ -646,9 +645,9 @@ fn eliminateAllNaive(ctx: *timing.Ctx, i: usize) void {
     _ = i;
     var sys = buildHeuristic(heuristic.vars, heuristic.pairs) catch |e| trap("eliminateAll ascending, heuristic", e);
     defer sys.deinit();
-    const before = sys.count();
+    const before = sys.rowCount();
     eliminateNaive("eliminateAll ascending, heuristic", &sys) catch |e| trap("eliminateAll ascending, heuristic", e);
-    ctx.keep(@floatFromInt(before + sys.count()));
+    ctx.keep(@floatFromInt(before + sys.rowCount()));
 }
 
 /// End-to-end on a general mixed system, to see what the ordering costs on
@@ -656,16 +655,15 @@ fn eliminateAllNaive(ctx: *timing.Ctx, i: usize) void {
 ///
 /// The old 24 rows x 6 vars predicted 20,076 rows on its second round and
 /// 351,661,485 on its third, so it never finished. At 14 rows x 2 vars the
-/// greedy sweep peaks at 7,994 rows; `eliminateAll` runs inside `System`, so
+/// greedy sweep peaks at 7,994 rows; it runs inside `System`, so
 /// the guard covers the first elimination and the size covers the rest.
 fn eliminateAllMixed(ctx: *timing.Ctx, i: usize) void {
     var sys = buildMixed(@intCast(i), mixed_sweep.vars, mixed_sweep.rows) catch |e| trap("eliminateAll chosen, mixed", e);
     defer sys.deinit();
     requireGreedyFirst("eliminateAll chosen, mixed", sys);
-    const before = sys.count();
-    var sat = true;
-    sys.eliminateAll(&sat) catch |e| trap("eliminateAll chosen, mixed", e);
-    ctx.keep(@as(f64, @floatFromInt(before + sys.count())) + @as(f64, if (sat) 1.0 else 0.0));
+    const before = sys.rowCount();
+    const sat = sys.eliminateInOrderOfChoice() catch |e| trap("eliminateAll chosen, mixed", e);
+    ctx.keep(@as(f64, @floatFromInt(before + sys.rowCount())) + @as(f64, if (sat) 1.0 else 0.0));
 }
 
 // -- geometry ------------------------------------------------------------
@@ -738,14 +736,14 @@ fn reportGeometry() !void {
         var sys = try buildMixed(1, 4, 6);
         defer sys.deinit();
         requireRowBudget("mixed 6x4, eliminate k=0", sys, 0);
-        const before = sys.count();
+        const before = sys.rowCount();
         // The partition borrows the rows and `eliminate` invalidates them, so
         // only the count is read back; the three lists are its own.
         const parts = try sys.partition(0);
         defer parts.deinit();
         const predicted = parts.rowsProduced();
         try sys.eliminate(0);
-        printOrder("mixed 6x4, eliminate k=0", &.{0}, before, predicted, sys.count(), sys.count());
+        printOrder("mixed 6x4, eliminate k=0", &.{0}, before, predicted, sys.rowCount(), sys.rowCount());
     }
     {
         const before = 2 * heuristic.pairs;
@@ -769,9 +767,8 @@ fn reportGeometry() !void {
         var chosen = try buildHeuristic(n, heuristic.pairs);
         defer chosen.deinit();
         requireGreedyFirst("heuristic, chosen order", chosen);
-        var sat = true;
-        try chosen.eliminateAll(&sat);
-        printOrder("heuristic, chosen order", order, before, chosen_predicted, round1.count(), chosen.count());
+        const sat = try chosen.eliminateInOrderOfChoice();
+        printOrder("heuristic, chosen order", order, before, chosen_predicted, round1.rowCount(), chosen.rowCount());
 
         var ascending: [16]usize = undefined;
         for (0..n) |k| ascending[k] = k;
@@ -786,7 +783,7 @@ fn reportGeometry() !void {
         var naive = try buildHeuristic(n, heuristic.pairs);
         defer naive.deinit();
         try eliminateNaive("heuristic, ascending order", &naive);
-        printOrder("heuristic, ascending order", ascending[0..n], before, ascending_predicted, ascending_round1.count(), naive.count());
+        printOrder("heuristic, ascending order", ascending[0..n], before, ascending_predicted, ascending_round1.rowCount(), naive.rowCount());
         std.debug.print("    (reported solvable: {s})\n", .{if (sat) "yes" else "no"});
     }
     {
@@ -810,9 +807,8 @@ fn reportGeometry() !void {
         var chosen = try buildMixed(1, mixed_sweep.vars, mixed_sweep.rows);
         defer chosen.deinit();
         requireGreedyFirst("mixed, chosen order", chosen);
-        var sat = true;
-        try chosen.eliminateAll(&sat);
-        printOrder("mixed 14x2, chosen order", order, before, predicted, round1.count(), chosen.count());
+        const sat = try chosen.eliminateInOrderOfChoice();
+        printOrder("mixed 14x2, chosen order", order, before, predicted, round1.rowCount(), chosen.rowCount());
         std.debug.print("    (reported solvable: {s})\n", .{if (sat) "yes" else "no"});
     }
     {
@@ -839,7 +835,7 @@ fn reportGeometry() !void {
         // sweep exists to catch.
         std.debug.print(
             "    straddling 11x2: {d} rows, first round of bounds(1) predicted {d}, achieved {d}; bounds(1) = ",
-            .{ sys.count(), predicted, round1.count() },
+            .{ sys.rowCount(), predicted, round1.rowCount() },
         );
         if (b) |v| {
             std.debug.print("[{d:.4}, {d:.4}]", .{ v.lo, v.hi });

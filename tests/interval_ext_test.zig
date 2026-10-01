@@ -396,6 +396,60 @@ test "sin: a full period reaches both ends of the range exactly" {
     try std.testing.expectEqual(@as(f64, 1.0), s.hi);
 }
 
+test "phase: an argument past phase_limit answers the whole range" {
+    // Past `phase_limit` the argument has left the range the critical-point
+    // search can count over: the index k in `offset + k * pi` is larger than
+    // an `f64` holds exactly, and rounding that division would report a
+    // critical point that is not there. Rather than answer from an index that
+    // has stopped meaning anything, the three functions fall back to the range
+    // each spans, which is the only answer that cannot be wrong.
+    //
+    // The fallback is literal, so these are exact rather than containment:
+    // anything else would be a real defect and not a tighter bound.
+    //
+    // The arguments are PAST the limit, not on it. `phaseResolvable` compares
+    // with `<=`, so an argument of exactly `phase_limit` still goes through
+    // the search — the other side of that line is the test below.
+    const s = try answer(ext.sin(Interval.init(1e18, 1e18)));
+    try std.testing.expectEqual(@as(f64, -1.0), s.lo);
+    try std.testing.expectEqual(@as(f64, 1.0), s.hi);
+
+    const c = try answer(ext.cos(Interval.init(1e18, 1e18)));
+    try std.testing.expectEqual(@as(f64, -1.0), c.lo);
+    try std.testing.expectEqual(@as(f64, 1.0), c.hi);
+
+    // `tan` has no bounded range, so its fallback is the whole line.
+    const t = try answer(ext.tan(Interval.init(1e18, 1e18)));
+    try std.testing.expectEqual(-inf, t.lo);
+    try std.testing.expectEqual(inf, t.hi);
+
+    // Both ends past the limit at once and across zero, so neither end of the
+    // answer can have come from evaluating an endpoint.
+    const both = try answer(ext.sin(Interval.init(-2e17, 2e17)));
+    try std.testing.expectEqual(@as(f64, -1.0), both.lo);
+    try std.testing.expectEqual(@as(f64, 1.0), both.hi);
+}
+
+test "phase: the limit itself is still resolved, and one step past it is not" {
+    // The boundary is `<=`, so an argument of EXACTLY `phase_limit` still
+    // goes through the critical-point search and answers from its endpoints
+    // instead of with the whole range. That is the side of the line the
+    // fallback tests above cannot see, and it is the side that a change to
+    // the comparison would move silently.
+    //
+    // The assertion is on WIDTH rather than on the endpoints: the fallback is
+    // exactly `[-1, 1]`, and `sin` at any fixed argument is a value in `[-1,1]`
+    // widened by three ULP, so a width under 2 is what distinguishes the two
+    // paths without depending on where the argument happens to land.
+    const at = try answer(ext.sin(Interval.init(1e17, 1e17)));
+    try std.testing.expect(at.hi - at.lo < 2.0);
+
+    const past = interval.nextUp(1e17);
+    const over = try answer(ext.sin(Interval.init(past, past)));
+    try std.testing.expectEqual(@as(f64, -1.0), over.lo);
+    try std.testing.expectEqual(@as(f64, 1.0), over.hi);
+}
+
 test "cos: an interval holding a maximum reaches exactly one" {
     const c = try answer(ext.cos(Interval.init(-1.0, 1.0)));
     // The critical point at zero is a maximum of cosine and is worth

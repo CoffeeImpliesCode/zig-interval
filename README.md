@@ -1049,12 +1049,11 @@ strictly bounded has its bound widen, never tighten.
 | `init(gpa, var_count: usize) !System` | An empty system over `var_count` variables. Allocating the liveness flags is the one fallible step in building a system, and it is reported as `error.OutOfMemory` like every other allocation rather than panicked. |
 | `deinit(self: *System) void` | Free everything. |
 | `varCount(self) usize` | The number of variables, fixed at `init`. |
-| `count(self) usize` | The number of rows currently stored. |
+| `rowCount(self) usize` | The number of stored **rows**, not of constraints. A row added as `eq` is stored as two, so three constraints of which one is an `eq` answer `4` here. `gt` and `lt` are relaxed rather than duplicated, so the inflation is specifically from equalities and its factor cannot be predicted from the input count. |
 | `add(self, coeffs: []const Interval, op: Cmp, rhs: Interval) !void` | Insert a constraint, copying `coeffs`. `coeffs.len` must equal `varCount()`, else `error.BadVariableCount`. An `eq` inserts two rows. |
-| `at(self, i: usize) !Lin` | Row `i`, borrowed and **read-only**: `error.BadRow` for an index at or above `count()`, and `row.coeffs` is a `[]const` so a write through the view is a compile error rather than a silent edit of the solver's own storage. |
+| `at(self, i: usize) !Lin` | Row `i`, borrowed and **read-only**: `error.BadRow` for an index at or above `rowCount()`, and `row.coeffs` is a `[]const` so a write through the view is a compile error rather than a silent edit of the solver's own storage. |
 | `isUnsat(self) bool` | True once the system holds a derived row with an all-zero coefficient vector and a strictly negative right-hand side. Only an `eliminate` derives one, so this is `false` on a system that merely holds conflicting rows. |
 | `eliminate(self, k: usize) !void` | Eliminate variable `k` exactly. `error.BadVariable` for an out-of-range index, `error.VariableEliminated` for one already gone. |
-| `eliminateAll(self, count_out: *bool) !void` | Eliminate every variable in turn. Writes `false` into `*count_out` and returns early if it proves the system unsatisfiable. |
 | `eliminationOrder(self) ![]usize` | The order the solver would pick. Caller-owned; free it with the system's allocator. |
 | `eliminateInOrderOfChoice(self) !bool` | Eliminate in that order. Returns `false` when the system is proven unsatisfiable. |
 | `bounds(self, k: usize) !?Interval` | The derived interval for variable `k`. `null` when `k` is unbounded in either direction, when the system is unsat, or when the derived lower and upper bounds come out disjoint. |
@@ -1067,8 +1066,7 @@ system — each runs its elimination on a private clone — so you can read the
 box first and then eliminate everything on the same system.
 
 ```zig
-var satisfiable = true;
-try sys.eliminateAll(&satisfiable);
+const satisfiable = try sys.eliminateInOrderOfChoice();
 if (!satisfiable) return;
 ```
 

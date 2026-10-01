@@ -88,8 +88,11 @@ test "normalisation: eq splits in two, ge flips, and every stored row is <= by c
     try sys.add(&c, .ge, pt(1));
     try sys.add(&c, .eq, pt(3));
 
-    // One row for `le`, one for `ge`, two for the `eq` pair.
-    try std.testing.expectEqual(@as(usize, 4), sys.count());
+    // One row for `le`, one for `ge`, two for the `eq` pair: THREE constraints
+    // answered as FOUR rows. That gap is the whole reason the accessor is
+    // named `rowCount` — a caller asking how big the system is needs the
+    // normalisation rules to use this number at all.
+    try std.testing.expectEqual(@as(usize, 4), sys.rowCount());
 
     // There is no `.op` to read back. Every stored row is `<=` by
     // construction, and the type now says so by not carrying the field at
@@ -97,7 +100,7 @@ test "normalisation: eq splits in two, ge flips, and every stored row is <= by c
     // written to anything else. What replaces it is that every row still
     // reads back with the shape it was stored with, one coefficient per
     // variable.
-    for (0..sys.count()) |i| {
+    for (0..sys.rowCount()) |i| {
         try std.testing.expectEqual(sys.varCount(), (try sys.at(i)).coeffs.len);
     }
 
@@ -158,14 +161,14 @@ test "init reports exhaustion instead of panicking" {
     var sys = try lp.System.init(ok.allocator(), 2);
     defer sys.deinit();
     try std.testing.expectEqual(@as(usize, 2), sys.varCount());
-    try std.testing.expectEqual(@as(usize, 0), sys.count());
+    try std.testing.expectEqual(@as(usize, 0), sys.rowCount());
 }
 
 test "at rejects a row index past the end of the system" {
     var sys = try lp.System.init(gpa, 2);
     defer sys.deinit();
     try sys.add(&[_]Interval{ pt(1), pt(0) }, .le, pt(1));
-    try std.testing.expectEqual(@as(usize, 1), sys.count());
+    try std.testing.expectEqual(@as(usize, 1), sys.rowCount());
 
     // One past the end is the ordinary mistake. The wild index is the
     // dangerous one, because the row slice is built by arithmetic: without a
@@ -184,7 +187,7 @@ test "at rejects a row index past the end of the system" {
     try std.testing.expectError(error.BadRow, empty.at(0));
 
     // A rejected read leaves the system alone.
-    try std.testing.expectEqual(@as(usize, 1), sys.count());
+    try std.testing.expectEqual(@as(usize, 1), sys.rowCount());
     try std.testing.expectEqual(@as(f64, 1.0), (try sys.at(0)).rhs.lo);
 }
 
@@ -224,7 +227,7 @@ test "add rejects a coefficient vector of the wrong length" {
 
     const too_short = [_]Interval{pt(1)};
     try std.testing.expectError(error.BadVariableCount, sys.add(&too_short, .le, pt(1)));
-    try std.testing.expectEqual(@as(usize, 0), sys.count());
+    try std.testing.expectEqual(@as(usize, 0), sys.rowCount());
 }
 
 test "a bounded two-variable system projects its exact box" {
@@ -242,7 +245,7 @@ test "a bounded two-variable system projects its exact box" {
     try sys.add(&xmy, .ge, pt(-1));
 
     try std.testing.expectEqual(@as(usize, 2), sys.varCount());
-    try std.testing.expectEqual(@as(usize, 4), sys.count());
+    try std.testing.expectEqual(@as(usize, 4), sys.rowCount());
     try std.testing.expect(!sys.isUnsat());
 
     try expectRange((try sys.bounds(0)).?, 0.5, 6.5, 1e-9);
@@ -263,21 +266,20 @@ test "unsatisfiable by contradiction, reported through isUnsat" {
     const c = [_]Interval{pt(1)};
     try sys.add(&c, .le, pt(0));
     try sys.add(&c, .ge, pt(1));
-    try std.testing.expectEqual(@as(usize, 2), sys.count());
+    try std.testing.expectEqual(@as(usize, 2), sys.rowCount());
     try std.testing.expect(!sys.isUnsat());
 
     // Before elimination the projected bounds are already disjoint: the
     // lower side reads 1 and the upper side reads 0.
     try std.testing.expect((try sys.bounds(0)) == null);
 
-    var satisfiable = true;
-    try sys.eliminateAll(&satisfiable);
+    const satisfiable = try sys.eliminateInOrderOfChoice();
     try std.testing.expect(!satisfiable);
     try std.testing.expect(sys.isUnsat());
 
     // Eliminating the only variable leaves `0 <= -1` with every coefficient
     // exactly zero.
-    try std.testing.expectEqual(@as(usize, 1), sys.count());
+    try std.testing.expectEqual(@as(usize, 1), sys.rowCount());
     const row = try sys.at(0);
     try std.testing.expectEqual(@as(usize, 1), row.coeffs.len);
     for (row.coeffs) |iv| {
@@ -352,8 +354,7 @@ test "a variable pinned from both sides collapses to a point" {
     try std.testing.expect(b.contains(3.0));
     try expectRange(b, 3.0, 3.0, 1e-9);
 
-    var satisfiable = true;
-    try sys.eliminateAll(&satisfiable);
+    const satisfiable = try sys.eliminateInOrderOfChoice();
     try std.testing.expect(satisfiable);
     try std.testing.expect(!sys.isUnsat());
 }
@@ -422,8 +423,7 @@ test "a coefficient interval straddling zero stays a sound superset" {
     try std.testing.expect(wide.hi + 1e-9 >= narrow.hi);
     try expectRange(narrow, -1.0, 4.0, 1e-9);
 
-    var satisfiable = true;
-    try sys.eliminateAll(&satisfiable);
+    const satisfiable = try sys.eliminateInOrderOfChoice();
     try std.testing.expect(satisfiable);
     try std.testing.expect(!sys.isUnsat());
 }
@@ -501,7 +501,7 @@ test "a contradiction only the last round can see is still reported" {
     try sys.add(&[_]Interval{Interval.init(0.0, 1.0)}, .le, pt(-1));
     try sys.add(&[_]Interval{pt(1)}, .le, pt(-1));
     try sys.add(&[_]Interval{pt(-1)}, .le, pt(1));
-    try std.testing.expectEqual(@as(usize, 3), sys.count());
+    try std.testing.expectEqual(@as(usize, 3), sys.rowCount());
 
     // Nothing is wrong with the storage, so `isUnsat` still says no and the
     // caller's system is untouched: the emptiness is the projection's to find.
@@ -512,12 +512,11 @@ test "a contradiction only the last round can see is still reported" {
     // Driven to zero variables the same system says why. Every surviving row
     // is a constant constraint, and at least one of them is the contradiction
     // the reading could not see.
-    var satisfiable = true;
-    try sys.eliminateAll(&satisfiable);
+    const satisfiable = try sys.eliminateInOrderOfChoice();
     try std.testing.expect(!satisfiable);
     try std.testing.expect(sys.isUnsat());
     var contradiction = false;
-    for (0..sys.count()) |i| {
+    for (0..sys.rowCount()) |i| {
         const row = try sys.at(i);
         if (allZero(row.coeffs) and row.rhs.hi < 0) contradiction = true;
     }
@@ -574,11 +573,10 @@ test "the same system one unit away is not a contradiction" {
     const boxed = maybe_box.?;
     defer gpa.free(boxed);
     try expectRange(boxed[0], -1.0, -1.0, 1e-9);
-    var satisfiable = true;
-    try sys.eliminateAll(&satisfiable);
+    const satisfiable = try sys.eliminateInOrderOfChoice();
     try std.testing.expect(satisfiable);
     try std.testing.expect(!sys.isUnsat());
-    for (0..sys.count()) |i| {
+    for (0..sys.rowCount()) |i| {
         const row = try sys.at(i);
         try std.testing.expect(!allZero(row.coeffs) or row.rhs.hi >= 0);
     }
@@ -602,7 +600,7 @@ test "a straddling system with a finite answer still hands that answer back" {
     try sys.add(&[_]Interval{ Interval.init(-1.0, 0.0), Interval.init(-1.0, 0.0) }, .le, pt(0));
     try sys.add(&[_]Interval{ Interval.init(-1.0, 0.0), pt(0) }, .le, pt(0));
     try sys.add(&[_]Interval{ Interval.init(0.0, 1.0), pt(0) }, .le, pt(1));
-    try std.testing.expectEqual(@as(usize, 4), sys.count());
+    try std.testing.expectEqual(@as(usize, 4), sys.rowCount());
 
     // The true range, computed here in f128 from the rows above instead of
     // from the projection, so the two are independent of each other. x = 0
@@ -651,8 +649,7 @@ test "a straddling system with a finite answer still hands that answer back" {
     try expectRange(boxed[1], 0.0, 1.0, 1e-9);
 
     // The triangle is not empty, so no round of elimination may claim it is.
-    var satisfiable = true;
-    try sys.eliminateAll(&satisfiable);
+    const satisfiable = try sys.eliminateInOrderOfChoice();
     try std.testing.expect(satisfiable);
     try std.testing.expect(!sys.isUnsat());
 }
@@ -700,8 +697,7 @@ test "one unit of slack separates the empty system from the feasible one" {
     try std.testing.expect((try dead.bounds(0)) == null);
     try std.testing.expect((try dead.bounds(1)) == null);
     try std.testing.expect((try dead.box()) == null);
-    var still_dead = true;
-    try dead.eliminateAll(&still_dead);
+    const still_dead = try dead.eliminateInOrderOfChoice();
     try std.testing.expect(!still_dead);
     try std.testing.expect(dead.isUnsat());
 
@@ -744,8 +740,7 @@ test "one unit of slack separates the empty system from the feasible one" {
     try std.testing.expectEqual(@as(usize, 2), boxed.len);
     try expectRange(boxed[0], -1.0, -1.0, 1e-9);
     try expectRange(boxed[1], -4.0, 4.0, 1e-9);
-    var alive = true;
-    try live.eliminateAll(&alive);
+    const alive = try live.eliminateInOrderOfChoice();
     try std.testing.expect(alive);
     try std.testing.expect(!live.isUnsat());
 }
@@ -821,11 +816,10 @@ test "eliminationOrder is a permutation with no repeats" {
     // of Fourier-Motzkin and is not a defect; every one of them must still be
     // readable and satisfiable.
     for (order) |k| try sys.eliminate(k);
-    var satisfiable = true;
-    try sys.eliminateAll(&satisfiable);
+    const satisfiable = try sys.eliminateInOrderOfChoice();
     try std.testing.expect(satisfiable);
-    try std.testing.expect(sys.count() > 0);
-    for (0..sys.count()) |i| {
+    try std.testing.expect(sys.rowCount() > 0);
+    for (0..sys.rowCount()) |i| {
         const row = try sys.at(i);
         for (row.coeffs) |iv| {
             try std.testing.expectEqual(@as(f64, 0.0), iv.lo);
@@ -869,16 +863,15 @@ test "a well-posed three-variable system projects [0, 6] in every slot" {
 
     // Every interval the solver produces keeps lo <= hi, both the surviving
     // rows and the projections.
-    for (0..sys.count()) |i| {
+    for (0..sys.rowCount()) |i| {
         const row = try sys.at(i);
         for (row.coeffs) |iv| try std.testing.expect(iv.lo <= iv.hi);
         try std.testing.expect(row.rhs.lo <= row.rhs.hi);
     }
 
-    var satisfiable = true;
-    try sys.eliminateAll(&satisfiable);
+    const satisfiable = try sys.eliminateInOrderOfChoice();
     try std.testing.expect(satisfiable);
-    for (0..sys.count()) |i| {
+    for (0..sys.rowCount()) |i| {
         const row = try sys.at(i);
         for (row.coeffs) |iv| try std.testing.expect(iv.lo <= iv.hi);
         try std.testing.expect(row.rhs.lo <= row.rhs.hi);
@@ -913,7 +906,7 @@ test "Tupper's order does measurably less work than the mirror order" {
     var sys = try lp.System.init(gpa, 4);
     defer sys.deinit();
     for (rows, rhs) |r, b| try addPoints(&sys, r, b);
-    try std.testing.expectEqual(@as(usize, 5), sys.count());
+    try std.testing.expectEqual(@as(usize, 5), sys.rowCount());
 
     const order = try sys.eliminationOrder();
     defer gpa.free(order);
@@ -925,19 +918,19 @@ test "Tupper's order does measurably less work than the mirror order" {
     var good = try lp.System.init(gpa, 4);
     defer good.deinit();
     for (rows, rhs) |r, b| try addPoints(&good, r, b);
-    var good_peak = good.count();
+    var good_peak = good.rowCount();
     for (order) |k| {
         try good.eliminate(k);
-        good_peak = @max(good_peak, good.count());
+        good_peak = @max(good_peak, good.rowCount());
     }
 
     var bad = try lp.System.init(gpa, 4);
     defer bad.deinit();
     for (rows, rhs) |r, b| try addPoints(&bad, r, b);
-    var bad_peak = bad.count();
+    var bad_peak = bad.rowCount();
     for (worst) |k| {
         try bad.eliminate(k);
-        bad_peak = @max(bad_peak, bad.count());
+        bad_peak = @max(bad_peak, bad.rowCount());
     }
 
     // Measured on this system: the chosen order never exceeds 5 rows and
@@ -949,8 +942,8 @@ test "Tupper's order does measurably less work than the mirror order" {
     try std.testing.expect(good_peak < bad_peak);
     // The comparison the heuristic is claimed to win, and the strict form of
     // it: measurably fewer constraints, not merely no more.
-    try std.testing.expect(good.count() <= bad.count());
-    try std.testing.expect(good.count() < bad.count());
+    try std.testing.expect(good.rowCount() <= bad.rowCount());
+    try std.testing.expect(good.rowCount() < bad.rowCount());
     try std.testing.expect(good_peak <= 8);
     try std.testing.expect(bad_peak >= 20);
 
@@ -959,8 +952,8 @@ test "Tupper's order does measurably less work than the mirror order" {
     defer chosen.deinit();
     for (rows, rhs) |r, b| try addPoints(&chosen, r, b);
     try std.testing.expect(try chosen.eliminateInOrderOfChoice());
-    try std.testing.expect(chosen.count() <= bad.count());
-    try std.testing.expectEqual(@as(usize, good.count()), chosen.count());
+    try std.testing.expect(chosen.rowCount() <= bad.rowCount());
+    try std.testing.expectEqual(@as(usize, good.rowCount()), chosen.rowCount());
 }
 
 test "a cancelling pair of products is stored as the structural zero" {
@@ -1002,13 +995,13 @@ test "a cancelling pair of products is stored as the structural zero" {
     try drive.add(&[_]Interval{ pt(0), pt(1) }, .le, pt(0));
     try drive.add(&[_]Interval{ pt(1), pt(0) }, .le, pt(10));
     try drive.eliminate(1);
-    try std.testing.expectEqual(@as(usize, 3), drive.count());
+    try std.testing.expectEqual(@as(usize, 3), drive.rowCount());
 
     // The cancelled row is found by its right-hand side, `1 * 0 - (-1 * 1)` =
     // 1, which belongs to no other row in this system, rather than by where
     // it landed in the list.
     var cancelling: ?lp.Lin = null;
-    for (0..drive.count()) |i| {
+    for (0..drive.rowCount()) |i| {
         const row = try drive.at(i);
         if (row.rhs.lo <= 1.5 and 0.5 <= row.rhs.hi) cancelling = row;
     }
@@ -1075,7 +1068,7 @@ test "a cancelled row that constrains nothing bounds nothing" {
     try drive.add(&[_]Interval{ pt(1), pt(0) }, .le, pt(10));
     try drive.eliminate(1);
     var all_zero_rows: usize = 0;
-    for (0..drive.count()) |i| {
+    for (0..drive.rowCount()) |i| {
         const row = try drive.at(i);
         if (allZero(row.coeffs)) all_zero_rows += 1;
     }

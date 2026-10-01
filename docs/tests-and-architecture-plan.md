@@ -553,7 +553,42 @@ shapes 2 and 3 are the bulk of the work and unlock 9 operations, shape 4 is the
 hard one and unlocks 3 plus all of shape 5, and shapes 5 and 6 are then
 arithmetic on references that already exist.
 
-### T5 — `phase_limit` fallback coverage
+### T5 — DONE: `phase_limit` fallback coverage, and the spec's own boundary was wrong
+
+**Done, with two corrections to the spec this replaces.** Both were found by
+running the acceptance as written and are recorded because the same two errors
+would otherwise be made again.
+
+**The spec's arguments did not reach the branch it named.** `phaseResolvable`
+compares with `<=`, so an argument of EXACTLY `phase_limit = 1e17` is still
+resolvable and goes through the critical-point search. Two of the four named
+inputs — `sin([1e17, 1e17])` and `tan([1e17, 1e17])` — therefore answer from
+their endpoints and are narrow, not `[-1, 1]` and `[-inf, inf]`. The tests use
+`1e18` and `[-2e17, 2e17]`, which are past the line.
+
+**The spec's mutation was backwards.** It said lowering `phase_limit` to `1e3`
+would turn `sin([100, 100.5])` into `[-1, 1]`. Lowering a limit makes MORE
+arguments resolvable, not fewer: `100 <= 1000`, so that test stays green and
+proves nothing. What fires is the other direction, and both directions were
+run:
+
+- **Raising `phase_limit` to `1e20`** makes `1e18` resolvable, and both new
+  tests go red. That is the mutation that proves they reach the branch.
+- **Lowering it to `1e1`** makes `100` unresolvable, and `sin([100, 100.5])`
+  answers `[-1, 1]` — so its `s.lo > -1.0` goes red, along with the two other
+  existing `sin` tests that find critical points. That is the mutation the
+  spec was reaching for.
+
+**The boundary is now pinned from both sides, which the spec did not ask for
+and which is the more valuable half.** `sin` of exactly `phase_limit` is
+asserted to come back NARROW (width under 2, rather than the fallback's exact
+2), and `nextUp(phase_limit)` is asserted to come back exactly `[-1, 1]`. One
+ULP of the constant moves a test. The width is asserted rather than the
+endpoints because the resolvable answer is `sin` at a fixed argument widened by
+three ULP, and where that argument happens to land is not a property this file
+should depend on.
+
+**What it was.**
 
 `sin`, `cos` and `tan` answer with the whole range each spans once the argument
 passes `phase_limit = 1e17` (`src/interval_ext.zig:63`, reached through
@@ -911,7 +946,26 @@ path where the row set has genuinely changed. Second, mutation: flipping the
 single-row predicate must make the lp suite report an unsatisfiable system as
 satisfiable — that is the test that proves the check is load-bearing.
 
-### A6 — `System.count()` is renamed `rowCount()`
+### A6 — DONE: `System.count()` is renamed `rowCount()`
+
+**Done.** `System.count` is `System.rowCount`, and no `count` survives on the
+lp surface — the rename ran across `src/lp.zig`, `tests/lp_test.zig` (35 call
+sites), `bench/bench_lp.zig` (20), the README's API table and both worked
+examples, and the fixture.
+
+**The distinction is pinned, not merely renamed away.** The acceptance's named
+test is the normalisation test at the top of `lp_test.zig`: three constraints,
+one of them an `eq`, answer `rowCount() == 4`. That row now says in its comment
+that the gap between three constraints and four rows is the whole reason for
+the name, so a reader who later "simplifies" it back to `count` has to read
+past the reason to do it.
+
+**One thing this rename did NOT touch, deliberately.** `fixture/src/readme.zig`
+has its own `fn count(self: *Counting) std.mem.Allocator` — a counting
+allocator in the fixture's leak checks, unrelated to `System.count`. It keeps
+its name; the grep in the acceptance is about the lp surface.
+
+**What it was.**
 
 `src/lp.zig:167-169`. It returns `self.rhs.items.len`, which is stored **ROWS**,
 not constraints. An `eq` is stored as two rows (`:204-209`), so a caller asking
@@ -959,7 +1013,43 @@ failing allocator **must return `error.OutOfMemory` rather than panic** — that
 is the observable end state, and it is decidable with
 `std.testing.FailingAllocator`.
 
-### A8 — One public elimination driver, not three
+### A8 — DONE: one public elimination driver, not three
+
+**Done.** `eliminateAll` is deleted and `eliminateInOrderOfChoice` is the one
+driver. `eliminationOrder` stays, because a full permutation is a different
+contract (section 5), not a second driver.
+
+**The wrapper was an artefact of the naming collision A6 removed**, exactly as
+this item predicted: `eliminateAll` took an out-parameter called `count_out`
+only because a parameter named `count` shadowed the `count` method, which Zig
+rejects. With that renamed there was nothing left for it to do but call the
+other one.
+
+**The one behaviour worth recording, because it could have been lost in the
+cutover.** `eliminateAll` did exactly one thing the survivor did not: it
+answered `false` for a system that was ALREADY unsatisfiable before the call,
+without touching a row. `chooseNext` does not look at `unsat`, so a naive
+deletion would have let the sweep run on past a proof it already had,
+eliminate whatever variables were still alive, and then report `true`. That
+check is now the first line of `eliminateInOrderOfChoice`, so the behaviour is
+preserved and the survivor is correct on its own rather than by delegation.
+`tests/lp_test.zig` exercises both shapes — a system that goes unsat during the
+sweep, and one that was already unsat before it — and the second is the case
+the wrapper existed for.
+
+**The probe.** `probe/eliminate_all.zig` fails to compile with `no field or
+member function named 'eliminateAll' in 'lp.System'`, as the acceptance asked.
+The call sites converted were ten in `tests/lp_test.zig`, four in
+`bench/bench_lp.zig`, one in the fixture, and the README's API table and worked
+example.
+
+**What was deliberately NOT renamed.** The benchmark's row LABELS still read
+`eliminateAll chosen, mixed` and so on. Those strings identify rows in the
+recorded table in `docs/performance-handover.md`, and changing them would
+silently break the correspondence between that record and a re-run. Comments in
+that file that named the removed API were corrected; the labels were not.
+
+**What it was.**
 
 `src/lp.zig:335` (`eliminationOrder`), `:351` (`eliminateInOrderOfChoice`) and
 `:368` (`eliminateAll`). All three run the same greedy loop; the file says at

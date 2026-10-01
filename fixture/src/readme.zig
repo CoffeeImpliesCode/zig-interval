@@ -812,8 +812,7 @@ fn readmeEliminateAll() !void {
     );
 
     // --- README, "Operations" ---
-    var satisfiable = true;
-    try sys.eliminateAll(&satisfiable);
+    const satisfiable = try sys.eliminateInOrderOfChoice();
     if (!satisfiable) return;
     // --- end README ---
 

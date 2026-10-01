@@ -403,15 +403,22 @@ pub const System = struct {
         return self.var_count;
     }
 
-    /// Number of stored rows, after normalisation. A row added as `eq`
-    /// counts twice.
-    pub fn count(self: System) usize {
+    /// Number of stored ROWS, after normalisation — not the number of
+    /// constraints. A row added as `eq` is stored as two, so three
+    /// constraints of which one is an `eq` answer 4 here.
+    ///
+    /// The name says rows because that is what is counted. A caller asking
+    /// "how big is this system?" and being told the row count has to know the
+    /// normalisation to use the number, and `gt` and `lt` are relaxed rather
+    /// than duplicated, so the inflation is specifically from equalities and
+    /// its factor cannot be predicted from the input count.
+    pub fn rowCount(self: System) usize {
         return self.rhs.items.len;
     }
 
     /// Borrowed view of row `i`. Invalidated by the next mutation.
     ///
-    /// `i` must be below `count()`, and anything else is `error.BadRow`. The
+    /// `i` must be below `rowCount()`, and anything else is `error.BadRow`. The
     /// check is not decoration: the slice below is built by arithmetic, so an
     /// unchecked `i` reads whatever the allocator left past the rows, and
     /// ReleaseFast elides the slicing assertion that would otherwise stop it.
@@ -536,7 +543,7 @@ pub const System = struct {
     /// integers must not cost three allocations to ask.
     fn partitionInto(self: System, k: usize, sink: anytype) !void {
         if (k >= self.var_count) return error.BadVariable;
-        for (0..self.count()) |i| {
+        for (0..self.rowCount()) |i| {
             const row = try self.at(i);
             const a = row.coeffs[k];
             switch (a.signOf()) {
@@ -560,7 +567,7 @@ pub const System = struct {
     /// `Partition`; `deinit` frees the three lists and nothing else.
     pub fn partition(self: System, k: usize) !Partition {
         if (k >= self.var_count) return error.BadVariable;
-        var buckets = try Buckets.init(self.gpa, self.count());
+        var buckets = try Buckets.init(self.gpa, self.rowCount());
         errdefer buckets.deinit();
         try self.partitionInto(k, &buckets);
         return buckets.release();
@@ -613,7 +620,7 @@ pub const System = struct {
         var rhs: std.ArrayList(Interval) = .empty;
         errdefer rhs.deinit(gpa);
 
-        var buckets = try Buckets.initRound(gpa, &coeffs, &rhs, self.count());
+        var buckets = try Buckets.initRound(gpa, &coeffs, &rhs, self.rowCount());
         defer buckets.deinit();
         try self.partitionInto(k, &buckets);
 
@@ -682,31 +689,25 @@ pub const System = struct {
     }
 
     /// Eliminate every variable following the same heuristic that
-    /// `eliminationOrder` reports. Returns false as soon as a contradiction
-    /// proves the system unsatisfiable, and stops early there.
+    /// `eliminationOrder` reports, leaving only zero-dimensional rows behind.
+    /// Returns false as soon as a contradiction proves the system
+    /// unsatisfiable, and stops early there:
+    ///
+    ///     const satisfiable = try sys.eliminateInOrderOfChoice();
+    ///
+    /// An ALREADY unsatisfiable system answers false without touching a row.
+    /// That check is here rather than left to the loop because `chooseNext`
+    /// does not look at `unsat`: without it the sweep would run on past a
+    /// proof it already had, eliminate whatever variables were still alive,
+    /// and then report `true`. The wrapper this replaced carried the same
+    /// check, so this preserves its behaviour exactly.
     pub fn eliminateInOrderOfChoice(self: *System) !bool {
+        if (self.unsat) return false;
         while (try self.chooseNext()) |k| {
             try self.eliminate(k);
             if (self.unsat) return false;
         }
         return true;
-    }
-
-    /// Eliminate every variable in Tupper's order, leaving only
-    /// zero-dimensional rows behind. `count_out` receives false as soon as a
-    /// contradiction proves the system unsatisfiable; the caller seeds it:
-    ///
-    ///     var satisfiable = true;
-    ///     try sys.eliminateAll(&satisfiable);
-    ///
-    /// The parameter is `count_out` and not `count` because a parameter named
-    /// `count` shadows the `count` method, which Zig rejects.
-    pub fn eliminateAll(self: *System, count_out: *bool) !void {
-        if (self.unsat) {
-            count_out.* = false;
-            return;
-        }
-        count_out.* = try self.eliminateInOrderOfChoice();
     }
 
     /// The projected range of variable `k`: every other variable is
@@ -850,7 +851,7 @@ pub const System = struct {
     /// the difference undefined falls through to the exact arithmetic rather
     /// than being dropped with it.
     ///
-    /// The scratch is the partition plus `2 * count()` candidates, so the
+    /// The scratch is the partition plus `2 * rowCount()` candidates, so the
     /// cost is two passes over the rows - one to bucket them, one to settle
     /// the flags - and one comparison per PAIR, against the old round's
     /// `num_lower * num_upper` stored rows, each of `var_count` coefficients,
@@ -858,7 +859,7 @@ pub const System = struct {
     fn derivesContradiction(self: System, k: usize) !bool {
         const gpa = self.gpa;
         const vc = self.var_count;
-        const n = self.count();
+        const n = self.rowCount();
 
         // The buckets are the solver's own, not a second reading of the
         // rule, which is the whole point of this predicate: a pair it fails
@@ -1008,7 +1009,7 @@ pub const System = struct {
     /// failure this library must never produce. Claiming infeasibility is the
     /// expensive direction, so it waits for an enclosure that rules it out.
     fn noteContradiction(self: *System) !void {
-        for (0..self.count()) |i| {
+        for (0..self.rowCount()) |i| {
             const row = try self.at(i);
             if (!isAllZero(row.coeffs)) continue;
             if (row.rhs.hi < 0) {
