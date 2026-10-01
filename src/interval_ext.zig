@@ -67,7 +67,9 @@ const Interval = @import("interval.zig").Interval;
 const rounding = @import("rounding.zig");
 
 /// The positive infinity, for the answers that are unbounded but real.
-const inf = std.math.inf(f64);
+/// The value is the layout's, not this file's: `rounding` owns the ends of
+/// the format, so the answer here is bound to the same bits as every other.
+const inf = rounding.pos_inf;
 
 /// True pi in f80, to more digits than the extra significand bits of
 /// the type can hold, so that the quotient the critical-point search

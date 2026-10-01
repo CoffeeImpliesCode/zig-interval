@@ -177,7 +177,7 @@ fn squareBound(d: f64) f64 {
 /// is stated in terms of it, and no nonzero square can widen a sum
 /// down to it.
 fn normDistance(comps: []const Interval, p: []const f64) f64 {
-    if (comps.len != p.len) return std.math.inf(f64);
+    if (comps.len != p.len) return rounding.pos_inf;
     var squares: f64 = 0.0;
     for (comps, p) |c, x| {
         squares = rounding.roundUp(squares + squareBound(c.distanceTo(x)));

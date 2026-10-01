@@ -4,35 +4,6 @@ const rounding = @import("rounding.zig");
 /// Top bit of the f64 layout, set on every negative value.
 const sign_mask: u64 = 1 << 63;
 
-/// The two ends of the format and the last finite value below them, as bit
-/// patterns rather than as `std.math.inf(f64)` and `std.math.floatMax(f64)`.
-///
-/// Those two accessors assemble their value one place at a time inside
-/// `reconstructFloat`, and that loop is the entire comptime cost of the two
-/// comparisons in `init` — charged once per endpoint per call, so a caller
-/// that builds a table of intervals at comptime pays it per row, and the
-/// benchmark tables in `bench/bench_vec.zig` are enough of them to exhaust
-/// the evaluator's branch budget on their own.
-///
-/// These are the same three numbers: `pos_inf` is `inf(f64)`, `float_max` is
-/// `floatMax(f64)`, and IEEE negation is exact, so `neg_inf` and `-float_max`
-/// are the other two. Only what the comparisons cost moved.
-const pos_inf: f64 = @bitCast(@as(u64, 0x7FF0_0000_0000_0000));
-const neg_inf: f64 = -pos_inf;
-const float_max: f64 = @bitCast(@as(u64, 0x7FEF_FFFF_FFFF_FFFF));
-
-comptime {
-    // A mistyped digit above would move the finite end of a ray by a ULP at
-    // the top of the format, and every answer built on that ray moves with
-    // it, so the identity is checked rather than asserted in a comment. It
-    // costs three `reconstructFloat` evaluations once per translation unit,
-    // against the per-call cost the patterns above exist to remove.
-    @setEvalBranchQuota(2_000);
-    std.debug.assert(pos_inf == std.math.inf(f64));
-    std.debug.assert(neg_inf == -std.math.inf(f64));
-    std.debug.assert(float_max == std.math.floatMax(f64));
-}
-
 /// The product of two corner operands, taken as an exact zero whenever
 /// either factor is zero.
 ///
@@ -137,7 +108,16 @@ fn cornerQuotient(a: f64, b: f64) CornerQuotient {
     // corner with an answer. Anything else that came back a NaN came back
     // that way because an operand was one, and it stays a NaN.
     if (std.math.isNan(v) and std.math.isInf(a) and std.math.isInf(b)) {
-        return .{ .lo = -std.math.inf(f64), .hi = std.math.inf(f64) };
+        // The ends of the format come from `rounding`, which owns them
+        // beside the rest of the layout's vocabulary. They are bit patterns
+        // rather than the `std.math` accessors because those assemble their
+        // value one place at a time inside `reconstructFloat`, and the loop
+        // is charged once per endpoint per use, so a caller that builds a
+        // table of intervals at comptime pays it per row. See the note on
+        // `rounding.pos_inf` for why that file holds them rather than this
+        // one. The remaining sites in this file read them the same way and
+        // are bound to the same numbers.
+        return .{ .lo = rounding.neg_inf, .hi = rounding.pos_inf };
     }
     return .{ .lo = v, .hi = v };
 }
@@ -293,9 +273,14 @@ pub const Interval = struct {
     /// a normalizer on the hot path.
     pub fn init(lo: f64, hi: f64) Interval {
         std.debug.assert(lo <= hi);
+        // The ends of the format come from `rounding`, which owns them
+        // beside the rest of the layout's vocabulary: they are bit patterns
+        // rather than the `std.math` accessors so that these two comparisons
+        // stay cheap at comptime, and see the note on `rounding.pos_inf` for
+        // why that file holds them rather than this one.
         return .{
-            .lo = if (lo == pos_inf) float_max else lo,
-            .hi = if (hi == neg_inf) -float_max else hi,
+            .lo = if (lo == rounding.pos_inf) rounding.float_max else lo,
+            .hi = if (hi == rounding.neg_inf) -rounding.float_max else hi,
         };
     }
 
@@ -601,9 +586,9 @@ pub const Interval = struct {
     /// and is not available here.
     pub fn scale(self: Interval, factor: f64) Interval {
         const f = Interval.init(@abs(factor), @abs(factor));
-        if (self.lo == -std.math.inf(f64) or self.hi == std.math.inf(f64)) {
+        if (self.lo == rounding.neg_inf or self.hi == rounding.pos_inf) {
             if (@abs(factor) == 1.0) return self;
-            return Interval.init(-std.math.inf(f64), std.math.inf(f64));
+            return Interval.init(rounding.neg_inf, rounding.pos_inf);
         }
         // M from the sum of the endpoints where that sum stays in range,
         // and from their halves where the sum leaves it.
@@ -657,11 +642,11 @@ pub const Interval = struct {
     /// the ordering check so that the reason is on the same screen as the
     /// requirement.
     pub fn expand(self: Interval, margin: f64) Interval {
-        if (margin == -std.math.inf(f64)) {
-            std.debug.assert(self.lo == -std.math.inf(f64) or self.hi == std.math.inf(f64));
+        if (margin == rounding.neg_inf) {
+            std.debug.assert(self.lo == rounding.neg_inf or self.hi == rounding.pos_inf);
             return Interval.init(
-                rounding.roundDown(self.lo + std.math.floatMax(f64)),
-                rounding.roundUp(self.hi - std.math.floatMax(f64)),
+                rounding.roundDown(self.lo + rounding.float_max),
+                rounding.roundUp(self.hi - rounding.float_max),
             );
         }
         return Interval.init(
@@ -921,7 +906,7 @@ pub const Interval = struct {
         // so signOf's `zero` arm is part of the branch rather than an
         // early exit of its own.
         switch (other.signOf()) {
-            .zero, .straddle => return Interval.init(-std.math.inf(f64), std.math.inf(f64)),
+            .zero, .straddle => return Interval.init(rounding.neg_inf, rounding.pos_inf),
             .negative, .positive => {},
         }
         const q0 = cornerQuotient(self.lo, other.lo);
@@ -931,7 +916,7 @@ pub const Interval = struct {
         // A corner wider than a point is the whole line, and one that wide
         // settles the reduction on its own.
         if (q0.lo < q0.hi or q1.lo < q1.hi or q2.lo < q2.hi or q3.lo < q3.hi) {
-            return Interval.init(-std.math.inf(f64), std.math.inf(f64));
+            return Interval.init(rounding.neg_inf, rounding.pos_inf);
         }
         const corners = Corners{
             .a = .{ self.lo, self.hi },

@@ -110,14 +110,56 @@ const neg_zero: u64 = sign_bit;
 /// no further than a local copy did.
 pub const min_subnormal: f64 = @bitCast(@as(u64, 1));
 
+/// The two ends of the format and the last finite value below them, as bit
+/// patterns rather than as `std.math.inf(f64)` and `std.math.floatMax(f64)`.
+///
+/// Those two accessors assemble their value one place at a time inside
+/// `reconstructFloat`, and that loop is the whole of the comptime cost of
+/// every comparison against them — charged once per endpoint per call, so a
+/// caller that builds a table of intervals at comptime pays it per row, and
+/// the benchmark tables in `bench/bench_vec.zig` are enough of them to
+/// exhaust the evaluator's branch budget on their own. The four functions
+/// below are where the cost is worth removing most: they are the
+/// outward-rounding primitives the whole library widens its answers with, so
+/// every hot path runs them, and the module doc above is what makes their
+/// answer at an infinity the one that has to be right.
+///
+/// These are the same three numbers: `pos_inf` is `inf(f64)`, `float_max` is
+/// `floatMax(f64)`, and IEEE negation is exact, so `neg_inf` and `-float_max`
+/// are the other two. Only what the comparisons cost moved.
+///
+/// They live here for the reason `min_subnormal` above does: each is a
+/// property of the layout rather than of the operation that needs it first,
+/// and this file is where the layout is written down. `interval.zig` needs
+/// `pos_inf` and `neg_inf` for the two canonical rays its constructor
+/// normalises to, and it already imports this file for the step beside them,
+/// so naming the constants here reaches no further than a local copy did —
+/// while the format is described once instead of twice, and a later edit to
+/// this description cannot leave a second copy disagreeing by a ULP.
+pub const pos_inf: f64 = @bitCast(@as(u64, 0x7FF0_0000_0000_0000));
+pub const neg_inf: f64 = -pos_inf;
+pub const float_max: f64 = @bitCast(@as(u64, 0x7FEF_FFFF_FFFF_FFFF));
+
+comptime {
+    // A mistyped digit above would move the finite end of a ray by a ULP at
+    // the top of the format, and every answer built on that ray moves with
+    // it, so the identity is checked rather than asserted in a comment. It
+    // costs three `reconstructFloat` evaluations once per translation unit,
+    // against the per-call cost the patterns above exist to remove.
+    @setEvalBranchQuota(2_000);
+    std.debug.assert(pos_inf == std.math.inf(f64));
+    std.debug.assert(neg_inf == -std.math.inf(f64));
+    std.debug.assert(float_max == std.math.floatMax(f64));
+}
+
 /// Smallest f64 strictly greater than x, for an outward-rounded upper
 /// bound. NaN propagates unchanged and the infinities saturate: +inf has
 /// no successor, since the pattern after it is a NaN rather than a larger
 /// number, and -inf lands on the largest finite negative.
 pub fn nextUp(x: f64) f64 {
     if (std.math.isNan(x)) return x;
-    if (x == std.math.inf(f64)) return x;
-    if (x == -std.math.inf(f64)) return -std.math.floatMax(f64);
+    if (x == pos_inf) return x;
+    if (x == neg_inf) return -float_max;
 
     const bits: u64 = @bitCast(x);
     // The pair of zeros needs a guard because it is 2^63 apart in pattern
@@ -139,8 +181,8 @@ pub fn nextUp(x: f64) f64 {
 /// rather than a smaller number, and +inf lands on that value.
 pub fn prevDown(x: f64) f64 {
     if (std.math.isNan(x)) return x;
-    if (x == -std.math.inf(f64)) return x;
-    if (x == std.math.inf(f64)) return std.math.floatMax(f64);
+    if (x == neg_inf) return x;
+    if (x == pos_inf) return float_max;
 
     const bits: u64 = @bitCast(x);
     // The predecessor of +0.0 is -0.0, and the pattern does not get there:
@@ -175,8 +217,8 @@ pub fn prevDown(x: f64) f64 {
 ///
 /// NaN propagates unchanged, the pattern and all.
 pub fn roundUp(x: f64) f64 {
-    if (x == -std.math.inf(f64)) return -std.math.floatMax(f64);
-    if (x == std.math.inf(f64)) return x;
+    if (x == neg_inf) return -float_max;
+    if (x == pos_inf) return x;
     // Either zero: -0.0 is >= itself, and +0.0 is the pattern nextUp
     // returns, whose successor is a step wider than the bound needs.
     if (x == 0.0) return x;
@@ -197,8 +239,8 @@ pub fn roundUp(x: f64) f64 {
 ///
 /// NaN propagates unchanged, the pattern and all.
 pub fn roundDown(x: f64) f64 {
-    if (x == -std.math.inf(f64)) return x;
-    if (x == std.math.inf(f64)) return std.math.floatMax(f64);
+    if (x == neg_inf) return x;
+    if (x == pos_inf) return float_max;
     // Either zero: +0.0 is <= itself, and -0.0 is the pattern prevDown
     // returns, whose predecessor is a step wider than the bound needs.
     if (x == 0.0) return x;
