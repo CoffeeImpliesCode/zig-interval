@@ -327,6 +327,69 @@ test "pow: a negative power of a base reaching zero is unbounded" {
     try std.testing.expectEqual(inf, p.hi);
 }
 
+test "pow: exponentiation by squaring accumulates a widening" {
+    // Every other `pow` test in this file uses an integer base and a small
+    // exponent, so the per-multiply widening `intPow` accumulates is never
+    // observable: the corners are exact and an answer computed by one rounded
+    // multiply would pass anyway. That is why a `pow` which dropped the
+    // outward step would have passed all of them.
+    //
+    // `pow([0.5, 2], 5)` is the case this item names. 0.5^5 = 2^-5 and 2^5
+    // are both EXACT in f64, so the true image is [0.03125, 32] to the bit.
+    //
+    // **This row did NOT catch the mutation, and the reason is worth
+    // recording.** Removing the outward step from `result.mul(base)` still
+    // leaves the answer strictly wider, because the SQUARINGS go through the
+    // real `base.mul(base)` and their widening survives into the final
+    // product. The row that catches it is the fractional base below, where
+    // the corners themselves are inexact. The strict comparisons here are
+    // still worth having - they pin that the widening is applied even where
+    // the arithmetic was exact - but they are not what proves the step is
+    // load-bearing, and an earlier draft of this comment claimed they were.
+    const p = try answer(ext.pow(Interval.init(0.5, 2.0), 5));
+    try std.testing.expect(p.lo <= 0.03125);
+    try std.testing.expect(p.hi >= 32.0);
+    try std.testing.expect(p.lo < 0.03125);
+    try std.testing.expect(p.hi > 32.0);
+}
+
+test "pow: a straddling base under an even exponent still reaches the true image" {
+    // `pow([-2, 3], 4)` is the other case this item names. The true image is
+    // [0, 81]: an even power is never negative, x = 0 lies inside the base,
+    // and max(2^4, 3^4) = 81.
+    //
+    // The answer is far LOOSER at the bottom than that, and the reason is
+    // worth recording rather than papering over. `intPow` squares with
+    // `base.mul(base)`, and interval multiplication has no symmetry to
+    // exploit: [-2, 3] * [-2, 3] comes back [-6, 9] rather than [0, 9], and
+    // that looseness compounds through the squarings. Sound, and loose - the
+    // price of the O(log n) shape. Nothing here asserts a tight lower bound,
+    // because a tight one is not what this function promises.
+    const p = try answer(ext.pow(Interval.init(-2.0, 3.0), 4));
+    try std.testing.expect(p.lo <= 0.0);
+    try std.testing.expect(p.hi >= 81.0);
+}
+
+test "pow: a fractional base whose corners are not exact" {
+    // One third is not representable, so the squarings genuinely round and the
+    // accumulated widening is the only thing between the answer and a bound
+    // that is too narrow.
+    //
+    // The reference here is the rounded `f64` power, which is NOT a sound
+    // reference in general - §2.2 is about exactly that mistake - so this row
+    // deliberately asserts only what is decidable without one: the answer
+    // contains the rounded value and is strictly wider than it. A dropped
+    // outward step destroys the second half, and that is the property worth
+    // pinning at this base.
+    const p = try answer(ext.pow(Interval.init(1.0 / 3.0, 2.0 / 3.0), 3));
+    const lo = std.math.pow(f64, 1.0 / 3.0, 3.0);
+    const hi = std.math.pow(f64, 2.0 / 3.0, 3.0);
+    try std.testing.expect(p.lo <= lo);
+    try std.testing.expect(p.hi >= hi);
+    try std.testing.expect(p.lo < lo);
+    try std.testing.expect(p.hi > hi);
+}
+
 test "powf: the corners of the box hold the extremes" {
     const p = try answer(ext.powf(Interval.init(2.0, 3.0), Interval.init(2.0, 3.0)));
     try std.testing.expect(p.lo <= 4.0);

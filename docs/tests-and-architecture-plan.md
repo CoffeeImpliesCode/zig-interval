@@ -700,7 +700,36 @@ any test, on the operations whose range is widest.
 `expect(s.lo > -1.0)` at `:239` would go red. If that mutation is green, the
 new tests are not reaching the branch.
 
-### T6 — OPEN: `pow` beyond integer endpoints and integer exponents
+### T6 — DONE: `pow` beyond integer endpoints and integer exponents
+
+**Done, and this item was NOT gated on T4 after all.** The paragraph below says
+"this item closes with T4's corpus rather than ahead of it". That is true of
+`pow`'s CONTAINMENT COVERAGE in general and false of this item's own acceptance
+cases, both of which are exact in `f64` and need no reference library at all:
+`0.5^5 = 2^-5`, `2^5 = 32`, `3^4 = 81`. A reference would have been the
+§2.2 mistake, and none was needed.
+
+**Three rows.** `pow([0.5, 2], 5)` encloses `[0.03125, 32]`; `pow([-2, 3], 4)`
+encloses `[0, 81]`; and `pow([1/3, 2/3], 3)` covers a base whose corners are not
+exact at all, which is the case the integer-base tests could never reach.
+
+**The mutation fires, but not on the row this item predicted it would.** Taking
+`result = result.mul(base)` as the same corner product in raw `f64` with no
+outward step turns the FRACTIONAL row red and leaves `[0.5, 2]^5` green —
+because the squarings still go through the real `base.mul(base)`, and their
+widening survives into the final product. That is worth recording rather than
+tidying away: the row whose corners are exact is precisely the row that cannot
+detect a missing step in `result`, and an earlier draft of that test's comment
+claimed otherwise. The comment now says so.
+
+**A tightness observation the test records rather than asserts.** `pow([-2, 3],
+4)` answers far below the true minimum: `intPow` squares with `base.mul(base)`,
+and interval multiplication has no symmetry to exploit, so `[-2,3] * [-2,3]`
+comes back `[-6, 9]` rather than `[0, 9]` and the looseness compounds. Sound,
+and loose — the price of the `O(log n)` shape. No tight lower bound is asserted,
+because none is promised.
+
+**What it was.**
 
 Every `pow` test uses an integer exponent and integer base endpoints
 (`tests/interval_ext_test.zig:146-177`), so the per-multiply widening that
