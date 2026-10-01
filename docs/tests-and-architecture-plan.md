@@ -464,7 +464,98 @@ re-key done afterwards would invalidate every measurement made in between. It
 is now the reason the numbers in this file and in the handover stay meaningful
 as T4 lands.
 
-### T4 — OPEN: containment for the 21 uncovered operations
+### T4 — PART: the generator spec is written; the corpus is blocked on the MPFR binding
+
+**The spec is below, and it is the deliverable this item was missing.** The
+handover said no reference is to be written "until the generator spec and the
+evidence that the corpus actually bites are in hand". The spec is now in
+hand. The evidence is not, and the reason is not a shortage of effort — it is
+a specific, reproducible binding problem recorded below.
+
+#### What is installed, checked by execution on this host
+
+| Tool | State |
+| --- | --- |
+| MPFR | **4.2.1**, at `/usr/lib64/libmpfr.so.6`. Present. |
+| `mpmath` | 1.4.1, with `mpmath.iv` interval arithmetic present. |
+| `nix` | available, so a pinned MPFR with headers is obtainable if the system one proves unusable |
+
+`mpmath.iv` is interval arithmetic with directed rounding and was the obvious
+generator. **It covers 12 of the 21 and is missing 9**: `asin`, `acos`, `atan`,
+`sinh`, `cosh`, `asinh`, `acosh`, `atanh`, `cbrt`. The 12 it does cover are
+usable today.
+
+#### Why a direct MPFR binding was not used
+
+A ctypes binding was written and then PROBED rather than trusted, because a
+corpus built on an unverified rounding mode is wrong in a way that cannot be
+seen from the Zig side: it either rejects correct answers, or — if the brackets
+are widened to compensate — accepts answers it should not.
+
+The probe: evaluate `sqrt(2)` in MPFR at 200 bits, which is unambiguously
+`1.4142135623730950488…` and therefore strictly between the two `f64`s
+`1.414213562373095` and `1.4142135623730951`; then call `mpfr_get_d` once per
+rounding mode 0..7. A correct binding must answer ROUND-DOWN for some mode and
+ROUND-UP for another.
+
+**It answered ROUND-UP for modes 0, 2, 4, 6 and ROUND-DOWN for 1, 3, 5** — a
+strict alternation, which is not a rounding table. Modes 0 and 1 do behave as
+nearest and toward-zero, so the call is reaching something; the argument is
+simply not being honoured as a rounding mode. The binding is therefore not
+usable for a certified bracket, and **that is the blocker, unresolved**.
+
+#### The generator spec
+
+**Source of truth.** MPFR at **256 bits**, called with an explicit rounding
+direction on every call. One function per `src/interval_ext.zig` operation,
+mapped to its MPFR counterpart; `pow` and `powf` both map to `pow`, `pow` with
+its integer exponent read exactly rather than rounded.
+
+**Each corpus row is a quintuple, every field certified rather than
+approximated:**
+
+| field | how it is obtained |
+| --- | --- |
+| `op` | the operation name |
+| `lo`, `hi` | the `f64` argument endpoints as exact hex, so no decimal parsing is in the path |
+| `want_lo` | `mpfr_get_d(f_down, RNDD)`, where `f_down` is the function evaluated at 256 bits rounding toward `-inf` |
+| `want_hi` | `mpfr_get_d(f_up, RNDU)`, where `f_up` is the same function at the same precision rounding toward `+inf` |
+| `ternary` | MPFR's return code, kept: `0` exact, `±1` inexact with the sign giving the direction of the rounding error |
+
+**Why evaluating down and up separately is required, and not a belt-and-braces
+extra.** Evaluating once at 256 bits and rounding the result to `f64` rounds
+TwICE, and the second rounding is not the one that was certified. Evaluating
+the two directions separately and converting each with the matching direction
+makes the bracket contain the true value by construction rather than by
+argument.
+
+**Exactness is kept separate from strictness.** A row with ternary `0` is exact
+and its bracket may be a single point; a row with a non-zero ternary is inexact
+and its bracket must be a genuine interval. Folding the two together loses the
+ability to tell "the answer is exactly this" from "the answer is near this" —
+and that distinction is the whole of §2.2's trap.
+
+**Arguments.** Endpoints are drawn from the `f64` bit patterns the finite sweep
+already draws, plus the named infinite shapes, so the corpus exercises the
+operands the oracle does rather than inventing a second distribution. At least
+one row per operation per shape.
+
+**Where it lives.** A committed `tests/corpus/<name>.txt` of hex endpoints and
+hex bounds. Committed, not generated at test time: a test that shells out to
+Python is not a gate, and a corpus nobody can read is not evidence.
+
+**How it is consumed.** `tests/soundness_test.zig` grows a tier that reads each
+row, calls the library, and asserts `want_lo <= got.lo and got.hi <= want_hi`.
+Containment of the certified bracket, which is the only sound direction.
+Tightness is NOT asserted — a corpus bounds correctness, not width, and a
+tightness claim is what §2.2 shows goes wrong.
+
+**The evidence that it bites, required before this item closes.** Tighten
+`want_lo` by one `f64` ULP for one named operation; that operation must then
+report `FAILED`. A corpus that cannot be made to fail proves nothing, and this
+is the standard the frontier sweep and the `f128` bounds in §2.3 were held to.
+
+**What it was.**
 
 This is the largest item and the one with the most leverage left in it. The 21
 are `pow`, `powf`, `exp`, `exp2`, `expm1`, `log`, `log2`, `log10`, `log1p`,
