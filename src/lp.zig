@@ -657,7 +657,7 @@ pub const System = struct {
         self.coeffs = coeffs;
         self.rhs = rhs;
         self.alive[k] = false;
-        try self.noteContradiction();
+        try self.rescanForContradiction();
     }
 
     /// The elimination order Tupper's heuristic chooses, as a caller-owned
@@ -780,7 +780,7 @@ pub const System = struct {
         return Interval.init(lo, hi);
     }
 
-    /// Would eliminating `k` derive a row that `noteContradiction` accepts?
+    /// Would eliminating `k` derive a row the contradiction check accepts?
     ///
     /// This is the last round of `bounds` as a question rather than as an
     /// elimination, and it is exact: the same pairs, the same two
@@ -789,8 +789,8 @@ pub const System = struct {
     /// rows the old round built.
     ///
     /// The first is that nothing can be hiding in the rows the round would
-    /// carry through untouched. `noteContradiction` runs at the end of every
-    /// `eliminate` and every `pushRow`, and `bounds` returns null the moment
+    /// carry through untouched. The contradiction check runs at the end of
+    /// every `eliminate` and every `pushRow`, and `bounds` returns null the moment
     /// `unsat` is set, so the row set arriving here holds no all-zero row
     /// whose right-hand side has `hi < 0` already. Everything the round can
     /// find, it derives itself.
@@ -951,7 +951,11 @@ pub const System = struct {
         try self.rhs.append(self.gpa, rhs);
         errdefer _ = self.rhs.pop();
         try self.coeffs.appendSlice(self.gpa, coeffs);
-        try self.noteContradiction();
+        // `unsat` is latched, so the row just appended is the only one that
+        // can be NEWLY all-zero: every row before it was checked when it was
+        // appended, and nothing since has changed it. Scanning them all here
+        // made `add` quadratic in the number of constraints.
+        try self.checkRowForContradiction(self.rowCount() - 1);
     }
 
     /// Caller-freed copy of `coeffs` with every coefficient negated, used by
@@ -1008,14 +1012,19 @@ pub const System = struct {
     /// system as unsatisfiable, which cuts the feasible set and is the one
     /// failure this library must never produce. Claiming infeasibility is the
     /// expensive direction, so it waits for an enclosure that rules it out.
-    fn noteContradiction(self: *System) !void {
+    fn checkRowForContradiction(self: *System, i: usize) !void {
+        const row = try self.at(i);
+        if (!isAllZero(row.coeffs)) return;
+        if (row.rhs.hi < 0) self.unsat = true;
+    }
+
+    /// Every row, and only on the `eliminate` path, where the row set has
+    /// genuinely changed underneath. One scan per elimination round is the
+    /// price of that; `pushRow` does not pay it, which is the whole of A5.
+    fn rescanForContradiction(self: *System) !void {
         for (0..self.rowCount()) |i| {
-            const row = try self.at(i);
-            if (!isAllZero(row.coeffs)) continue;
-            if (row.rhs.hi < 0) {
-                self.unsat = true;
-                return;
-            }
+            try self.checkRowForContradiction(i);
+            if (self.unsat) return;
         }
     }
 };

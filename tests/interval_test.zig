@@ -1628,6 +1628,85 @@ fn expectExactDecls(
     }
 }
 
+/// Every name `src/root.zig` publishes at the TOP level, in the order it
+/// writes them. The `ext` and `lp` namespaces have their own exact-set check
+/// below; this is the one for the module itself, and it exists because
+/// nothing else in the tree names these forty.
+///
+/// **That gap was real and it was measured.** Deleting any one of these
+/// re-exports — `pub const acos = ext_mod.acos;` and the rest — broke nothing
+/// at all: the namespace check looks INSIDE `ext`, not at the top level, and
+/// the fixture's README transcriptions happen to touch only a handful of
+/// these names. A re-export is a promise to consumers and nothing was holding
+/// it. Deleting `acos` is a silent breaking change to every caller that used
+/// `interval.acos`.
+const root_names = [_][]const u8{
+    "Interval",
+    "Vec",
+    "DynVec",
+    "mapResult",
+    "nextUp",
+    "prevDown",
+    "piDown",
+    "piUp",
+    "roundUp",
+    "roundDown",
+    "ext",
+    "lp",
+    "sqrt",
+    "cbrt",
+    "pow",
+    "powf",
+    "exp",
+    "exp2",
+    "expm1",
+    "log",
+    "log2",
+    "log10",
+    "log1p",
+    "sin",
+    "cos",
+    "tan",
+    "asin",
+    "acos",
+    "atan",
+    "atan2",
+    "sinh",
+    "cosh",
+    "tanh",
+    "asinh",
+    "acosh",
+    "atanh",
+    "floor",
+    "ceil",
+    "trunc",
+    "round",
+};
+
+test "the package root publishes every re-export it promises" {
+    // `inline for` makes every name comptime-known, so each `@hasDecl` below
+    // is answered by the COMPILER rather than at run time. Deleting a
+    // re-export therefore fails the build as a compile error naming the
+    // missing member — stronger than a failing assertion, because it cannot
+    // be skipped and it costs nothing when it passes.
+    //
+    // That was measured, not assumed: removing `pub const acos =
+    // ext_mod.acos;` from `src/root.zig` fails here with "root source file
+    // struct 'root' has no member named 'acos'". Before this test existed,
+    // removing it broke nothing at all.
+    //
+    // What this cannot see is an ADDITION: a module has no decl count to
+    // compare an expected list against. The namespace test below carries that
+    // side for `ext` and `lp`, where `@typeInfo(...).decls.len` does exist. An
+    // extra top-level re-export is caught by the README's API tables going
+    // stale, not by this.
+    inline for (root_names) |name| {
+        if (!@hasDecl(interval, name)) {
+            @compileError("src/root.zig no longer publishes " ++ name);
+        }
+    }
+}
+
 test "ext and lp publish exactly the enumerated names" {
     // The public shape of `ext` and `lp`: exactly the names listed above,
     // and nothing else.

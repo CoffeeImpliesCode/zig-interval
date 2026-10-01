@@ -655,7 +655,37 @@ regression worth pinning, but it must be re-pointed at the corpus result, which
 the current probe has already certified once. **T7 is OPEN and its spec is not
 fixed**; it is closed by the same corpus decision as T4, not ahead of it.
 
-### T8 — Compile-only checks for the public surface and the examples
+### T8 — MOSTLY DONE: the re-export half is closed, at compile time
+
+**The half that was actually missing is now closed, and the gap was real.**
+Nothing in the tree named `src/root.zig`'s forty top-level re-exports. The
+namespace test looks INSIDE `ext` and `lp`, and the fixture's README
+transcriptions touch only a handful of the top-level names, so deleting any one
+of the forty broke nothing at all. `tests/interval_test.zig` now names all
+forty with `@hasDecl` under an `inline for`, which makes every question
+comptime and therefore answered by the compiler.
+
+Measured, not assumed, and both directions run as the acceptance requires:
+removing `pub const acos = ext_mod.acos;` fails the build with "root source
+file struct 'root' has no member named 'acos'", and restoring it goes green
+again. The check landing as a compile error rather than a failing assertion is
+the better outcome — it cannot be skipped, and it costs nothing when it passes.
+
+**What it cannot see, stated so a later session does not over-read it.** An
+ADDITION. A module has no decl count to compare an expected list against, so an
+extra top-level re-export is caught only by the README's API tables going
+stale. The namespace test does carry exact-set checking for `ext` and `lp`,
+where `@typeInfo(...).decls.len` does exist.
+
+**The other half of this item was already done and is not redone.** "Each README
+example as its own executable" is not what the tree has: the fixture compiles
+and RUNS every example in one file, `fixture/src/readme.zig`, with 31
+containment checks. That is not identical — a broken example would fail all of
+them at once — but the compile coverage is the same, because an example that
+does not compile fails the fixture. Splitting them buys isolation of failure
+reporting, not additional proof, and it has not been done.
+
+**What it was.**
 
 The fixture proves a consumer can resolve the module graph and run 29
 behavioural checks. It does **not** prove that a single README example compiles
@@ -925,7 +955,39 @@ once in the namespace and once at the top level, because `sin(x)` and
 costs a line in each. That is a maintenance price chosen over a silent one, and
 the test above is what keeps the two lists honest.
 
-### A5 — `noteContradiction` stops rescanning every row
+### A5 — DONE: `noteContradiction` stops rescanning every row
+
+**Done.** `pushRow` now calls `checkRowForContradiction(rowCount() - 1)` — the
+row it just appended and nothing else. The full scan survives as
+`rescanForContradiction` and is called from exactly one place, `eliminate`,
+where the row set has genuinely changed underneath it.
+
+**Why one row is enough.** `unsat` is latched: once true nothing clears it and
+every caller acting on it returns early. So the only row that can be NEWLY
+all-zero with a negative right-hand side is the one just appended — every
+earlier row was checked when it was appended, and neither `add` nor `pushRow`
+modifies a row in place. `eliminate` is the one path that replaces rows
+wholesale, and it is the one that still pays the full scan.
+
+**What it removes.** `add` was `O(N^2 * var_count)` in the number of
+constraints; it is now linear in the rows appended, each costing one row's
+worth of coefficient scan. The LP benchmark's row budget is what made that a
+wall rather than a theoretical concern.
+
+**The acceptance's mutation, run.** Making the predicate never fire — flipping
+`row.rhs.hi < 0` to a comparison that cannot be true — turns three lp tests
+red, among them "unsatisfiable by contradiction, reported through isUnsat" and
+"a contradiction only the last round can see is still reported". That is what
+shows the check is load-bearing rather than decorative.
+
+**No timing is claimed, and none is needed.** This host's noise floor is +33% to
++44% between two runs of the same binary, and `add` is a cheap operation, so a
+delta here would not be evidence. The acceptance is decidable structurally —
+the loop body's index expression is a single constant on the `pushRow` path,
+and the full scan exists only on the `eliminate` path — and that is what was
+verified.
+
+**What it was.**
 
 `src/lp.zig:744-751`, called from `pushRow` at `:683` on every appended row and
 from `eliminate` at `:317`. The loop scans ALL rows, so `add` is
