@@ -1356,76 +1356,122 @@ stop compiling**. Second, the block's own tests run without constructing a
 the least defect risk behind it. The renames of section 5 should ride along with
 it, not land alone.
 
-### A11 — OPEN: the guard in `boundDivisor` is an endpoint test, and its doc is a containment test
+### A11 — DONE: the guard in `boundDivisor` is an endpoint test, and its doc now says so
 
-**Open, and nothing was changed.** This is a record of a question, not a
-defect report: the tree is green and stays green, and the test that found the
-gap was corrected to describe the code, not the code to describe the test.
+**Resolution 1. The doc was wrong and has been corrected down to "neither
+endpoint is zero"; the guard is right and did not move.** No code changed, so
+no solver answer changed and `src/lp.zig` is untouched. The two readings of
+the guard that came apart on a straddling piece are now separated by an
+argument rather than by a preference, and the argument refutes the tighter
+one.
 
-**What the guard does.** `boundDivisor` (`src/lp_exact.zig:295-302`) hands the
-multiplier piece back whole when `coeff.lo != 0 and coeff.hi != 0`, and
-otherwise hands back the endpoint of larger magnitude as a point. The first
-test is about **endpoints**: neither of them is zero. It is not a test about
-the piece **containing** zero, which is `lo <= 0 <= hi` and is the question
-`Interval.signOf` branches on (`src/interval.zig:799-804`). The two come
-apart on exactly one shape — a piece that straddles zero and has no zero
-endpoint, `[-1, 1]` — and on that shape the function returns the piece whole.
+**The finding: the far endpoint is chosen by MAGNITUDE, and the two reads of
+one row want OPPOSITE ends of the coefficient.** That is what this entry was
+missing, and it is stronger than the worry the entry opened with. Reading a
+LOWER bound off `a * x_k <= rhs` takes the largest `rhs / a` over the piece,
+and where that is finite it is attained at the negative end; reading an UPPER
+bound takes the smallest, and where that is finite it is attained at the
+positive end. So the lower arm wants `a.lo` and the upper arm wants `a.hi`,
+while `boundDivisor` can return only one divisor. On a one-sided piece that
+costs nothing, because the endpoint that is not zero is the only end either
+arm can want. On a piece with both signs the single divisor does not exist,
+and **whichever read the magnitude rule does not favour is bound by an
+endpoint that is not its extremum, so it comes out TIGHTER than the truth.**
+A bound too tight is not a bound, and this library would rather report none.
+Two counterexamples, both pinned in
+`tests/lp_exact_test.zig` as arithmetic rather than as prose:
 
-**What the doc above it intends.** The comment says the divisor is "the
-multiplier piece itself where that piece does not reach zero, and its
-endpoint farthest from zero as a point where it does", and the next paragraph
-argues from the one-sided reading `eliminate` performs: a piece that touches
-zero still has a sign, so it multiplies by the piece whole. Both "reaches
-zero" and "touches zero" read as containment in that text, and on that
-reading the sentence describes a guard the code does not have.
+- `a = [-1, 5]`, `rhs = [1, 2]`. Magnitude picks `5`, so the lower arm claims
+  `x_k >= rhs.lo / 5 = 0.2`. But `x_k = -0.5` satisfies the row for EVERY
+  realisation of `a`, because `a * x_k` is largest at `a = -1`, is `0.5`, and
+  the smallest `rhs` is `1`. The bound excludes a value the row permits.
+- `a = [-1, 1]`, the shape this entry named. Magnitude is a tie and the
+  comparison prefers `lo`, so the collapse yields `-1` and the upper arm
+  claims `x_k <= -1`. `x_k = 0.5` is admitted by every realisation, the same
+  argument at `a = 1`, and again the bound excludes what the row permits.
 
-**The tree already draws the line the guard does not.** `Interval.div`
-branches on containment, `other.lo <= 0.0 and 0.0 <= other.hi`
-(`src/interval.zig:894`), and the soundness reference calls the two cases by
-name: a divisor that REACHES zero from one side, whose true quotient set is
-one ray with a finite end, and a divisor with zero in its INTERIOR, whose
-hull is the whole line (`tests/soundness_shared.zig:1372-1383`). So the
-division and the divisor already answer different questions about the same
-piece: `div` treats `[-1, 1]` as zero-reaching, and `boundDivisor` does not.
+So on EVERY straddling piece exactly one of the two reads is too tight. That
+is the durable result: the collapse does not fail because the piece reaches
+zero, it fails because it reaches **both** signs and one divisor cannot serve
+both reads. And it is not a realisation NEAR zero that escapes the collapsed
+bound, which is the form this question was originally put in — that term is
+real, and it is what makes the whole line the right answer for a piece with
+zero in its interior. What escapes the COLLAPSE is the whole other end of the
+piece: the endpoint on the far side of zero from the one the magnitude rule
+chose, which the collapse never divided by and never bounded by.
 
-**Whether the two agree.** On every piece the SOLVER builds, yes. In general,
-no. `partitionInto` (`src/lp.zig:583-601`) files a straddling coefficient as
-`[a.lo, 0]` in the lower bucket and `[0, a.hi]` in the upper, and
-`BoundReader` (`src/lp.zig:360-370`) is the only caller and calls the
-function only for a piece whose `lo` is below zero or whose `hi` is above
-zero. Every piece that therefore reaches the guard is one-sided outright, or
-one-sided and touching zero at one endpoint, and on those two shapes the
-endpoint test and the containment test are the same question. The magnitude
-comparison in the second branch is a tie on `[0, 0]` alone, and there both
-candidates are zero, so the tie decides nothing observable.
+**What the whole-line answer costs, stated rather than glossed.** Handing a
+straddling piece back whole is sound and it is LOOSE. With `rhs.lo >= 0` the
+set of `x_k` satisfying `a * x_k <= rhs` under every realisation is the
+interior interval `[rhs.lo / a.lo, rhs.lo / a.hi]`, so a real bound exists on
+both sides and the code declines to take either. Earning it takes one divisor
+per SIDE rather than one per row — a change of interface, not of guard — and
+it would change no answer today: `partitionInto` (`src/lp.zig:583-601`)
+splits every straddling piece into `[a.lo, 0]` and `[0, a.hi]` before
+`BoundReader` sees one, so the shape is unreachable from `bounds` and `box`.
+Recorded here; not taken.
 
-**What is NOT known.** Whether the contract should be the doc's containment
-reading. The answer is not "the tighter one wins", which is why this is
-recorded rather than fixed. `Interval.div` (`src/interval.zig:889-896`)
-answers a `.zero` or `.straddle` divisor with the whole line, so a straddling
-piece yields no bound at all, while the doc's reading would hand `bounds` the
-far endpoint `-1` as a point and a real quotient. That is tighter, and the
-argument for it is ONE-SIDED — the far endpoint is the one that makes
-`a * x_k` largest because `x_k` has one sign — so it does not carry to a
-piece with no fixed sign. Settling it needs a proof written for the
-straddling case. The shape is unreachable from `bounds` and `box`
-(`src/lp.zig:802-818`), so tightening the guard to match the doc would change
-no solver answer today: it is a change to the module's contract, for the sake
-of a future caller that does not come through `partitionInto`.
+**Why the endpoint test is not a weaker version of the containment test.** On
+every piece the solver builds the two are the same question, which is why the
+guard was never wrong in use and only under-described. `partitionInto` files a
+straddling coefficient as `[a.lo, 0]` in the lower bucket and `[0, a.hi]` in
+the upper, and `BoundReader` (`src/lp.zig:360-370`) calls `boundDivisor` only
+for a piece whose `lo` is below zero or whose `hi` is above zero, so every
+piece that reaches the guard is one-sided outright, or one-sided and touching
+zero at one endpoint. The magnitude comparison is a tie on `[0, 0]` alone,
+where both candidates are zero and nothing observable turns on it.
 
-**Acceptance, when it is decided.** Either the doc comment above
-`boundDivisor` is corrected down to "neither endpoint is zero", and the test
-as rewritten stands; or the guard becomes `lo > 0 or hi < 0` — the complement
-of containment — the straddling case is proved sound against `Interval.div`,
-and the test's straddling expectation changes with it. Decidable either way.
-Not this pass.
+**The tree already drew the line the guard does not.** Kept because it is how
+the two got confused: `Interval.div` branches on containment,
+`other.lo <= 0.0 and 0.0 <= other.hi` (`src/interval.zig:894`), and the
+soundness reference calls its two cases by name — a divisor that REACHES zero
+from one side, whose true quotient set is one ray with a finite end, and a
+divisor with zero in its INTERIOR, whose hull is the whole line
+(`tests/soundness_shared.zig:1372-1383`). Those are answers about the QUOTIENT
+SET, which is what `div` is for. `BoundReader` asks a different question —
+which end of the piece binds `x_k` — and the guard encodes the answer to that
+one. The whole line `div` returns for an interior zero is a correct answer to
+the question `div` is asked; `BoundReader` reads `-inf` and `+inf` off it and
+keeps the bound it already had, and contributing nothing is sound.
+
+**The test.** `tests/lp_exact_test.zig` keeps its name — the contract that name
+states is the one the code implements — and its straddling expectation is now
+the settled answer rather than a known disagreement. It pins the symmetric and
+the asymmetric straddle, both of which come back whole, and it pins the
+refutation above with `mul`, `div` and `contains`, so a change to the guard
+that reintroduces the collapse fails on the numbers rather than on a
+reviewer's reading of a comment. The draft of that test which asserted the
+containment reading, and failed with "expected `pt(-1.0)`, got `[-1, 1]`",
+was wrong; the failure was the question, and this entry is its answer.
+
+**Acceptance. MET.** The doc comment above `boundDivisor` is corrected down to
+"neither endpoint is zero" and the test stands. The guard is deliberately not
+`lo > 0 or hi < 0`, because that version is refuted above rather than merely
+unproved. Nothing was deleted or weakened: the straddling expectations the old
+draft got wrong are the expectations now.
+
+**What it was.**
+
+`boundDivisor` (`src/lp_exact.zig:334-341`) hands the multiplier piece back
+whole when `coeff.lo != 0 and coeff.hi != 0`, and otherwise hands back the
+endpoint of larger magnitude as a point. The first test is about **endpoints**:
+neither of them is zero. It is not a test about the piece **containing** zero,
+which is `lo <= 0 <= hi` and is the question `Interval.signOf` branches on
+(`src/interval.zig:799-804`). The two come apart on exactly one shape — a piece
+that straddles zero and has no zero endpoint, `[-1, 1]`.
+
+The comment above it said the divisor is "the multiplier piece itself where
+that piece does not reach zero, and its endpoint farthest from zero as a point
+where it does", and the next paragraph argued from the one-sided reading
+`eliminate` performs: a piece that touches zero still has a sign, so it
+multiplies by the piece whole. Both "reaches zero" and "touches zero" read as
+containment in that text, and on that reading the sentence described a guard
+the code does not have.
 
 **How it was found.** By `tests/lp_exact_test.zig`, which is A10's test and
-pins the extracted block without building a `System`, and not by an audit.
-Its draft of this test asserted the doc's reading and failed on the
-straddling case: expected `pt(-1.0)`, got `[-1, 1]`. The body is
-**pre-existing**: `HEAD:src/lp.zig:1278-1285` carries the identical guard,
-so the extraction moved it verbatim and did not introduce it.
+pins the extracted block without building a `System`, and not by an audit. The
+body is **pre-existing**: `HEAD:src/lp.zig:1278-1285` carries the identical
+guard, so the extraction moved it verbatim and did not introduce it.
 
 ---
 

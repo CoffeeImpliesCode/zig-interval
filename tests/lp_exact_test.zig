@@ -396,22 +396,73 @@ test "the divisor is the piece whole, or the far endpoint where an ENDPOINT is z
     // its `.straddle` arm and answers the whole line. No bound at all, where
     // the name and the doc both promised one.
     //
+    // A11 SETTLED THAT, AND IT SETTLED IT IN FAVOUR OF THE CODE. The doc
+    // above `boundDivisor` has been corrected down to "neither endpoint is
+    // zero" and the guard did not move, so the name of this test already
+    // names the endpoint reading and stands as it is. What the containment
+    // reading wanted here is pinned below as unsound, with arithmetic.
+    //
     // No piece like this reaches the function from the solver, and that is
-    // what keeps the disagreement from being a defect today.
-    // `partitionInto` (`src/lp.zig:595-598`) files a straddling coefficient
-    // as `[a.lo, 0]` in the lower bucket and `[0, a.hi]` in the upper, and
-    // `BoundReader` (`src/lp.zig:360-370`) calls `boundDivisor` only for a
-    // piece whose lo is below zero or whose hi is above zero. So every piece
-    // that reaches the guard is one-sided outright, or one-sided and
-    // touching zero at one end, and on those two shapes "neither endpoint is
-    // zero" and "does not contain zero" are the same question. What is
-    // pinned here is therefore the CONTRACT, so that a caller which does not
-    // come through that switch is owed an answer it can predict. A11 in
-    // `docs/tests-and-architecture-plan.md` records the open question.
+    // why settling it moved no answer. `partitionInto`
+    // (`src/lp.zig:595-598`) files a straddling coefficient as `[a.lo, 0]`
+    // in the lower bucket and `[0, a.hi]` in the upper, and `BoundReader`
+    // (`src/lp.zig:360-370`) calls `boundDivisor` only for a piece whose lo
+    // is below zero or whose hi is above zero. So every piece that reaches
+    // the guard is one-sided outright, or one-sided and touching zero at one
+    // end, and on those two shapes "neither endpoint is zero" and "does not
+    // contain zero" are the same question. What is pinned here is therefore
+    // the CONTRACT, so that a caller which does not come through that switch
+    // is owed an answer it can predict.
     const straddling = side(Interval.init(-1.0, 1.0), &no_columns, pt(0.0));
     try std.testing.expectEqual(Interval.init(-1.0, 1.0), exact.boundDivisor(straddling));
     const by_straddling = Interval.init(1.0, 2.0).div(exact.boundDivisor(straddling));
     try std.testing.expectEqual(Interval.init(-inf, inf), by_straddling);
+
+    // And the straddling case on a piece whose two ends are not the same
+    // distance from zero, where a magnitude rule and a sign rule disagree
+    // about which end is far. Only the magnitude rule is in play.
+    try std.testing.expectEqual(
+        Interval.init(-1.0, 5.0),
+        exact.boundDivisor(side(Interval.init(-1.0, 5.0), &no_columns, pt(0.0))),
+    );
+    try std.testing.expectEqual(
+        Interval.init(-5.0, 1.0),
+        exact.boundDivisor(side(Interval.init(-5.0, 1.0), &no_columns, pt(0.0))),
+    );
+
+    // WHY THE COLLAPSE IS UNSOUND HERE, WITH THE ARITHMETIC AS THE EVIDENCE.
+    // A lower read off `a * x_k <= rhs` is the largest `rhs / a` over the
+    // piece, which the NEGATIVE end attains, and an upper read is the
+    // smallest, which the POSITIVE end attains. One divisor chosen by
+    // MAGNITUDE serves one of those reads and spoils the other on every piece
+    // with both signs. On [-1, 5] it hands over 5, the far end by magnitude,
+    // and a lower read then claims `x_k >= rhs.lo / 5`. That end is
+    // positive, and the row still admits `x_k = -0.5` under EVERY
+    // realisation of `a`: the largest `a * x_k` over the piece is at
+    // `a = -1`, is `0.5`, and the smallest `rhs` is `1`.
+    const row_rhs = Interval.init(1.0, 2.0);
+    const admitted_below = -0.5;
+    try std.testing.expect(Interval.init(-1.0, 5.0).mul(pt(admitted_below)).hi <= row_rhs.lo);
+    const collapsed_below = row_rhs.div(pt(5.0));
+    try std.testing.expect(collapsed_below.lo > admitted_below);
+    try std.testing.expect(!collapsed_below.contains(admitted_below));
+
+    // AND THE OTHER READ, WHERE THE TIE HANDS THE COLLAPSE THE NEGATIVE END.
+    // The magnitude comparison cannot tell -1 from 1 and prefers `lo`, so on
+    // [-1, 1] an upper read claims `x_k <= rhs.lo / (-1) = -1`, while
+    // `x_k = 0.5` is admitted by every realisation: the largest `a * x_k` is
+    // `0.5`, at `a = 1`, and the smallest `rhs` is `1`.
+    const admitted_above = 0.5;
+    try std.testing.expect(Interval.init(-1.0, 1.0).mul(pt(admitted_above)).hi <= row_rhs.lo);
+    const collapsed_above = row_rhs.div(pt(-1.0));
+    try std.testing.expect(collapsed_above.hi < admitted_above);
+    try std.testing.expect(!collapsed_above.contains(admitted_above));
+
+    // WHAT THE CODE ANSWERS INSTEAD, and why the whole line is the sound
+    // answer rather than a lost one: it contains every admissible `x_k`, and
+    // `BoundReader` reads -inf and +inf off it and keeps the bound it had.
+    try std.testing.expect(by_straddling.contains(admitted_below));
+    try std.testing.expect(by_straddling.contains(admitted_above));
 
     // The structural zero is a piece with an endpoint at zero like any other
     // and hands back [0, 0] unchanged. It is the only shape on which the

@@ -271,15 +271,55 @@ pub inline fn combinedBound(lower: Side, upper: Side) Interval {
 }
 
 /// The divisor one side of a bound is read off with: the multiplier piece
-/// itself where that piece does not reach zero, and its endpoint farthest
-/// from zero as a point where it does.
+/// itself where NEITHER OF ITS ENDPOINTS is zero, and its endpoint farthest
+/// from zero as a point where one of them is.
 ///
-/// `Interval.div` answers a divisor that reaches zero with the whole line,
-/// which is not a bound in either direction, so a piece that touches zero
-/// has to go in as a single endpoint. FAR is the right endpoint because the
-/// row must hold for EVERY realisation of the coefficient: `x_k` has one
-/// sign, and the coefficient sitting on the other side of it is the one
-/// that makes `a * x_k` largest.
+/// The test is about ENDPOINTS, not about the piece CONTAINING zero, and on a
+/// piece whose zero is in its INTERIOR the difference decides soundness
+/// rather than tidiness. This sentence used to say "where that piece does not
+/// reach zero", which reads as containment, and `Interval.div` does branch on
+/// containment, so the doc and the guard really were answering different
+/// questions about the same piece. They come apart on exactly one shape, a
+/// piece that straddles with no zero endpoint such as `[-1, 1]`, and on that
+/// shape this guard hands the piece back WHOLE. Handing it back whole is the
+/// sound answer, and the reason is not the one the old comment reached for.
+///
+/// Reading a LOWER bound off `a * x_k <= rhs` takes the largest `rhs / a`
+/// over the piece, and where that is finite it is attained at the NEGATIVE
+/// end; reading an UPPER bound takes the smallest, and where that is finite
+/// it is attained at the POSITIVE end. Whether either is finite at all is
+/// `rhs`'s business and `Interval.div`'s to decide - a divisor with zero in
+/// its interior has neither - and nothing below depends on the answer. So
+/// the two reads of one row want OPPOSITE ends of the same piece, while this
+/// function hands back ONE divisor for both, chosen by magnitude.
+///
+/// On a piece with only one sign the difficulty cannot arise. A piece that is
+/// strictly one-sided is returned whole, and a piece that is one-sided and
+/// closed at zero has exactly one endpoint that is not zero, so that endpoint
+/// is both the extreme of the piece and the only end either read can want.
+/// The magnitude comparison below finds it without being told which side the
+/// caller is on, and it is a tie on `[0, 0]` alone, where both candidates are
+/// zero and nothing observable turns on it.
+///
+/// On a piece with both signs the single divisor does not exist, and the end
+/// magnitude picks is wrong for one of the two reads on EVERY such piece.
+/// `[-1, 5]` picks `5`, so a lower read claims `x_k >= rhs.lo / 5 = 0.2`
+/// against `rhs = [1, 2]`, while `x_k = -0.5` satisfies the row under EVERY
+/// realisation of `a` in that piece: the largest `a * x_k` is at `a = -1` and
+/// is `0.5`, at or below the smallest `rhs`. `[-1, 1]` is a tie and picks
+/// `-1`, so an upper read claims `x_k <= -1`, while `x_k = 0.5` is admitted
+/// the same way, at `a = 1`. One of the two reads is too tight either way,
+/// and a bound too tight is not a bound.
+///
+/// `Interval.div` is not what fails here. The whole line it answers for a
+/// divisor with zero in its interior is a correct answer to the question it
+/// is asked, and `BoundReader` reads `-inf` and `+inf` off it and keeps the
+/// bound it already had, so a row with nothing better to say contributes
+/// nothing, which is sound. Earning a real bound on a straddling piece would
+/// take one divisor per SIDE rather than one per row - a different interface,
+/// not a different guard - and `partitionInto` splits every straddling piece
+/// into two one-sided ones before `BoundReader` sees one, so it would change
+/// no answer today.
 ///
 /// This is the same one-sided reading `lp.System.eliminate` performs, asked of
 /// the same object. `eliminate` needs only the SIGN of a multiplier, and a
