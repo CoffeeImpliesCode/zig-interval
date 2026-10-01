@@ -367,7 +367,7 @@ constrains REPLACEMENT, not duplication. A copy holds the same `comps.ptr` and
 the same `own`, so both copies pass and the double free stands. The type's
 comment says so rather than pretending otherwise.
 
-### P6 — MOSTLY DONE: the documentation and dead-code sweep (D8 through D14)
+### P6 — DONE: the documentation and dead-code sweep (D8 through D14)
 
 **Landed.** D8: the `root.zig` comments now say the pairs differ at the two
 signed zeros and agree at the infinities, matching `src/rounding.zig` and
@@ -379,17 +379,27 @@ have **ten** direct tests in `tests/rounding_test.zig`, and the acceptance held
 — mutating the `-inf` arm of `roundUp` now fails three of them, where before it
 failed nothing anywhere in the tree.
 
-**Still open: D10**, one wrong reason in two comments. The `-0.0` guard in
-`nextUp` (`src/rounding.zig:109-110`) is justified as preventing a step "to the
-smallest negative subnormal, which is below -0.0". The general pattern step
-from `0x8000000000000000` does not produce that subnormal at all — the sign bit
-is set, so the step is a subtraction, and the result is `+floatMax`. The guard
-is right; the reason is not the reason. `prevDown`'s mirror comment at
-`:129-131` is wrong the same way. **Acceptance:** both comments name the change
-of direction at the zeros, which is the fact they should have stood on all
-along. No test is affected.
+**D10 is closed, and was already closed when this entry last said otherwise.**
+The complaint was that the `-0.0` guard in `nextUp` was justified as
+preventing a step "to the smallest negative subnormal" — and that the general
+pattern step from `0x8000000000000000` does not produce that subnormal at all.
+Both comments now say what the acceptance asked for, which is the change of
+direction at the zeros:
 
-### P7 — PART: README drift and the handover (D11, D15)
+  * `src/rounding.zig:165-170` — "from 0x8000...0 this direction SUBTRACTS one
+    and reaches 0x7fff...f, whose exponent field is all ones and whose
+    significand is not zero, so it is a quiet NaN and not a number."
+  * `src/rounding.zig:188-195` — the mirror for `prevDown`, naming the integer
+    underflow at the bottom of the `u64` and the fact that `-0.0` needs no
+    guard of its own.
+
+The line numbers this entry carried for those comments (`:109-110` and
+`:129-131`) had drifted, which is itself the argument for the rule the plan
+already states: a citation that has moved is a citation nobody checked. Read
+the file, not the pointer. No test is affected, and none was — the guards were
+always right; only the stated reason was wrong, and only the reason.
+
+### P7 — DONE: README drift and the handover (D11, D15)
 
 **Landed.** The strict-pair recipe is gone from every part of the README
 including `:55-56` and `:424-426`; all four rounding helpers are documented; the
@@ -400,17 +410,44 @@ and panicked before printing a line, and the build-wiring snippet, which omitted
 `target` and panicked inside the dependent's own build script. The handover's
 source-layout table and step-4 verdicts have been refreshed against the tree.
 
-**Still open.** The README says the elementary functions widen by **two** ULP at
-`:69`, `:73`, `:81`, `:119` and `:123`, and they now widen **three**. That is new
-drift created by D17's fix, it misstates the margin the package's central claim
-rests on, and it is the first thing to correct. Then `abs` off zero (`:300`,
-"the interval itself", dropping the widening), `sub`'s pairing (`:295`, still
-saying "computed as `self + (-other)`" when the code crosses the pairing because
-crossing is the whole point), the new `own` field on `DynVec` and the `deinit`
-trap, which the vector API section does not mention at all, and the rest of the
-original audit's line list, which has not been walked. **Acceptance:** `zig build
-docs` green and a diff in which every changed claim is traceable to a line in
-`src/`.
+**Closed.** The "still open" list this entry carried is now worked and audited.
+The elementary-ULP claims, `abs` off zero, `sub`'s pairing and `DynVec.own` had
+already been corrected or verified; the last clause — the original audit's line
+list, "which has not been walked" — is now walked.
+
+**The sweep.** All 16 tables and 149 data rows were checked against `src/`. The
+row count is counted, not inherited: `grep -c '^|' README.md` is 181, and each
+of the sixteen tables spends two of those lines on a header row and its
+separator, so `181 - 32 = 149`. The sixteen blocks hold 5, 15, 8, 26, 16, 30, 8,
+5, 7, 8, 10, 10, 4, 5, 14 and 10 `|` lines, and no `|` line sits inside a code
+fence. Beside the tables, every sentence naming a symbol, a build step, a line
+number or a file was resolved against the tree. The prose that argues WHY a
+design has the shape it does has no mechanical form, so it is deliberately
+outside what this entry claims to have counted: what is claimed here is a
+procedure, not a total. Four defects were found, and two of them were wrong in
+a way only a sweep finds, because the document contradicted ITSELF:
+
+  * The `lp.Lin` field table still documented an `op` field and a mutable
+    `coeffs`, both of which A1 deleted. The row was a live write door described
+    as if it were still open, and the `const` that now makes a row read-only was
+    missing from the very type that carries it. Some 600 lines later the same
+    document correctly said `Lin` has no comparison field at all.
+  * Two places described `scale` as composing through `div`. It composes through
+    `halve`, which A9 made a public operation in its own right; `div` is the
+    general division, and `halve` is the one that divides by the single constant
+    the format can answer exactly. The two had drifted apart when `halve` was
+    split out of it.
+
+Everything checked and found correct was left alone. A wrong claim and a
+gratuitous rewrite are both damage, and an audit that cannot tell them apart is
+not an audit.
+
+**Acceptance: MET.** `zig build docs` is green, and every one of the four
+changes is traceable to a line in `src/` — the citations are in the commit
+message. The plan's own standing rule, that a document restating a number
+without counting it is a defect, is what caught two of these: the table row
+counts and the `scale` composition were both recounted from the tree rather than
+carried forward from prose.
 
 ### P8 — DONE: the reading of an infinite endpoint, and the rays that honour it (D18)
 

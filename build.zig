@@ -383,12 +383,20 @@ pub fn build(b: *std.Build) void {
 
     // The combined step above takes no argument and runs all three in
     // parallel, so it cannot name one benchmark on its own. These three
-    // steps exist for the LP benchmark in particular: its measurements sit
-    // next to a row budget that can be tightened on its own, and the second,
-    // independent guard is an address-space limit around the step that runs
-    // it. A limit wrapped around `zig build bench` would also cover the other
-    // two, and those are the benchmarks that stay runnable while the LP budget
-    // is still being fixed, so they must be reachable without it.
+    // steps exist so a single benchmark can be run, and timed, on its own:
+    // the LP benchmark's measurements sit next to a row budget that can be
+    // tightened independently, and the other two stay runnable while the LP
+    // budget is still being worked on.
+    //
+    // An earlier version of this comment claimed there was a SECOND guard
+    // here, "an address-space limit around the step that runs it". There is
+    // no such limit, and there never was in this file: the `ulimit -v` recipe
+    // was removed as actively wrong, because the compiler inherits the limit
+    // and dies with OutOfMemory while COMPILING, before a benchmark row runs.
+    // docs/performance-handover.md records that and says not to reintroduce
+    // it. The one real guard is the row budget inside bench/bench_lp.zig, and
+    // it is already a step of the combined `bench` step. These three steps
+    // add isolation, not protection.
     //
     // Pure aliases. Each one names a run step that already exists, so
     // nothing is built, compiled or installed differently, and the combined

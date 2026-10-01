@@ -6,32 +6,40 @@ those are `docs/next-work-plan.md` and `docs/performance-handover.md`, and
 where they overlap this file points at them rather than restating them.
 
 One line about citations. Every `path:line` below was read in the session that
-wrote this file, with one exception: `tests/soundness_test.zig` was being edited
-concurrently by another agent throughout, so its line numbers drift and its
-anchors here are given **by name** (`magnitudeOk`, `screen`, `fuzz`, the `Op`
-enum) rather than by number. Everything else is stable and can be jumped to.
+wrote this file, and the one exception has since closed: `tests/soundness_test.zig`
+is gone — T10 split it — so the anchors that used to be given **by name**
+(`magnitudeOk`, `screen`, `fuzz`, the `Op` enum) are ordinary `path:line`
+references now, into `tests/soundness_shared.zig` and its four siblings.
+Everything here is stable and can be jumped to.
 
 **The library in one line.** Over `f64`, every operation returns a result
 guaranteed to CONTAIN the true mathematical answer, obtained by computing with
 IEEE round-to-nearest and widening each endpoint outward. Soundness outranks
 everything. A NaN scalar operand ABORTS in a checked build, and that is a
-pinned contract, not an oversight (`build.zig:113-127` builds the probe in
+pinned contract, not an oversight (`build.zig:155-169` builds the probe in
 `.Debug` whatever `-Doptimize` says, and says why).
 
 **State of the tree when this was written.** `zig build test` green in Debug,
-ReleaseSafe, ReleaseFast and ReleaseSmall, each ending `consumer ok: 29 checks`
-(`fixture/src/main.zig:14`, `:502`; the same string is quoted in the build
-comment at `build.zig:153`). The oracle reports `0 FAILED`. Eight of eight
-operations trap on a NaN scalar. Steps: `install`, `uninstall`, `test`,
-`consumer`, `docs`, `bench`, `bench-scalar`, `bench-vec`, `bench-lp`
-(the README's build-steps table). Seven read-only audits have run, and
-everything below is their verified output.
+ReleaseSafe, ReleaseFast and ReleaseSmall, exiting 0 and printing
+`consumer ok: 29 checks` (`fixture/src/main.zig:14`, `:502`) and then
+`readme examples ok: 31 checks` (`fixture/src/readme.zig:69`, `:936`). Those two
+are ordered — `fixture/build.zig:57` makes the README tier depend on the
+consumer run precisely so it is second — but neither is guaranteed to be the
+LAST line of the whole run: the eleven test artifacts are eleven independent
+`test_step.dependOn` calls (`build.zig:61` through `build.zig:249`) with no
+order between them, and the fixture is a twelfth. The oracle reports
+`0 FAILED`. Eight of eight operations trap on a NaN scalar. Steps: `install`
+(the default), `test`, `consumer`, `docs`, `bench`, `bench-scalar`, `bench-vec`,
+`bench-lp` — the eight rows of the README's build-steps table at
+`README.md:1192-1201`, and the complete set, since `build.zig` defines no
+other step. Seven read-only audits have run, and everything below is their
+verified output.
 
 **Where the 56 comes from, so it is counted rather than inherited.** 28
 operations are methods on `Interval` in `src/interval.zig`, 28 are free
 functions in `src/interval_ext.zig`, and `28 + 28 = 56`. The `Op` enum in
-`tests/soundness_test.zig` names **35** of them; the other **21** are the T4
-list. `35 + 21 = 56`. Both figures are counted from the tree, and a document that
+`tests/soundness_shared.zig:1467-1502` names **35** of them; the other **21** are
+the T4 list. `35 + 21 = 56`. Both figures are counted from the tree, and a document that
 restates them without counting them is how the 34-of-55 figure in an earlier
 draft of this file survived.
 
@@ -230,9 +238,10 @@ and it is worth stating three ways:
    defect is 0.14 ULP and `f128` carries 113 significand bits. `lo` compared
    against the `f128` value of the truth is a clean violation of 3.84e-18, four
    orders of magnitude above `f128`'s own resolution at that magnitude. The
-   oracle's own doctrine (`tests/soundness_test.zig`, the file header) already
-   names this: containment is checked against a reference derived in `f128` from
-   the ORIGINAL `f64` inputs, "never by evaluating the corners in `f64` and then
+   oracle's own doctrine (`tests/soundness_shared.zig:39`, the file header)
+   already names this: containment is checked against a reference derived in
+   `f128` from the ORIGINAL `f64` inputs, "never by evaluating the corners in
+   `f64` and then
    treating those results as truth".
 
 **And the general form of the same trap, which is the one that catches people.**
@@ -280,7 +289,7 @@ same trap waiting for the same argument, and section 3, T4 is the work.
 
 ### 2.3 The reference and the tests that now hold this line
 
-**The reference.** `tanhRef` in `tests/soundness_test.zig` returns the true
+**The reference.** `tanhRef` in `tests/soundness_shared.zig:1257` returns the true
 `tanh` of an `f64` endpoint as an `f128` bracket, measured accurate to
 **3.1e-34 relative** — 1.4e-18 of ONE ULP of `f64`, eighteen orders of
 finer than the grid the defect lives on. It is built from the exponential
@@ -432,9 +441,10 @@ the test that asserted a degenerate infinite box is a point rather than a ray
 was **deleted** rather than re-pinned, because under this contract that shape is
 unreachable through `init` and pinning it would pin the representation instead of
 the behaviour. **The sweep is not green yet**, and the failures are in the
-oracle's own references in `tests/soundness_test.zig` rather than in `src/`: a
-one-sided "reaches zero" quotient test used two-sidedly on `div` and `recip`,
-the same shape of error on `abs` and `sqr`, a zero-factor collapse skipped on
+oracle's own references in `tests/soundness_shared.zig` and
+`tests/soundness_frontier_test.zig` rather than in `src/`: a one-sided
+`reaches zero` quotient test used two-sidedly on `div` and `recip`, the same
+shape of error on `abs` and `sqr`, a zero-factor collapse skipped on
 `mul` when the other end is a ray, and an inverted sign in the `-inf` margin
 reference for `expand`. Judging rather than withholding is what exposed them.
 Per-operation tallies are read from a run rather than recorded here.
@@ -464,14 +474,27 @@ re-key done afterwards would invalidate every measurement made in between. It
 is now the reason the numbers in this file and in the handover stay meaningful
 as T4 lands.
 
-### T4 — DONE: 1654 independently certified rows over all twenty-one operations
+### T4 — DONE: 1886 independently certified rows, and 21 of the 24 labels are operations nothing else judges
 
-**Done.** `tests/corpus/elementary.txt` carries 1654 rows across all twenty-one
-operations the in-tree oracle did not judge, and `tests/corpus_test.zig` checks
-every one of them for containment. The reference is MPFR at 256 bits, called
+**Done.** `tests/corpus/elementary.txt` carries **1886** rows over **24**
+operation labels, and both figures are counted off the file rather than
+carried forward from the figure this entry used to print. Of the 24, **21** are
+the operations the in-tree oracle did not judge and `tanh` was the twenty-second
+and is done (§2.3); the other three — `sqrt`, `cbrt`, `tanh` — are already
+members of the `Op` enum (`tests/soundness_shared.zig:1499-1502`), so the
+corpus is a superset of the 21 rather than exactly it. `tests/corpus_test.zig`
+checks every row for containment. The reference is MPFR at 256 bits, called
 with a declared rounding direction, by `scripts/gen_corpus.c`; the corpus is
-committed rather than generated at test time. Current run: **1654 rows checked,
-0 FAILED, 390 of them exactly representable.**
+committed rather than generated at test time. The rows grew twice since the
+entry was first written — 1654 at `076b3ca`, 1886 at `1fe118d` — and the
+figure in the heading is the one the file holds now: `grep -vc '^\s*#\|^\s*$'`
+over it, and `cut -d' ' -f1 | sort -u` for the labels.
+
+**The exactness count, also recounted.** **427** rows carry MPFR's ternary `0`
+and are exactly representable; the same 427 is what the test counts as
+`exact_rows` (`tests/corpus_test.zig:176`) and prints beside the failure count
+at `:179`. The last recorded run read `1886 rows checked, 0 FAILED, 427 of
+them exactly representable`.
 
 #### The blocker recorded here earlier was wrong, and the correction is the useful part
 
@@ -557,7 +580,7 @@ one row per operation per shape.
 hex bounds. Committed, not generated at test time: a test that shells out to
 Python is not a gate, and a corpus nobody can read is not evidence.
 
-**How it is consumed.** `tests/soundness_test.zig` grows a tier that reads each
+**How it is consumed.** `tests/corpus_test.zig` has a tier that reads each
 row, calls the library, and asserts `want_lo <= got.lo and got.hi <= want_hi`.
 Containment of the certified bracket, which is the only sound direction.
 Tightness is NOT asserted — a corpus bounds correctness, not width, and a
@@ -766,8 +789,9 @@ it.
 
 ### T7 — DONE: `powf`'s reference replaced, not reused
 
-**Done.** `exactPowf` and `powf_slack` are deleted from
-`tests/soundness_test.zig`. The `reproducer 3` test has MOVED to
+**Done.** `exactPowf` and `powf_slack` are gone from the tree
+(`grep -rn 'exactPowf\|powf_slack' src/ tests/` names only the comments that
+record the removal). The `reproducer 3` test has MOVED to
 `tests/corpus_test.zig`, keeping its name and its claim, and now reads its
 reference from the MPFR corpus instead of from an `f128` evaluation of
 `exp(y * log x)` — which was a second implementation of the same function,
@@ -907,25 +931,63 @@ could change the null into something else and nothing would notice.
 `== null`, plus one for `asin(Interval.init(-1.5, 0.5))`. When `F2` lands, that
 test changes and only that test changes.
 
-### T10 — Split `tests/soundness_test.zig`
+### T10 — DONE: one shared vocabulary, four registered test files, and 68 names unmoved
 
-The file is one flat several-thousand lines holding four unrelated concerns: the exact
-and bracket reference layers, the fuzz machinery, the frontier sweep, the
-per-operation reference switch, and a set of named reproducers and guards. It
-is the largest file in the tree and the hardest to read, and it is the file the
-next twenty-one operations go into.
+**Done, and the count is the thing to check first.** `tests/soundness_test.zig`
+is gone. What is there is `tests/soundness_shared.zig` — the vocabulary every
+concern file imports, and the only place the `Op` enum (`:1467`), the
+label-keyed seed (`streamSeed`, `:310`) and the report (`summary`, `:2046`) now
+live — and four siblings over it: `tests/soundness_reference_test.zig` (2
+tests), `tests/soundness_fuzz_test.zig` (35), `tests/soundness_frontier_test.zig`
+(18) and `tests/soundness_reproducers_test.zig` (13). `2 + 35 + 18 + 13 = 68`,
+and the 68 is the SAME 68: `diff` of the sorted `^test "` lines of the four
+files against `a26675b~1:tests/soundness_test.zig`, the last commit before the
+split, returns nothing. No name was renamed, dropped or duplicated in the move,
+which is the whole risk this item carried.
 
-**This is the lowest-ranked item on this list and it is ranked there
-deliberately.** Splitting it fixes no defect and catches no regression; it costs
-a careful move of the `Op` enum, the seed derivation and three shared helpers
-across four files, on the file that guards the library's central claim. Do it
-**after T4, never before**: moving the seed derivation and the enum while the
-enum is being appended to is how a stream gets silently re-keyed. T3 has already
-removed the hazard that made this the dangerous half of the job.
+**Each concern is its own build step, and they are siblings rather than a chain
+for a reason that is a property of `zig test`.** Four `b.addTest` roots at
+`build.zig:198`, `:209`, `:220` and `:238`, each depending on the one `test`
+step. `zig test` collects the tests of every file its root reaches, so a
+concern file that `@import`ed another concern file would run that file's tests a
+second time and print its report twice; the build says so at
+`build.zig:186-193`. The reproducers root is the one declared apart, because it
+is the only one that reaches for a build option to spawn the NaN probe
+(`build.zig:231-247`).
 
-**Acceptance.** Each of the four concerns heads its own file, each is a
-registered test step in `build.zig`, and `zig build test` still runs all of
-them with the same report. Decidable, and no more than that.
+**What it bought.** The flat file was the largest in the tree and the one the
+next twenty-one operations were to go into. It is now four files a reader can
+hold one at a time over a fifth that imports none of them, and every stream,
+enum and report line still comes from the one definition. **It fixed no defect
+and caught no regression, exactly as this item was ranked** — that is the whole
+return, and it is worth saying plainly because a DONE heading on an item that
+changes no answer is exactly the kind of claim that should be doubted.
+
+**What it was.**
+
+`tests/soundness_test.zig` was one flat **4,961** lines at `a26675b~1`, holding
+four unrelated concerns: the exact and bracket reference layers, the fuzz
+machinery, the frontier sweep, the per-operation reference switch, and a set of
+named reproducers and guards. It was the largest file in the tree, the hardest
+to read, and the file the next twenty-one operations went into.
+
+**Why it was ranked last, and the hazard that was already gone.** Splitting it
+fixes no defect and catches no regression; it costs a careful move of the `Op`
+enum, the seed derivation and three shared helpers across four files, on the
+file that guards the library's central claim. Do it **after T4, never before**:
+moving the seed derivation and the enum while the enum is being appended to is
+how a stream gets silently re-keyed. T3 had already removed the hazard that
+made this the dangerous half of the job, and it was sequenced that way.
+
+**Acceptance. MET.** Each of the four concerns heads its own file, each is a
+registered test step in `build.zig` (`build.zig:198`, `:209`, `:220`, `:238`),
+and `zig build test` still runs all of them with the same report — the same
+`summary` (`tests/soundness_shared.zig:2046`), called from
+`tests/soundness_fuzz_test.zig:400` and `tests/soundness_frontier_test.zig:1139`.
+One thing the acceptance did not anticipate and should be recorded: the report
+is now printed from **two** binaries rather than one, because the fuzz and
+frontier tiers each own one. The per-operation line is byte-identical; there
+are simply two processes printing it.
 
 ---
 
@@ -1028,43 +1090,68 @@ make a COPY safe to free — two boxes over one slice are still two owners — a
 it says so in its own comment rather than pretending otherwise. That is the
 remaining ownership work, and it is a different item from this one.
 
-### A3 — DONE: one public sign-bucketing rule, and the benchmark gate stopped having its own
+### A3 — DONE, and it verified a state the tree already had rather than changing one
 
-**Done, and the gate ended up with less than the acceptance asked for.** All
+**The heading was the thing that was wrong, and the audit's premise was not
+this tree's.** The rule this item set out to factor out was ALREADY
+single-sourced when the audit read it: at `c7e808d~1:src/lp.zig:79` there is
+one `fn signOf`, and the three sites that used it (`:217`, `:362`, `:506`) all
+read that one definition rather than each carrying a comparison of its own.
+There was also no correctness gate to diverge — `requireRowBudget` did not exist
+at that commit — and `predictedRows`, which the table below names as the
+open-coded copy in the benchmark, is not in this tree's history at all:
+`git log -S predictedRows HEAD` returns only `c7e808d`, and only its four
+mentions are in `docs/`. The five open-coded sites the item describes are a
+state this repository was never in. `c7e808d` says the same thing in its own
+message — "A3 was already done in the tree and only its heading said
+otherwise" — and this entry is that sentence turned into evidence.
+
+**What did land, and it is the end state the item wanted.** The private helper
+was promoted to a public named rule, lp's copy was deleted outright, and the
+gate was BUILT on top of the one rule rather than reconciled with it. All
 three parts of the acceptance below are met, and the last is stronger than it
 was written to be.
 
 - **The gate delegates rather than shares.** `requireRowBudget` in
-  `bench/bench_lp.zig` holds no copy of the rule at all: it calls
-  `System.rowsAfterEliminating` (`src/lp.zig:562`), which is `pub` and tallies
-  through the solver's own `partitionInto`. The acceptance asked that the gate
-  call the one public bucketing function and keep no float comparison of its
-  own. There is now nothing in the gate left to compare, so the divergence
-  cannot be reintroduced by editing the benchmark alone — which is the whole
-  point of the item.
+  `bench/bench_lp.zig:352` holds no copy of the rule at all: it calls
+  `System.rowsAfterEliminating` (`src/lp.zig:626`), which is `pub` and tallies
+  through the solver's own `partitionInto` (`:583`). The acceptance asked that
+  the gate call the one public bucketing function and keep no float comparison
+  of its own. There is now nothing in the gate left to compare, so the
+  divergence cannot be reintroduced by editing the benchmark alone — which is
+  the whole point of the item.
 - **The private copy is gone.** `grep 'fn signOf' src/lp.zig` returns nothing.
-  `eliminate` reads the public `Interval.signOf` through the `Sign` trichotomy
-  (`src/lp.zig:524`), and `boundDivisor` (`:1250`) is the one place a divisor is
-  read for a bound.
+  `partitionInto` reads the public `Interval.signOf` through the `Sign`
+  trichotomy (`src/lp.zig:588`), and that one function is the only classifier
+  in the file: every elimination, every count and every bound read goes through
+  it (`:611`, `:628`, `:664`, `:815`, `:939`, `:1207`). `boundDivisor`
+  (`src/lp_exact.zig:335`) is the one place a divisor is read for a bound, and
+  it moved to the exact block in `a26675b` — which is why the line this entry
+  used to cite for it, `src/lp.zig:1250`, is now `appendCombined`.
 - **The NaN arm is settled by a test rather than by the merge.**
   `Interval.signOf` answers `negative` for a NaN endpoint, computed as a
   comparison rather than as the absence of a better answer, and
-  `tests/lp_test.zig` pins what the solver does with such a row: it fails the
-  test for reaching zero, answers `negative`, and is filed in ONE list with its
-  coefficient carried through unchanged. `tests/interval_test.zig:996` and
-  `:1004` pin the same rule on both canonical rays.
+  `tests/lp_test.zig:1111-1120` pins what the solver does with such a row: it
+  fails the test for reaching zero, answers `negative`, and is filed in ONE list
+  with its coefficient carried through unchanged. `tests/interval_test.zig:1044`
+  and `:1052` pin the same rule on both canonical rays.
 
-**What it bought.** The gate and the solver can no longer disagree about where a
-coefficient sits relative to zero — the one failure on either list whose damage
-would have been invisible to the thing built to detect damage. It also closed a
-real hazard on the way: Zig's `@min`/`@max` are NaN-suppressing, so the old
-fallthrough-to-straddle classification laundered a `[-5, NaN]` coefficient into a
-well-formed `[-5, 0]` and dropped the poison.
+**What it bought.** Not the removal of a second copy of the rule — there was
+only ever one, and the item is not entitled to the credit for that. What it
+bought is a NAME for the rule and a gate standing on it. The gate and the
+solver can no longer disagree about where a coefficient sits relative to zero —
+the one failure on either list whose damage would have been invisible to the
+thing built to detect damage — and the hazard that made the disagreement worth
+worrying about is closed: Zig's `@min`/`@max` are NaN-suppressing
+(`@min(NaN, 0.0)` is `0.0`, measured), so the old fallthrough-to-straddle
+classification laundered a `[-5, NaN]` coefficient into a well-formed `[-5, 0]`
+and dropped the poison. The hazard is real and the fix is real; the duplication
+this item was written to delete was not there to delete.
 
-**What it was.**
-The rule for where an `x_k` coefficient sits relative to zero WAS open-coded in
-**five** places, and one of them was a correctness gate. Cite these by name; the
-line numbers drift every time the solver is edited:
+**The premise, kept and marked as not this tree's.** The rule for where an `x_k`
+coefficient sits relative to zero was open-coded in **five** places, and one of
+them was a correctness gate. Cite these by name; the line numbers drift every
+time the solver is edited:
 
 | Site | File | Form |
 | --- | --- | --- |
@@ -1074,37 +1161,47 @@ line numbers drift every time the solver is edited:
 | `pairCount` | `src/lp.zig` | shares the private `signOf` |
 | **`predictedRows`** | **`bench/bench_lp.zig`** | **open-codes it: three float comparisons, its own `if` chain** |
 
+Read the first three rows as what the tree had — ONE definition at
+`c7e808d~1:src/lp.zig:79`, read by `eliminate` (`:194`), `bounds` (`:337`) and
+`pairCount` (`:502`), which is already single-sourced — and the last two as rows
+that do not correspond to anything in this repository's history. The table is
+kept because deleting it would lose the audit's reasoning; it is not kept as a
+description of a state that was here.
+
 **What has changed under it, and it is what makes the merge decidable.** The
-public half now exists: `Interval.signOf` (`src/interval.zig:608-613`) states the
-trichotomy once, with `Sign` at `:566`, and `Interval.zeroSplit` (`:654`) is the
+public half now exists: `Interval.signOf` (`src/interval.zig:813`) states the
+trichotomy once, with `Sign` at `:771`, and `Interval.zeroSplit` (`:859`) is the
 second question of the same shape. Three sites in `interval.zig` already use
 them. So the item is no longer "factor out a rule that does not exist" — it is
 "point five call sites at a rule that already has a name, and decide what the
 name means for a NaN".
 
-**Why this is ranked this high.** `requireRowBudget` in `bench/bench_lp.zig` is
+**Why it was ranked this high.** `requireRowBudget` in `bench/bench_lp.zig` is
 the gate every elimination in that benchmark passes through, and it exists to
-stop the row explosion recorded in `docs/performance-handover.md`. Its
-prediction is built from its own copy of the bucketing rule. If `eliminate`'s
-bucketing changes and `derivesContradiction`'s does not, a contradiction goes
-undetected and an unsatisfiable system returns as a bounded one. **A
-correctness gate that reimplements the rule it gates is itself a defect**, and
-it is the only item on either list where a future edit's damage is invisible to
-the thing built to detect damage.
+stop the row explosion recorded in `docs/performance-handover.md`. At the time
+of the audit its prediction was supposed to be built from its own copy of the
+bucketing rule: if `eliminate`'s bucketing changed and `derivesContradiction`'s
+did not, a contradiction would go undetected and an unsatisfiable system would
+return as a bounded one. **A correctness gate that reimplements the rule it
+gates is itself a defect**, and the item ranked that possibility as the only
+one on either list where a future edit's damage is invisible to the thing built
+to detect damage. The ranking was sound; the tree was not in the state the
+ranking described, so what the gate needed was a rule to read rather than a
+copy to reconcile.
 
 **What it prevents.** A silent soundness regression in the solver, enabled by
-any future edit to one of five copies.
+any future edit that gives the bucketing a second home.
 
-**Acceptance.** `predictedRows` calls the one public bucketing function and
-contains **no float comparison of its own** — decidable by grep: zero
+**Acceptance. MET.** `requireRowBudget` calls the one public bucketing function
+and contains **no float comparison of its own** — decidable by grep: zero
 occurrences of `.hi < 0` or `.lo > 0` in `bench/bench_lp.zig`. Second, the
 semantics question is settled by a test, not by the merge: a named test pins
 what the shared rule answers for a NaN endpoint, because `Interval.signOf`
-says `.negative` and lp's private `signOf` says `.straddle`, and the two answer
-different questions (section 1 records the difference and why it is
+says `.negative` and lp's former private `signOf` said `.straddle`, and the two
+answer different questions (section 1 records the difference and why it is
 deliberate). Whichever is chosen, it is chosen once and written down. The third
 part is that lp stops importing its own copy: `grep -n 'fn signOf' src/lp.zig`
-must return nothing after the cutover.
+returns nothing.
 
 ### A4 — DONE: `root.zig` enumerates its two namespaces by name
 
@@ -1115,8 +1212,8 @@ Those two declarations made **23 non-`pub` free functions** (11 in
 keyword and nothing else. One over-broad `pub` grew the public API with no
 error, no test failure, and no diff that looked like a decision.
 
-**What it bought.** Both are now structs of named members (`src/root.zig:135`
-and `:173`), so a name has to be written down to be reachable, and the comment
+**What it bought.** Both are now structs of named members (`src/root.zig:145`
+and `:189`), so a name has to be written down to be reachable, and the comment
 on each says why. The twenty private declarations in `interval_ext.zig` and the
 seven private free functions plus five private types in `lp.zig` are no longer
 published. `tests/interval_test.zig` carries the guard that makes it stay that
@@ -1130,12 +1227,16 @@ once in the namespace and once at the top level, because `sin(x)` and
 costs a line in each. That is a maintenance price chosen over a silent one, and
 the test above is what keeps the two lists honest.
 
-### A5 — DONE: `noteContradiction` stops rescanning every row
+### A5 — DONE: `pushRow` checks one row, and the full scan survives only on the `eliminate` path
 
-**Done.** `pushRow` now calls `checkRowForContradiction(rowCount() - 1)` — the
-row it just appended and nothing else. The full scan survives as
-`rescanForContradiction` and is called from exactly one place, `eliminate`,
-where the row set has genuinely changed underneath it.
+**Done, and the name in the old heading is gone.** `noteContradiction` names
+nothing in the tree; what is there is `checkRowForContradiction`
+(`src/lp.zig:1224`) and `rescanForContradiction` (`:1233`), and the split is
+the whole of the item. `pushRow` calls `checkRowForContradiction(self.rowCount() - 1)`
+at `src/lp.zig:1167` — the row it just appended and nothing else. The full scan
+is `rescanForContradiction`, and it has exactly one call site,
+`src/lp.zig:699`, on the path where the row set has genuinely changed
+underneath it. `grep -n noteContradiction src/lp.zig` returns nothing.
 
 **Why one row is enough.** `unsat` is latched: once true nothing clears it and
 every caller acting on it returns early. So the only row that can be NEWLY
@@ -1329,32 +1430,81 @@ surface for its own convenience.
 benefit from exactly that. It is private for want of a caller.
 
 **Acceptance.** A probe `Interval.init(1.0, 2.0).halve()` compiles. Second, a
-named test asserts the property its own doc comment claims at `:336-343`: for
+named test asserts the property its own doc comment claims
+(`src/interval.zig:414-450`): for
 every case in a sweep, `halve` is a subset of `div` by `Interval.init(2.0, 2.0)`.
 That test is the point; the visibility change alone buys nothing.
 
-### A10 — Extract the exact-arithmetic block of `lp.zig`
+### A10 — DONE: the block is `src/lp_exact.zig`, a module that names no allocator
 
-`src/lp.zig` is 1002 lines holding a roughly 240-line exact-arithmetic block —
+**Done, and the acceptance is decidable three ways.** The block is its own
+file, `src/lp_exact.zig`, 372 lines, and every function the entry named is in
+it: `combinedColumn` (`:111`), `cancelsExactly` (`:210`), `doubleProduct`
+(`:231`), `combinedBound` (`:269`), `isPoint` (`:370`), `exactProduct` (`:250`),
+`isExactZero` (`:346`). It was moved verbatim rather than rewritten — the guard
+in `boundDivisor` is character-for-character the guard A11 records as
+pre-existing (see that entry's `How it was found`).
+
+- **No allocator is named in a signature, and the proof is a grep.** The word
+  occurs twice in the file, and both occurrences are `//!` doc-comment lines:
+  `src/lp_exact.zig:1`, the module header, and `src/lp_exact.zig:35`, the
+  prohibition. It is a sentence saying there is none, written twice. Zero
+  occurrences are in code — `grep -ci allocator src/lp_exact.zig` reports 2, and
+  `grep -v '^//!' src/lp_exact.zig | grep -ci allocator` reports 0 — so there is
+  no `std.mem.Allocator` parameter, no field, and no local. The header states
+  the prohibition as a rule for the future too (`src/lp_exact.zig:35-38`):
+  the moment one of these functions can fail, the test that exercises it with no
+  system is no longer possible.
+- **The compile-fail probe exists and must stay broken.**
+  `probe/lp_exact.zig:34-37` writes `const part: exact.Part = undefined;` and
+  the file's header says the expected result is `error: root struct of file
+  'lp_exact' has no member named 'Part'` and nothing else (`:10-14`). `Part`
+  and `Lin` deliberately stayed in `lp.zig` — they are the solver's vocabulary,
+  and `Part` is handed out inside a `Partition` that owns three slices — so
+  this probe is what keeps the allocator from being dragged back across the
+  boundary. It is the sibling of the other three in `probe/`.
+- **The block's own tests build no `System`.** `tests/lp_exact_test.zig` takes
+  `lp_exact` as its ONLY project module and imports no `lp` at all
+  (`build.zig:134-145`); the file says so itself at `tests/lp_exact_test.zig:3`
+  and inlines `sideOf` at `:29` so no pairing type has to exist. Eleven named
+  tests, and the word `System` appears twice in the file — both times in a
+  comment saying it is absent.
+
+**What it bought.** The hardest proof in the tree — `f128` cancellation decided
+on the OPERANDS rather than on the widened products, which is **D4** in
+`docs/next-work-plan.md` — is now reachable without building a system, adding
+rows and driving an elimination until the four operands happen to appear. That
+is not a convenience: before the move, asking a question about the cancellation
+decision required constructing the thing it was embedded in, which is why the
+question A11 asks was not asked until A10 landed. A11 is the proof that the
+move bought something.
+
+**What it did not take.** The section 5 renames did not ride along. `ext` is
+still `ext` and `mapResult` is still `mapResult` (`src/root.zig:145`, `:90`),
+so section 5's clause "they ride along with A10" is now spent: the module
+boundary exists, and the renames are available whenever anyone wants to pay
+for them. A10 itself is unchanged by that.
+
+**Acceptance. MET.** The block lives in a module that names no allocator type,
+and a compile probe that reaches for `Part` or `combinedColumn` from outside
+**must stop compiling** (`probe/lp_exact.zig`). Second, the block's own tests
+run without constructing a `System` at all (`tests/lp_exact_test.zig`) — that
+is the observable proof that it is pure.
+
+**What it was.**
+
+`src/lp.zig` was 1002 lines holding a roughly 240-line exact-arithmetic block —
 `combinedColumn` (`:817`), `cancelsExactly` (`:916`), `doubleProduct` (`:937`),
 `exactProduct` (`:956`), `combinedBound` (`:975`), `isExactZero` (`:982`),
-`isPoint` (`:993`) — interleaved with allocator code. This block holds the
-hardest proof in the tree: `f128` cancellation decided on the operands rather
-than on the widened products, which is **D4** in `docs/next-work-plan.md`, the
-document that owns the defect record. The block is **pure**: it takes a `Part`
-and returns a value, with no allocator anywhere in it.
+`isPoint` (`:993`) — interleaved with allocator code. That block took a `Part`,
+which is a row borrowed from a `System`, and returned a value.
 
-Being pure is what makes it extractable and testable in isolation, and neither is
-available while it sits inside a file whose other half is memory management.
+Being pure is what made it extractable and testable in isolation, and neither
+was available while it sat inside a file whose other half is memory management.
 
-**Acceptance.** The block lives in a module that names no allocator type, and a
-compile probe that reaches for `Part` or `combinedColumn` from outside **must
-stop compiling**. Second, the block's own tests run without constructing a
-`System` at all — that is the observable proof that it is pure.
-
-**Ranked last deliberately.** It is the largest diff of the ten and the one with
-the least defect risk behind it. The renames of section 5 should ride along with
-it, not land alone.
+**Ranked last deliberately, and it is still the largest diff of the ten.** It
+is the one with the least defect risk behind it, and the renames of section 5
+were meant to ride along with it rather than land alone.
 
 ### A11 — DONE: the guard in `boundDivisor` is an endpoint test, and its doc now says so
 
@@ -1422,10 +1572,12 @@ zero at one endpoint. The magnitude comparison is a tie on `[0, 0]` alone,
 where both candidates are zero and nothing observable turns on it.
 
 **The tree already drew the line the guard does not.** Kept because it is how
-the two got confused: `Interval.div` branches on containment,
-`other.lo <= 0.0 and 0.0 <= other.hi` (`src/interval.zig:894`), and the
-soundness reference calls its two cases by name — a divisor that REACHES zero
-from one side, whose true quotient set is one ray with a finite end, and a
+the two got confused: `Interval.div` branches on containment, and it does so
+through the named rule rather than through a pair of comparisons —
+`switch (other.signOf())` with the `.zero, .straddle` arm returning the whole
+line (`src/interval.zig:908-911`) — and the soundness reference calls its two
+cases by name — a divisor that REACHES zero from one side, whose true quotient
+set is one ray with a finite end, and a
 divisor with zero in its INTERIOR, whose hull is the whole line
 (`tests/soundness_shared.zig:1372-1383`). Those are answers about the QUOTIENT
 SET, which is what `div` is for. `BoundReader` asks a different question —
@@ -1445,19 +1597,22 @@ containment reading, and failed with "expected `pt(-1.0)`, got `[-1, 1]`",
 was wrong; the failure was the question, and this entry is its answer.
 
 **Acceptance. MET.** The doc comment above `boundDivisor` is corrected down to
-"neither endpoint is zero" and the test stands. The guard is deliberately not
+"neither endpoint is zero" — it now reads "the multiplier piece itself where
+NEITHER OF ITS ENDPOINTS is zero" (`src/lp_exact.zig:273-275`) — and the test
+stands. The guard is deliberately not
 `lo > 0 or hi < 0`, because that version is refuted above rather than merely
 unproved. Nothing was deleted or weakened: the straddling expectations the old
 draft got wrong are the expectations now.
 
 **What it was.**
 
-`boundDivisor` (`src/lp_exact.zig:334-341`) hands the multiplier piece back
-whole when `coeff.lo != 0 and coeff.hi != 0`, and otherwise hands back the
+`boundDivisor` (`src/lp_exact.zig:335-342`, doc comment from `:273`) hands the
+multiplier piece back whole when `coeff.lo != 0 and coeff.hi != 0`, and otherwise
+hands back the
 endpoint of larger magnitude as a point. The first test is about **endpoints**:
 neither of them is zero. It is not a test about the piece **containing** zero,
 which is `lo <= 0 <= hi` and is the question `Interval.signOf` branches on
-(`src/interval.zig:799-804`). The two come apart on exactly one shape — a piece
+(`src/interval.zig:813`). The two come apart on exactly one shape — a piece
 that straddles zero and has no zero endpoint, `[-1, 1]`.
 
 The comment above it said the divisor is "the multiplier piece itself where
@@ -1470,7 +1625,8 @@ the code does not have.
 
 **How it was found.** By `tests/lp_exact_test.zig`, which is A10's test and
 pins the extracted block without building a `System`, and not by an audit. The
-body is **pre-existing**: `HEAD:src/lp.zig:1278-1285` carries the identical
+body is **pre-existing**: `a26675b~1:src/lp.zig:1278-1285` — the commit before
+the extraction — carries the identical
 guard, so the extraction moved it verbatim and did not introduce it.
 
 ---

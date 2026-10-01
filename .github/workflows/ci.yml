@@ -1,0 +1,386 @@
+# Continuous integration for zig_interval.
+#
+# This file exists because of one specific regression. A change to
+# src/interval.zig made the constructor's overflow-ray canonicalisation
+# expensive to evaluate at comptime; bench/bench_vec.zig generates its whole
+# input table at comptime, so the benchmark stopped compiling on Zig's default
+# comptime branch quota. Nothing noticed for a working session, because
+# `zig build test` does not build the benchmarks (build.zig:371-375 says so and
+# means it) and because nothing ran automatically. The `bench` job below is the
+# fix; the other four jobs are the gate that was already true by hand.
+#
+# The benchmarks matter more than a step name suggests: build.zig.zon:73-81
+# lists the files a published copy of this package carries, and the `bench/`
+# directory is not among them. A consumer never compiles a benchmark, so
+# nothing downstream of this repository will ever report a benchmark that
+# stopped building. It has to be a job.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Nothing here writes to the repository, and the default workflow token is
+# broader than that needs. Least privilege is one line here and no maintenance
+# cost, which is a better trade than the one it replaces.
+permissions:
+  contents: read
+
+# A group, because `on: push` retriggers this on every push to main and
+# nothing deduplicated them: two runs of eight build-and-test jobs on the same
+# tree is pure duplicate cost.
+#
+# QUEUE, DO NOT CANCEL. `cancel-in-progress: true` is the reflexive choice
+# and it is wrong here for one specific reason. A cancelled job never reaches
+# the post-job step that writes its cache, so every cancelled run throws away
+# the caches it just spent ten minutes building - and on a push sequence,
+# where each run of this matrix takes long enough that the next push lands
+# mid-run, that is most of them. Cancel-in-progress here means the cache is
+# cold more often than not, which is the exact failure the per-leg cache keys
+# further down exist to fix. Nothing is lost by waiting: no job writes to the
+# repository (the token is `contents: read`), none deploys, none publishes,
+# and the bench numbers are not gates, so there is no half-finished side
+# effect to protect and nothing to keep running.
+#
+# The queue cannot grow without bound either. GitHub keeps at most one PENDING
+# run per group and cancels that one when a newer run arrives, so a burst of
+# pushes drains as run-then-latest rather than run-then-every-push-in-between.
+#
+# `${{ github.workflow }}` because concurrency groups are repository-wide
+# rather than workflow-wide, so a bare `${{ github.ref }}` could collide with
+# another workflow's group. `${{ github.ref }}` and not `github.head_ref`
+# because the group is per-ref: `refs/pull/7/merge` and `refs/pull/8/merge`
+# are distinct, so two pull requests never queue behind each other, while
+# head_ref would collapse every pull request from one fork into one line.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The pin. build.zig.zon:28 declares `.minimum_zig_version = "0.16.0"`, and
+  # the source is written against 0.16 APIs, so this is a floor and a
+  # requirement at once. It is a literal and not `master` or `latest`: a moving
+  # toolchain turns this gate red for reasons that have nothing to do with the
+  # code, and a red gate nobody trusts is the same as no gate. Stated once,
+  # here, and read by the install step and by the cache key below.
+  ZIG_VERSION: "0.16.0"
+  # sha256 of zig-x86_64-linux-0.16.0.tar.xz, from
+  # https://ziglang.org/download/index.json under "0.16.0"."x86_64-linux".
+  # Changing ZIG_VERSION without changing this fails the install loudly, which
+  # is the correct failure: a toolchain whose digest is unknown is a toolchain
+  # nobody pinned.
+  ZIG_SHA256: "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
+
+jobs:
+  # ---------------------------------------------------------------- library --
+  # The test step in all four optimise modes, because they are four different
+  # compilations and none of them stands in for another. Debug is the mode the
+  # checked-build assertions live in; build.zig:156-160 records that ReleaseFast
+  # elides the `lo <= hi` assert in `Interval.init` and hands back a NaN
+  # interval, which is why the NaN probe pins itself to Debug regardless. A
+  # suite that ran Debug only would be testing a build no consumer receives.
+  test:
+    name: test (${{ matrix.optimize }})
+    runs-on: ubuntu-latest
+    strategy:
+      # One green mode is not evidence about the other three, and a red mode
+      # should not hide them behind a cancelled matrix.
+      fail-fast: false
+      matrix:
+        optimize: [Debug, ReleaseSafe, ReleaseFast, ReleaseSmall]
+    steps:
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        run: |
+          set -euo pipefail
+          tgz="zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSL --retry 3 --retry-delay 2 -o "/tmp/${tgz}" \
+            "https://ziglang.org/download/${ZIG_VERSION}/${tgz}"
+          echo "${ZIG_SHA256}  /tmp/${tgz}" | sha256sum --check -
+          mkdir -p "/tmp/zig-${ZIG_VERSION}"
+          tar -xf "/tmp/${tgz}" --strip-components=1 -C "/tmp/zig-${ZIG_VERSION}"
+          # GITHUB_PATH applies to LATER steps, so the version is read through
+          # the full path here rather than through the name just added to it.
+          test "$(/tmp/zig-${ZIG_VERSION}/zig version)" = "${ZIG_VERSION}"
+          echo "/tmp/zig-${ZIG_VERSION}" >> "$GITHUB_PATH"
+
+      - name: Restore the Zig local cache
+        uses: actions/cache@v4
+        with:
+          path: .zig-cache
+          # The matrix leg is in the key. GitHub reserves a cache key on the
+          # first save and refuses concurrent saves of a key already
+          # reserved, so four legs sharing one key means the cache works only
+          # when a single leg runs - never on the run that needs it.
+          key: zig-${{ env.ZIG_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.optimize }}-${{ hashFiles('build.zig', 'build.zig.zon', 'src/**') }}
+
+      - name: zig build test -Doptimize=${{ matrix.optimize }}
+        run: |
+          # The NaN-trap probe ABORTS by design: `zig build test` spawns
+          # tests/nan_probe.zig as a child process and reads its exit status
+          # (build.zig:149-153), and a SIGABRT otherwise leaves a core file in
+          # the workspace. The limit is `-c`, core-dump size, and it is set in
+          # THIS shell because that is where the child inherits it from. It is
+          # deliberately not `-v`: docs/performance-handover.md:328-333 records
+          # that a `ulimit -v` around `zig build` is wrong, because the compiler
+          # inherits it and dies with error:OutOfMemory before a single
+          # benchmark row runs.
+          ulimit -c 0
+          # The nested consumer build is not parameterised by this flag;
+          # build.zig:278 pins it to ReleaseSafe itself and build.zig:283 hangs
+          # it off `test`, so all four modes build the fixture the same way.
+          # That is left as it is: the fixture is a real external package under
+          # fixture/ with its own relative cache directories (build.zig:270-279),
+          # and flattening them into the parent's would delete the containment
+          # those flags exist for.
+          zig build test -Doptimize=${{ matrix.optimize }}
+
+  # ------------------------------------------------------------- benchmarks --
+  # The job this whole file was written for. `zig build test` does not build the
+  # benchmarks, and the package manifest does not ship them, so a benchmark that
+  # stops compiling is invisible everywhere else.
+  bench:
+    name: bench (compile gate)
+    runs-on: ubuntu-latest
+    # Generous, because the LP benchmark is the slow one. The bound that
+    # matters is a row count, not a wall clock: bench/bench_lp.zig:160 caps
+    # every elimination this file drives at 20,000 predicted rows, which is the
+    # guard standing between a size mistake and a 329 GB incident.
+    timeout-minutes: 30
+    steps:
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        run: |
+          set -euo pipefail
+          tgz="zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSL --retry 3 --retry-delay 2 -o "/tmp/${tgz}" \
+            "https://ziglang.org/download/${ZIG_VERSION}/${tgz}"
+          echo "${ZIG_SHA256}  /tmp/${tgz}" | sha256sum --check -
+          mkdir -p "/tmp/zig-${ZIG_VERSION}"
+          tar -xf "/tmp/${tgz}" --strip-components=1 -C "/tmp/zig-${ZIG_VERSION}"
+          test "$(/tmp/zig-${ZIG_VERSION}/zig version)" = "${ZIG_VERSION}"
+          echo "/tmp/zig-${ZIG_VERSION}" >> "$GITHUB_PATH"
+
+      - name: Restore the Zig local cache
+        uses: actions/cache@v4
+        with:
+          path: .zig-cache
+          # `bench`, as a literal: this job has no matrix, but it is still a
+          # distinct writer of .zig-cache - three benchmark roots the `test`
+          # job never builds - so it must not contend for a reservation the
+          # matrix legs are already writing.
+          key: zig-${{ env.ZIG_VERSION }}-${{ runner.os }}-${{ runner.arch }}-bench-${{ hashFiles('build.zig', 'build.zig.zon', 'src/**') }}
+
+      # Three executables, four step names, and naming the three covers the
+      # fourth. build.zig:376-382 hangs the combined `bench` step on the same
+      # three run steps that build.zig:397-404 names individually, so `bench`
+      # is their union and adds no compilation of its own. They are run one at
+      # a time rather than through `zig build bench` for two reasons: a failure
+      # names the benchmark that produced it, and peak memory is one benchmark
+      # instead of three on a shared runner. Compilation is a prerequisite of
+      # the run step, so a comptime branch quota blown in bench_vec.zig fails
+      # this job and no other - which is the entire point of the file.
+      #
+      # Nothing here asserts on a number. A benchmark off a contended runner is
+      # a measurement, not a gate, and a threshold on one would be flaky and
+      # wrong. The step's exit status is the only thing read, and it is a real
+      # signal: bench/bench_lp.zig:352-360 trips a non-zero exit through the row
+      # budget rather than an OOM kill, so the guard survives into CI.
+      #
+      # `-Doptimize` is not passed and does not need to be. The three benchmark
+      # root modules pin ReleaseFast themselves (build.zig:332-360) and a
+      # compilation takes its mode from its root module (build.zig:302-321), so
+      # the library inside these binaries is ReleaseFast whatever the parent
+      # step asks for. Passing it would look like it mattered.
+      - name: bench-scalar
+        run: zig build bench-scalar
+      - name: bench-vec
+        run: zig build bench-vec
+      - name: bench-lp
+        run: zig build bench-lp
+
+  # ------------------------------------------------------------------ cross --
+  # BUILD ONLY. Nothing in this job is executed, on any of the three targets,
+  # and the job name says so.
+  #
+  # The default `install` step is the one step in this build system that
+  # compiles the library and launches nothing, so it is the whole of what can
+  # honestly be claimed here: every file src/root.zig reaches is compiled for
+  # the target, and no binary is run. That is a real gate - it is how a
+  # target-dependent @intCast, float-format assumption or alignment assumption
+  # gets caught - and it is NOT a runtime check, and this workflow makes no
+  # claim to be one.
+  #
+  # The test step is not run for aarch64-linux or riscv64-linux either, even
+  # though a Linux runner could execute those binaries under QEMU. The NaN
+  # probe's child process needs the same emulator, and this build takes it from
+  # CROSS_TEST_RUNNER_KIND and CROSS_TEST_RUNNER (build.zig:7-18), which this
+  # workflow does not set. A cross run that silently cannot launch its probe is
+  # worse than no cross run: the trap is the contract, and the probe retains
+  # well-formed controls precisely so a failed launch cannot be mistaken for a
+  # clean one. x86_64-windows cannot execute on this runner at all.
+  #
+  # ReleaseSafe, not Debug: it is the mode the consumer fixture builds
+  # (build.zig:278) and the mode a real consumer gets, and the checked modes are
+  # already covered natively by the four-way matrix in the `test` job.
+  #
+  # HOW THIS DIFFERS FROM THE MANUAL GATE - DO NOT READ A GREEN ROW HERE AS
+  # RUNTIME EVIDENCE FOR A FOREIGN TARGET. The local gate is
+  # `cross-test --jobs 8 --build-jobs 2` (docs/performance-handover.md:
+  # 796-800), and it RUNS the whole test step, corpus tier included, for
+  # aarch64-linux and riscv64-linux under QEMU user-mode, with the QEMU runner
+  # also handed to the NaN and ownership child probes
+  # (docs/performance-handover.md:88, 810-813). This job executes NO
+  # foreign-target binary on any of the three. CI's cross coverage is
+  # therefore strictly weaker than what a developer gets locally, and not by a
+  # margin: the runtime evidence that caught MIPS32's subnormal `div`/`recip`
+  # failures lives only on that local path
+  # (docs/performance-handover.md:802-808) and is never reproduced here. The
+  # manual gate does not run x86_64-windows either, having no Wine for it
+  # (docs/performance-handover.md:89, 815-819), so on that target the two
+  # agree and the claim really is only "it compiles".
+  #
+  # That gap is a deliberate trade, not an oversight: QEMU on a CI runner is
+  # slow and is its own source of flake, and a gate that flakes is a gate
+  # that gets ignored. It is written down here so that no later session
+  # mistakes this job for having closed it. What a green `cross` row means is
+  # COMPILED, and only `cross-test`'s own summary can upgrade that - where a
+  # `build_only` or `no_test_results` entry is not soundness evidence either.
+  cross:
+    name: cross ${{ matrix.target }} (build only, never run)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-linux, riscv64-linux, x86_64-windows]
+    steps:
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        run: |
+          set -euo pipefail
+          tgz="zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSL --retry 3 --retry-delay 2 -o "/tmp/${tgz}" \
+            "https://ziglang.org/download/${ZIG_VERSION}/${tgz}"
+          echo "${ZIG_SHA256}  /tmp/${tgz}" | sha256sum --check -
+          mkdir -p "/tmp/zig-${ZIG_VERSION}"
+          tar -xf "/tmp/${tgz}" --strip-components=1 -C "/tmp/zig-${ZIG_VERSION}"
+          test "$(/tmp/zig-${ZIG_VERSION}/zig version)" = "${ZIG_VERSION}"
+          echo "/tmp/zig-${ZIG_VERSION}" >> "$GITHUB_PATH"
+
+      - name: Restore the Zig local cache
+        uses: actions/cache@v4
+        with:
+          path: .zig-cache
+          # The matrix target is in the key. Not only for contention: a
+          # manifest written for aarch64-linux is not the entry the riscv64
+          # or x86_64-windows leg wants, and target-dependent codegen is
+          # precisely what this job exists to catch.
+          key: zig-${{ env.ZIG_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ hashFiles('build.zig', 'build.zig.zon', 'src/**') }}
+
+      - name: zig build -Dtarget=${{ matrix.target }} (no run)
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+
+  # ------------------------------------------------------------------- fmt --
+  # The argument list is exactly the tracked Zig source roots, taken from
+  # `git ls-files '*.zig'`: build.zig at the root, then bench/, fixture/,
+  # probe/, src/ and tests/. They are named one by one rather than
+  # `zig fmt --check .` so that a build directory which happens to hold a .zig
+  # file cannot turn the gate red for a file nobody committed.
+  #
+  # build.zig.zon is not in the list because `zig fmt` does not treat ZON as
+  # input unless --zon is passed, and --zon applies to every argument, so a ZON
+  # file and a Zig file cannot be checked in one invocation. Checking it means
+  # a second command, and it is not worth a second command.
+  #
+  # No cache: this job builds nothing.
+  fmt:
+    name: zig fmt --check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        run: |
+          set -euo pipefail
+          tgz="zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSL --retry 3 --retry-delay 2 -o "/tmp/${tgz}" \
+            "https://ziglang.org/download/${ZIG_VERSION}/${tgz}"
+          echo "${ZIG_SHA256}  /tmp/${tgz}" | sha256sum --check -
+          mkdir -p "/tmp/zig-${ZIG_VERSION}"
+          tar -xf "/tmp/${tgz}" --strip-components=1 -C "/tmp/zig-${ZIG_VERSION}"
+          test "$(/tmp/zig-${ZIG_VERSION}/zig version)" = "${ZIG_VERSION}"
+          echo "/tmp/zig-${ZIG_VERSION}" >> "$GITHUB_PATH"
+
+      - name: zig fmt --check
+        run: zig fmt --check build.zig src tests bench probe fixture
+
+  # ------------------------------------------------------------------ docs --
+  # `zig build docs` installs the library's emitted doc comments into
+  # zig-out/docs (build.zig:285-291). It is the only job that PARSES every
+  # doc comment in src/, so a malformed `///` block fails here and nowhere
+  # else - a class of break the compiler will not report to a job that only
+  # links the library. No cache: the artifact is a few hundred kilobytes of
+  # HTML and caching it would cost more than rebuilding it.
+  docs:
+    name: zig build docs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        run: |
+          set -euo pipefail
+          tgz="zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSL --retry 3 --retry-delay 2 -o "/tmp/${tgz}" \
+            "https://ziglang.org/download/${ZIG_VERSION}/${tgz}"
+          echo "${ZIG_SHA256}  /tmp/${tgz}" | sha256sum --check -
+          mkdir -p "/tmp/zig-${ZIG_VERSION}"
+          tar -xf "/tmp/${tgz}" --strip-components=1 -C "/tmp/zig-${ZIG_VERSION}"
+          test "$(/tmp/zig-${ZIG_VERSION}/zig version)" = "${ZIG_VERSION}"
+          echo "/tmp/zig-${ZIG_VERSION}" >> "$GITHUB_PATH"
+
+      - name: zig build docs
+        run: zig build docs
+
+# The cache, in one place, because it is one decision.
+#
+# WHAT IS CACHED, AND WHY IT IS SAFE. Only the LOCAL cache, `.zig-cache`,
+# which is where `addRunArtifact` launches the test binaries and the benchmark
+# binaries from. Zig's local cache is content-addressed: a restored manifest is
+# used only when every input file's hash matches what that manifest recorded.
+# A restore can therefore save work; it cannot substitute a stale binary for a
+# changed source. A too-narrow key costs runtime, never correctness - which is
+# the only sense in which the question "is this key precise enough" has an
+# answer for a build system that hashes its own inputs.
+#
+# WHAT THE KEY IS. The toolchain version, the runner platform, one dimension
+# naming the job's own compilation, and the hash of build.zig, build.zig.zon
+# and src/. The version is in the key because a manifest written by 0.16.0
+# means nothing to any other release.
+#
+# THE JOB DIMENSION, AND WHY IT MUST NOT BE TIDIED AWAY. The optimise value in
+# the `test` job, the target value in `cross`, and a literal `bench` in the job
+# that has no matrix. Not for tidiness. GitHub Actions reserves a cache key
+# the first time one job saves it and refuses every save that arrives for a
+# key already reserved, so a key shared by a matrix is a key that works only
+# while one leg is running. Without this dimension the four test legs, the
+# three cross legs and the bench job - eight jobs, in the very runs the cache
+# exists to make cheap - all wrote one key, and the cache was warm only on a
+# quiet commit.
+# If you are reading this and about to drop the matrix value from the key
+# because the legs look alike: four optimise modes are four compilations and
+# four different .zig-cache contents, and a manifest written for one mode
+# means nothing to the next.
+#
+# WHAT IS DELIBERATELY NOT IN IT, AND WHY. `tests/` and `bench/`. They change
+# far more often than `src/`, and a key that moved with them would miss on
+# every test edit - which is exactly the edit a developer most wants to be
+# fast. Leaving them out means a test-only or benchmark-only change restores
+# the library objects and recompiles the roots, which is the work that actually
+# changed. That is a wasted rebuild, not a wrong answer.
+#
+# WHAT IS NOT CACHED AT ALL, AND WHY. The global cache. build.zig.zon:34
+# declares no dependencies and fixture/build.zig.zon:6-8 takes this package by
+# path, so nothing is ever fetched and the global cache holds nothing this
+# build would reuse. The nested consumer build under fixture/ is left alone for
+# the same reason its own flags are: build.zig:270-279 gives it relative cache
+# directories so that its output lands in fixture/.zig-cache and goes away with
+# it, and a cache entry that spanned both would be asserting a sharing this
+# build deliberately does not have. Where a key's precision was in doubt the
+# answer here was to leave the cache out, not to widen the key until it looked
+# precise.

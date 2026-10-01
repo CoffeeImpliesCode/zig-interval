@@ -127,9 +127,10 @@ off a primitive that cannot bound its own error.
 side, so like `add` they take exactly one step per endpoint. `scale` is not a
 single operation: its exact image is `[M - W, M + W]`, and neither `M` nor `W` is
 an `f64` — each is a chain of rounded steps, and the error of a chain is not the
-error of its last step. So `scale` encloses its two intermediates first and
-composes the answer out of `add`, `sub`, `mul` and `div`, each of which widens
-in its own right, rather than taking a fixed number of steps from the outside.
+error of its last step. So `scale` encloses its two intermediates first
+and composes the answer out of `add`, `sub`, `mul` and `halve`, each of
+which widens in its own right, rather than taking a fixed number of steps
+from the outside.
 
 `sin` and `cos` are the two functions that cannot simply take the value at each
 end, because the range may turn inside the argument. They read it off the
@@ -385,7 +386,7 @@ whenever the argument can reach outside a domain.
 without inverting the endpoints and the `lo <= hi` invariant still holds. It is
 also the one operation here that is not a single rounded step: for a **bounded**
 input it encloses its midpoint and its half-width and composes the answer out of
-`add`, `sub`, `mul` and `div`, so it runs a few ULP wider than the exact image.
+`add`, `sub`, `mul` and `halve`, so it runs a few ULP wider than the exact image.
 The unbounded case is not that composition at all, because the centre it needs
 does not exist; it is the identity at `|factor| == 1` and the whole line
 otherwise, which is loose by design rather than by rounding.
@@ -415,8 +416,7 @@ for; this is the one table that lists all of them together.
 | `DynVec` | `gpa` | `std.mem.Allocator` | The allocator every result of this box is drawn from, and the one `deinit` frees with. |
 | `DynVec` | `comps` | `[]Interval` | The components, owned. Its `len` is the runtime dimension. **Do not replace the slice**: it is the storage `deinit` frees, and a write here names memory this box never allocated. |
 | `DynVec` | `own` | `[*]Interval` | The address `comps` had when the constructor returned the box. Read-only to you: `deinit` compares it against `comps.ptr` and panics in a checked build when the two differ. See [`one box, one owner`](#iadd-versus-add-who-owns-the-box). |
-| `lp.Lin` | `coeffs` | `[]Interval` | One coefficient per variable, borrowed from the system rather than owned. |
-| `lp.Lin` | `op` | `lp.Cmp` | The comparison. Always `.le` on a stored row, whatever you passed to `add`. |
+| `lp.Lin` | `coeffs` | `[]const Interval` | One coefficient per variable, borrowed from the system rather than owned. A row from `at` is a view, so writing through it does not compile. |
 | `lp.Lin` | `rhs` | `Interval` | The right-hand side, enclosing the one unknown value the row constrains. |
 | `lp.System` | `gpa` | `std.mem.Allocator` | Where the system allocates, and what `deinit` frees with. |
 | `lp.System` | `var_count` | `usize` | The number of variables, fixed for the life of the system at `init`. |

@@ -57,7 +57,7 @@ Source layout, 4,179 lines under `src/`:
 
 28 plus 28 is the **56 public operations** every coverage number in this
 document is a fraction of, and it is the denominator the oracle in section 2
-counts against. The `Op` enum in `tests/soundness_test.zig` names **35** of
+counts against. The `Op` enum in `tests/soundness_shared.zig` names **35** of
 them and the remaining **21** are the uncovered list in section 2, so
 `35 + 21 = 56`. Count it from the enum and the two source files, not from this
 document. Line counts drift; re-run `wc -l src/*.zig` rather than trusting the
@@ -73,37 +73,49 @@ in this section is a plan. The plan for what is still open is
 `docs/next-work-plan.md`; this file records what was done, what it bought, what
 was measured away, and what was tried and thrown out.
 
-### Verified tree state, 2026-09-30
+### Verified tree state — 2026-09-30, re-verified since
 
 | Fact | How it was checked |
 | --- | --- |
-| `zig build test` exits 0 in Debug, ReleaseSafe, ReleaseFast and ReleaseSmall, each ending `consumer ok: 29 checks` | run, all four modes |
-| The soundness oracle reports `0 FAILED` on every operation it covers | run |
+| `zig build test` exits 0 in Debug, ReleaseSafe, ReleaseFast and ReleaseSmall, each ending `readme examples ok: 31 checks`. The fixture's first consumer prints `consumer ok: 29 checks` immediately before it, and the README's examples are wired second so the log stays in the order the README states them | run, all four modes |
+| The soundness oracle reports `0 FAILED` on every operation it covers — 35 of them — and 348 tests pass across the eleven test artifacts | run |
+| The MPFR corpus tier reports **1886 rows checked, 0 FAILED**, in each of the four modes. It is the only reference in the tree that was not written in the tree: `scripts/gen_corpus.c` calls MPFR at 256 bits twice per row, once `RNDD` and once `RNDU`, and the output is committed as `tests/corpus/elementary.txt`. 1813 of the rows carry the 21 operations the in-tree oracle does not judge, and 73 more carry `sqrt`, `cbrt` and `tanh`, which it does — external corroboration, not new coverage | run; the row count and that split read out of `tests/corpus/elementary.txt` |
 | `8 of 8` operations named by the NaN contract trap on a NaN scalar, and every well-formed control comes back clean | run, each in a child process |
-| `zig build bench` completes; `bench-lp` is bounded by the 20,000-row budget and its run reports 18.5 s | run |
+| The oracle is four sibling test binaries over one shared module, `tests/soundness_shared.zig`, and the LP exact block is its own module, `src/lp_exact.zig`, tested by `tests/lp_exact_test.zig`. The four are siblings over one vocabulary rather than a chain because `zig test` collects the tests of every file a binary reaches, imported or not, so a chain would run the shared file's tests a second time | counted from `build.zig` and the `tests/` tree; the extraction is proved by `probe/lp_exact.zig` failing to compile |
+| `zig build bench` completes; `bench-lp` is bounded by the 20,000-row budget and its run reports 18.5 s. Both numbers are the 2026-09-30 capture and **neither has been re-measured since**; what has been re-run is the step, one benchmark at a time, and each exits 0 | run |
 | `zig fmt --check` clean | run |
 | `zig build docs` green | run |
-| `aarch64-linux`, `x86_64-windows` and `riscv64-linux` all build | run |
+| `aarch64-linux` and `riscv64-linux` build **and run** the whole test step — corpus tier included, 0 FAILED — under QEMU user-mode. They are the foreign targets whose binaries this host can actually execute | run, `cross-test` |
+| `x86_64-windows` builds and is **not run**: there is no wine on this host, so the test step's binaries cannot execute there, and `cross-test` records the target `build_only`, `runtime_unavailable`. "Builds" is the whole of the claim. The suite is **not** evidenced on Windows and this row must not be read as "the tests pass there" | run, `cross-test` |
 | `bench-lp`'s geometry report is byte-identical to the capture from before the optimisations, and predicted == achieved on every branch | run |
-| Working copy is dirty, one commit ahead of `main`, on `fix(soundness): close four contract defects found by audit`. **Do not quote its commit id**: it changes on every edit, this document included | `jj status` |
-| `main` is `85f85922` and is also `main@origin` | `jj log -r 'ancestors(@, 25)'` |
+| Everything this document records is committed, not uncommitted: `main` and `main@origin` are both `083d7471`, HEAD is detached on it, and `85f8592` was the tip when the `ns/op` figures below were taken. **Do not quote that id from this document** — it goes stale at the next commit, this document included — and read a `jj status` that shows a working-copy commit above `083d7471` as work in flight, not as lost work | `jj log -r 'ancestors(@, 25)'` |
 
-Two of those lines want a reader's attention. The working copy is dirty on
-purpose: the contract fixes, the oracle extension and both optimisation rounds
-are in it and uncommitted, so a `jj status` that lists `M src/interval.zig` is
-expected and is not a mess to tidy. And the geometry report being byte-identical
-is what makes every LP number in this document trustworthy: it says the
-optimisations changed what the solver **pays**, not what it computes.
+Two of those lines want a reader's attention. The geometry report being
+byte-identical is what makes every LP number in this document trustworthy: it
+says the optimisations changed what the solver **pays**, not what it computes.
+And the windows row is the one most easily over-read, because compilation is
+not execution and on this host it is the whole of what that target can be.
 
-**One caveat on the whole table.** Every row was verified before the changes
-recorded below this one, and those changes touched soundness rather than cost:
-the elementary functions widened from two ULP to three, and the oracle grew. No
-figure in this document is invalidated by that — the widening adds one ULP of
-width to each end of an elementary result and no measurable time at ReleaseFast,
-where the rounding helpers inline to nothing — but the four-mode run is the gate,
-and re-running it is whoever orchestrates the next session's job.
+**What has moved cost since, in words because the numbers must not move.** O2
+in `docs/next-work-plan.md` gave `box` one shared elimination walk in place of
+`m` private sweeps. It altered the elimination COUNT — roughly half as many
+eliminations — and it raised peak memory, because the walk holds a chain and
+one copy alive together where the old form held one. The geometry report row
+above is unaffected, and the reason is what that report prints: bounded or
+unbounded, and nothing else. **No `ns/op` figure anywhere in this document has
+been re-measured since 2026-09-30, and none is claimed to have been.** O2 is
+the one landed change that could move them, so `zig build bench` has to be
+re-run before any figure here is quoted as current.
 
-**And a third change since, which is the priority 1 infinity contract.** The
+**The four-mode run is no longer outstanding.** It was re-run after every
+commit since the measurement, one mode at a time, at the tip named in the last
+row: `zig build test` exit 0 in all four, the oracle at `0 FAILED` on all 35
+operations, the corpus tier at 1886 rows and 0 FAILED, and `zig build docs` and
+`zig fmt --check` both green. The benchmark is the one gate that has not been
+re-run, and that is deliberate — a figure that moves because nobody re-measured
+it is worse than a figure carrying its date.
+
+**And the other cost question since, the priority 1 infinity contract.** The
 constructor now compares and selects on two endpoints, `scale` has one extra
 branch on the unbounded path only, and `expand` and `translate` read an infinite
 scalar as a ray rather than as a number. None of it changes what any finite
@@ -126,8 +138,9 @@ returned, so a reference rounded to `f64` reports the defect as sound — are in
 This is the fact that changes what a later session is allowed to trust, so it
 belongs near the top of this file and not at the bottom.
 
-`tests/soundness_test.zig` grew from 1,037 lines to several thousand and from 8
-covered operations to 35. It computes true extrema from the ORIGINAL `f64`
+The oracle grew from 1,037 lines to several thousand and from 8 covered
+operations to 35, and it is now `tests/soundness_shared.zig` under four sibling
+test files, one per concern. It computes true extrema from the ORIGINAL `f64`
 inputs and checks containment, and it is the only thing between a faster library
 and a wrong one. The 35, by the strength of the reference each is held to:
 
@@ -739,11 +752,11 @@ another slower is a decision to make deliberately, not a win.
 
 ### Step 7 — The soundness gate. This is not optional and not negotiable.
 
-`tests/soundness_test.zig` computes true extrema from the ORIGINAL `f64` inputs
-— exact products in `f128`, exact sums through a `TwoSum` residual rather than
-through a rounded `f128` sum, quotients by cross-multiplication — and checks
-containment. It exists because a previous audit found
-four soundness defects that 200 tests and 29 consumer checks all passed, and
+The oracle computes true extrema from the ORIGINAL `f64` inputs — exact products
+in `f128`, exact sums through a `TwoSum` residual rather than through a rounded
+`f128` sum, quotients by cross-multiplication — and checks containment. It
+exists because a previous audit found four soundness defects that 200 tests
+and 29 consumer checks all passed, and
 because D1 survived all of them: a defect that a suite never looks for is not a
 suite that passed.
 
@@ -766,7 +779,7 @@ zig build test
 
 If an optimisation makes it fail, the optimisation is wrong. Do not relax the
 oracle to accommodate a speedup. If you believe the oracle is wrong, prove it
-against `tests/soundness_test.zig` plus a throwaway `f128` check of your own
+against `tests/soundness_shared.zig` plus a throwaway `f128` check of your own
 before changing anything.
 
 ### Step 8 — Full verification, then commit
@@ -915,7 +928,7 @@ All verified empirically on this machine.
 
 ```sh
 cd ~/zig-interval
-zig build test        # exits 0, ends with "consumer ok: 29 checks"
+zig build test        # exits 0, ends with "readme examples ok: 31 checks"
 zig build bench-lp    # safe: the row budget bounds it. The run reports 18.5 s,
                       # on top of compile time. The scalar and vector halves
                       # dominate the combined `zig build bench`, not this one.
@@ -923,16 +936,18 @@ jj status
 jj log -r main --no-graph -T 'commit_id.short() ++ "  " ++ description.first_line() ++ "\n"'
 ```
 
-The working copy is expected to be dirty. See the table at the top of section 2
-for what is in it and why.
+The working copy is not expected to be dirty. What the table at the top of
+section 2 records is committed and pushed; a working-copy commit sitting above
+`083d7471` is work in flight, and `jj diff --stat` says what is in it.
 
 ## 7. Orientation for a first look
 
 Read in this order if you have time for only one thing:
 
 1. `src/rounding.zig` — small, and it explains the whole rigor model.
-2. `tests/soundness_test.zig` — the oracle, and its own header says which of the
-   56 operations it reaches and which it does not. It is why the rest is
+2. `tests/soundness_shared.zig` — the oracle's vocabulary, and the `Op` enum in
+   it names which of the 56 operations the oracle reaches and which it does not.
+   The four files beside it are the four concerns. It is why the rest is
    trustworthy, and it is the first place to look before optimising anything.
 3. `bench/timing.zig` — why the numbers mean anything.
 4. `src/interval.zig` — where the hot operations live, and `Interval.halve` is
