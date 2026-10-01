@@ -23,7 +23,10 @@ uncovered operations are no longer waiting on hand-written reference series:
 the direction is an independently generated MPFR directed-rounding containment
 corpus, which changes no `ns/op` figure here either.
 
-Everything in sections 2 and 3 was measured on 2026-09-30. The growth figures
+Everything in sections 2 and 3 was measured on 2026-09-30, with one dated
+exception: the cross-target verification carries its own heading and its own
+date, **2026-10-01**, and it re-ran the test step rather than a benchmark, so
+no `ns/op` figure anywhere in this file is restated by it. The growth figures
 come from throwaway programs that read the sign buckets directly, and section 3
 step 1 gives the routine to rebuild them. Nothing here is a guess.
 
@@ -85,7 +88,7 @@ was measured away, and what was tried and thrown out.
 | `zig build bench` completes; `bench-lp` is bounded by the 20,000-row budget and its run reports 18.5 s. Both numbers are the 2026-09-30 capture and **neither has been re-measured since**; what has been re-run is the step, one benchmark at a time, and each exits 0 | run |
 | `zig fmt --check` clean | run |
 | `zig build docs` green | run |
-| `aarch64-linux` and `riscv64-linux` build **and run** the whole test step — corpus tier included, 0 FAILED — under QEMU user-mode. They are the foreign targets whose binaries this host can actually execute | run, `cross-test` |
+| `aarch64-linux`, `riscv64-linux` and `s390x-linux` build **and run** the whole test step — corpus tier included, 0 FAILED — under QEMU user-mode, **348/348 on each**, the same 348 the native run reports and not a subset. `s390x-linux` is big-endian and is the **only byte-order coverage this project has**: the oracle's `u64` bit-pattern stepping in `src/rounding.zig` and the NaN contract trap's pattern reads are exactly the code a little-endian host cannot get wrong, so a green run on the other targets is not evidence about s390x | run, `cross-test`, 2026-10-01 — `aarch64-linux` and `s390x-linux` at `--timeout 900`, the rest at the default; per-target counts, the byte-order point and the timeout trap are in the cross-target section below |
 | `x86_64-windows` builds and is **not run**: there is no wine on this host, so the test step's binaries cannot execute there, and `cross-test` records the target `build_only`, `runtime_unavailable`. "Builds" is the whole of the claim. The suite is **not** evidenced on Windows and this row must not be read as "the tests pass there" | run, `cross-test` |
 | `bench-lp`'s geometry report is byte-identical to the capture from before the optimisations, and predicted == achieved on every branch | run |
 | Everything this document records is committed, not uncommitted: `main` and `main@origin` are both `083d7471`, HEAD is detached on it, and `85f8592` was the tip when the `ns/op` figures below were taken. **Do not quote that id from this document** — it goes stale at the next commit, this document included — and read a `jj status` that shows a working-copy commit above `083d7471` as work in flight, not as lost work | `jj log -r 'ancestors(@, 25)'` |
@@ -95,6 +98,10 @@ byte-identical is what makes every LP number in this document trustworthy: it
 says the optimisations changed what the solver **pays**, not what it computes.
 And the windows row is the one most easily over-read, because compilation is
 not execution and on this host it is the whole of what that target can be.
+
+The cross-target rows have a section of their own below, carrying the
+per-target 348/348 counts, the byte-order point, and the one entry in this
+table a later session is most likely to mistake for a defect.
 
 **What has moved cost since, in words because the numbers must not move.** O2
 in `docs/next-work-plan.md` gave `box` one shared elimination walk in place of
@@ -132,6 +139,105 @@ brings the bound back to the correctly rounded `f64` and stops. It is D17 in
 has to avoid — the nearest `f64` to the true value IS the bound the old code
 returned, so a reference rounded to `f64` reports the defect as sound — are in
 §2 of `docs/tests-and-architecture-plan.md`.
+
+### Cross-target verification — 2026-10-01, and the 300-second timeout that reads like a defect
+
+**The mode first, because it decides what the figures below mean.** `cross-test`
+runs this build's own `test` step and adds only `-Dtarget=`, so every count
+here is the tree's **default optimize mode, Debug** — `build.zig` takes
+`optimize` from `b.standardOptimizeOption(.{})` and names no default of its
+own, and the build logs say `compile test Debug <target>`. A project profile
+that passed `-Doptimize` would change the mode for the targets it covers, so
+read one if there is one.
+
+**Measured on 2026-10-01 at one tree state**, in two runs: the whole matrix at
+the harness's default execution timeout, and then the two targets that need
+more at 900 seconds.
+
+| Target | Build | Run | Tests | Note |
+| --- | --- | --- | --- | --- |
+| `x86_64-linux` | pass | pass | 348/348 | the host itself, executed natively |
+| `aarch64-linux` | pass | pass | 348/348 | QEMU user-mode; **fails the default timeout**, see below |
+| `riscv64-linux` | pass | pass | 348/348 | QEMU user-mode; passes the default 300 s |
+| `s390x-linux` | pass | pass | 348/348 | QEMU user-mode, **big-endian**; **fails the default timeout**, see below |
+| `x86_64-windows` | pass | `build_only`, `runtime_unavailable` | — | no wine on this host, so "builds" is the whole of the claim |
+
+Three foreign targets therefore execute the entire test step, corpus tier
+included, at 0 FAILED — the same 348 the native run reports, not a subset.
+
+**`s390x-linux` is the only byte-order coverage in this project, and that is
+why it is in the table rather than left out.** Every other target here is
+little-endian, including the host. The code most sensitive to byte order is
+the oracle's own: `src/rounding.zig` steps endpoints by `u64` bit pattern, and
+the NaN contract trap reads bit patterns out of a value. A little-endian host
+cannot get that class of code wrong, so **a green run on every other target is
+not evidence about s390x at all**, and this target is not redundant with the
+rest of the row.
+
+**The trap: the default execution timeout is 300 seconds and this project's
+heaviest test takes 108 seconds NATIVELY.** The test
+`test.Vec: distance is never below the true Euclidean distance` sweeps
+**4,000,000** cases — `norm_cases` at `tests/vector_test.zig:1673` — and
+measured **108 s** on its own on this host, on 2026-10-01. The whole 55-test
+vector binary also reports 108 s, so essentially all of that is the one loop.
+Natively that fits inside the default budget with room to spare. Under
+`qemu_user` it does not, and the run then prints exactly this:
+
+```
+cross-test: target=aarch64-linux build=pass run=fail tests=348 reason=tests_failed
+cross-test: target=s390x-linux   build=pass run=fail tests=348 reason=tests_failed
+cross-test: status=fail pass=2 fail=2 build_only=0 partial=0
+```
+
+The per-target build log underneath it says
+`error: 'vector_test.test.Vec: distance is never below the true Euclidean distance' timed out after 5m98.663ms`
+and then `Build Summary: 25/27 steps succeeded (1 failed); 347/348 tests passed (1 timed out)`.
+
+**That is a timeout, not a defect, and the one-line summary is what makes it
+look like a defect.** `cross-test: status=fail` cannot tell a timeout from a
+wrong answer — both carry `reason=tests_failed` — and the `tests=348` on that
+line is how many tests RAN, not how many passed, so it stays at 348 on a run
+that lost one. Read the per-target build log before believing a cross-target
+failure here, and look for `timed out` in it. Re-run at `--timeout 900` and the
+same two targets report `run=pass tests=348 reason=tests_complete` and the run
+reports `status=pass pass=2 fail=0`. The two runs differ only in `--timeout`
+and `--output`, and the failing log names the timeout and nothing else.
+
+**The harness, so the next session does not have to rediscover any of this.**
+It is `~/.local/bin/cross-test`: **outside the repository** — not vendored,
+not a submodule, not on this project's `PATH`, and nothing `jj status` will
+show you. It behaves in four ways that matter here:
+
+- **It manages its own cache**, and refuses the obvious override: `--cache-dir`
+  is rejected with `cross-test manages this option: --cache-dir`, and so are
+  `--prefix`, `-Dtarget`, `-j` and `--test-timeout`. Do not pass them.
+- **It discovers a project profile** at `./cross-test.profile.sh`, then
+  `./test/cross-test.profile.sh`, and a profile may set `CROSS_*` variables
+  including `CROSS_MATRIX`, which is what decides the target set. A profile in
+  the tree therefore decides what a green run *covers* — read it before
+  quoting the table above as the project's coverage.
+- **It needs `ZIG` pointed at a real compiler.** The `zig` on `PATH` is the
+  anyzig shim described in section 5.
+- **Its output has to be on local disk.** `/nfs` rejects `renameat2`
+  with `EINVAL`, so a Zig build on the network mount cannot use a cache there;
+  cross-test solves that for its own cache, and `--output` solves it for the
+  run.
+
+The invocation behind the table, on this host:
+
+```sh
+export PATH=/tmp/zigbin:$PATH              # the real 0.16.0; PATH `zig` is a shim
+ZIG=/tmp/zigbin/zig ~/.local/bin/cross-test \
+  --targets x86_64-linux aarch64-linux riscv64-linux s390x-linux \
+  --output /tmp/cross-out --jobs 2 --build-jobs 2            # default 300 s
+ZIG=/tmp/zigbin/zig ~/.local/bin/cross-test \
+  --targets aarch64-linux s390x-linux \
+  --output /tmp/cross-out3 --jobs 2 --build-jobs 2 --timeout 900
+```
+
+Each run prints a `cross-test: target=…` line per target, a `status=` line, and
+leaves `cross-test-summary.json` plus per-target logs under `--output`. A run
+here writes nothing into the working tree and leaves no core dumps.
 
 ### The oracle: 35 of the 56 public operations now have a containment oracle
 

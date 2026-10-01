@@ -29,7 +29,7 @@ permissions:
   contents: read
 
 # A group, because `on: push` retriggers this on every push to main and
-# nothing deduplicated them: two runs of eight build-and-test jobs on the same
+# nothing deduplicated them: two runs of nine build-and-test jobs on the same
 # tree is pure duplicate cost.
 #
 # QUEUE, DO NOT CANCEL. `cancel-in-progress: true` is the reflexive choice
@@ -200,59 +200,142 @@ jobs:
         run: zig build bench-lp
 
   # ------------------------------------------------------------------ cross --
-  # BUILD ONLY. Nothing in this job is executed, on any of the three targets,
-  # and the job name says so.
+  # BUILD ONLY. Nothing in this job is executed, on any of the four targets,
+  # and the job name says so. A green row means COMPILED, and nothing else.
   #
-  # The default `install` step is the one step in this build system that
-  # compiles the library and launches nothing, so it is the whole of what can
-  # honestly be claimed here: every file src/root.zig reaches is compiled for
-  # the target, and no binary is run. That is a real gate - it is how a
-  # target-dependent @intCast, float-format assumption or alignment assumption
-  # gets caught - and it is NOT a runtime check, and this workflow makes no
-  # claim to be one.
+  # WHY THIS IS NOT cross-test, THOUGH THE PROJECT HAS A cross-test GATE.
+  # The project's real cross gate is cross-test: it BUILDS AND RUNS the whole
+  # test step under qemu_user and reports 348/348 on aarch64-linux,
+  # riscv64-linux and s390x-linux, and cross-test.profile.sh is that
+  # contract - the five targets, CROSS_TIMEOUT=900, and what its summary line
+  # does and does not mean. A GitHub runner cannot run it, and all three ways
+  # of getting it there are closed by what the thing is, not by taste:
   #
-  # The test step is not run for aarch64-linux or riscv64-linux either, even
-  # though a Linux runner could execute those binaries under QEMU. The NaN
-  # probe's child process needs the same emulator, and this build takes it from
-  # CROSS_TEST_RUNNER_KIND and CROSS_TEST_RUNNER (build.zig:7-18), which this
-  # workflow does not set. A cross run that silently cannot launch its probe is
-  # worse than no cross run: the trap is the contract, and the probe retains
-  # well-formed controls precisely so a failed launch cannot be mistaken for a
-  # clean one. x86_64-windows cannot execute on this runner at all.
+  #   (a) Vendor it. 746 lines at ~/.local/bin/cross-test, plus four sibling
+  #       helpers in ~/.local/lib/cross-test/ (~29 KB more, one of them a Zig
+  #       source file). No upstream, no tag, no release, no install recipe -
+  #       `cross-test --help` is its entire documentation. A copy in this tree
+  #       could never be diffed against the script a developer actually runs,
+  #       so it would drift the first time that script changed and CI would
+  #       be gating on an unmaintained fork. It is also five files, and this
+  #       change is one.
+  #   (b) Download it at run time. There is nowhere to download it from that
+  #       is not a developer's home directory, and an unpinned URL breaks
+  #       without notice. A cross gate that rots is not a gate.
+  #   (c) Keep the compile-only job, and say plainly in the file what it is.
+  #       CHOSEN. A CI job that works once and then fails, or that silently
+  #       no-ops, is worse than the build-only job it replaced, and the only
+  #       product of this file is a claim somebody is meant to believe.
+  #
+  # REVISIT THIS BLOCK WHEN THE HARNESS HAS A HOME. A tagged upstream release
+  # makes (b) honest - install it by tag and digest exactly as the Zig
+  # toolchain is installed above - and this comment wrong. A vendored copy
+  # reviewed into the tree makes (a) honest, and makes it wrong too. Either
+  # is the same amount of work: get the harness out of one person's home
+  # directory, and this whole job collapses into the command the profile
+  # already documents. Until then, the strongest claim CI can make is the
+  # one below, and it is made here rather than left to be guessed at.
+  #
+  # HOW THE PROFILE IS CONSULTED, since the harness itself cannot be.
+  # cross-test.profile.sh is in the tree, so it is readable here, and the
+  # step named "the profile is the target contract" sources it as the trusted
+  # bash it is - the same way cross-test sources it - and then requires the
+  # matrix below to be exactly its TARGETS, less the one documented exclusion
+  # (the runner's own triple, which the `test` job already compiles AND runs
+  # in four optimise modes). A GitHub matrix cannot be computed from a file,
+  # so the matrix is a literal and that step is what makes the two provably
+  # the same set: add a target to the profile and this job goes red until
+  # the matrix here is updated on purpose, and it says which side drifted.
+  # The same step asserts CROSS_TIMEOUT is still set and prints it, so the
+  # execution budget a developer runs under is visible in every cross log.
+  # It does NOT bind here and is not silently reinterpreted as a job timeout:
+  # this job executes nothing, so there is nothing for it to bound.
+  #
+  # WHAT THIS NOW CATCHES THAT IT DID NOT. Two gains, both compile-time,
+  # neither of them execution:
+  #   * s390x-linux, the project's ONLY byte-order coverage. Before this
+  #     change CI built no big-endian target at all, so a byte-order mistake
+  #     could not fail here even in principle - and the code such a mistake
+  #     breaks is the oracle's own: src/rounding.zig steps f64 neighbours by
+  #     u64 bit pattern, and the NaN contract trap reads bit patterns
+  #     (tests/nan_probe.zig). What this leg proves is that the library
+  #     COMPILES for a big-endian target: LLVM's BE code paths, the non-LE
+  #     object layout, the foreign std surface. It executes nothing, so it is
+  #     NOT evidence about byte-order BEHAVIOUR. That is the local harness's
+  #     to prove, and the profile says the same in its own words.
+  #   * Drift between the target set a developer verifies and the one CI
+  #     builds. Nothing in CI read that profile before, so a target could be
+  #     added to the harness set, or dropped from it, with this job still
+  #     green about a set nobody was building.
+  #
+  # HOW A GREEN ROW IS PRODUCED. The default `install` step is the one step
+  # in this build system that compiles the library and launches nothing, so
+  # it is the whole of what can honestly be claimed: every file src/root.zig
+  # reaches is compiled for the target, and no binary is run. That is a real
+  # gate - it is how a target-dependent @intCast, a float-format assumption
+  # or an alignment assumption gets caught - and it is not a runtime check.
   #
   # ReleaseSafe, not Debug: it is the mode the consumer fixture builds
-  # (build.zig:278) and the mode a real consumer gets, and the checked modes are
-  # already covered natively by the four-way matrix in the `test` job.
+  # (build.zig:278) and the mode a real consumer gets, and the checked modes
+  # are already covered natively by the four-way matrix in the `test` job.
   #
-  # HOW THIS DIFFERS FROM THE MANUAL GATE - DO NOT READ A GREEN ROW HERE AS
-  # RUNTIME EVIDENCE FOR A FOREIGN TARGET. The local gate is
-  # `cross-test --jobs 8 --build-jobs 2` (docs/performance-handover.md:
-  # 796-800), and it RUNS the whole test step, corpus tier included, for
-  # aarch64-linux and riscv64-linux under QEMU user-mode, with the QEMU runner
-  # also handed to the NaN and ownership child probes
-  # (docs/performance-handover.md:88, 810-813). This job executes NO
-  # foreign-target binary on any of the three. CI's cross coverage is
-  # therefore strictly weaker than what a developer gets locally, and not by a
-  # margin: the runtime evidence that caught MIPS32's subnormal `div`/`recip`
-  # failures lives only on that local path
-  # (docs/performance-handover.md:802-808) and is never reproduced here. The
-  # manual gate does not run x86_64-windows either, having no Wine for it
-  # (docs/performance-handover.md:89, 815-819), so on that target the two
-  # agree and the claim really is only "it compiles".
+  # WHY THE FOREIGN TESTS ARE NOT RUN BY HAND HERE, since a Linux runner
+  # could execute those binaries under QEMU and this build can be told to
+  # hand the same emulator to its own child probes (CROSS_TEST_RUNNER_KIND,
+  # CROSS_TEST_RUNNER; build.zig:7-18). The blocker is the harness's verdict
+  # logic, not the emulator: a bare `zig build` exit status cannot tell "this
+  # host cannot execute that target" from "a test failed", and cross-test
+  # separates them by classifying the `--summary all` output - compiled but
+  # unspawnable is runtime_unavailable, a run that happened and failed is
+  # tests_failed, and a build with no executed checks is never a pass. A
+  # hand-rolled version of that step reports a missing emulator as a red cross
+  # job, and on a runner where qemu IS installed it is a slower, less
+  # informative copy of the local gate. A gate that cannot tell a timeout
+  # from a wrong answer is precisely the confusion cross-test.profile.sh
+  # warns about in its opening section; do not reintroduce it here with less
+  # information. The NaN probe is the concrete cost of guessing: a cross run
+  # that silently cannot launch its probe is worse than no cross run, because
+  # the trap is the contract and the probe keeps well-formed controls exactly
+  # so a failed launch cannot be mistaken for a clean one.
   #
-  # That gap is a deliberate trade, not an oversight: QEMU on a CI runner is
-  # slow and is its own source of flake, and a gate that flakes is a gate
-  # that gets ignored. It is written down here so that no later session
-  # mistakes this job for having closed it. What a green `cross` row means is
-  # COMPILED, and only `cross-test`'s own summary can upgrade that - where a
-  # `build_only` or `no_test_results` entry is not soundness evidence either.
+  # build_only IS NOT A FAILURE, AND THE PROFILE AGREES. On a host with no
+  # Wine, cross-test records x86_64-windows as build_only/runtime_unavailable,
+  # never counts it as a pass, and still exits 0 - `status=partial pass=4
+  # fail=0 build_only=1` is this project's normal clean result, and
+  # --require-runners would invert it and is not usable here. This job prints
+  # no status line, because nothing here runs the harness: its entire verdict
+  # is the exit status of one compile per leg, and the x86_64-windows leg
+  # must produce a compiled library and nothing more. The two documents
+  # agree on the only point that matters: compiled is not passed, and a
+  # target with no runtime is not a failure.
+  #
+  # SO A READER SHOULD HOLD EXACTLY THIS. `cross` proves the library compiles
+  # for four foreign targets, one of them big-endian, and proves the target
+  # set has not drifted from cross-test.profile.sh. It proves nothing about
+  # how the library BEHAVES on any of them. For that, run cross-test; only
+  # its own summary can upgrade a row, and a build_only or no_test_results
+  # entry in it is not soundness evidence either.
   cross:
     name: cross ${{ matrix.target }} (build only, never run)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        target: [aarch64-linux, riscv64-linux, x86_64-windows]
+        # s390x-linux is the big-endian row, and it is the reason the guard
+        # step below exists: the profile lists it, and a matrix written by
+        # hand drifts from the profile silently. x86_64-linux is in the
+        # profile too and is deliberately NOT a leg here - it is this
+        # runner's own triple, and the `test` job compiles and runs it four
+        # times over. The guard step names that exclusion in the one place
+        # it is written down.
+        target: [aarch64-linux, riscv64-linux, s390x-linux, x86_64-windows]
+    env:
+      # This job's own view of the legs above, for the guard step: a matrix
+      # cannot be read back from inside a step, and the guard needs the whole
+      # set to compare against the profile. The step also checks that this
+      # leg is one of them, so the matrix, this list and the profile are all
+      # tied together by one comparison rather than by three copies agreeing.
+      CROSS_LEGS: aarch64-linux riscv64-linux s390x-linux x86_64-windows
     steps:
       - name: Install Zig ${{ env.ZIG_VERSION }}
         run: |
@@ -265,6 +348,68 @@ jobs:
           tar -xf "/tmp/${tgz}" --strip-components=1 -C "/tmp/zig-${ZIG_VERSION}"
           test "$(/tmp/zig-${ZIG_VERSION}/zig version)" = "${ZIG_VERSION}"
           echo "/tmp/zig-${ZIG_VERSION}" >> "$GITHUB_PATH"
+
+      - name: the profile is the target contract
+        env:
+          CROSS_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          # Sourced as trusted bash, which is how cross-test itself reads it.
+          # Sourced AFTER the shell options are set, and the profile is not
+          # allowed to change them: cross-test runs without -e and forbids a
+          # profile from touching shell options, traps or the working
+          # directory, so nothing in that file can quietly disarm this step.
+          source ./cross-test.profile.sh
+          if ! declare -p TARGETS >/dev/null 2>&1; then
+            printf 'cross: ./cross-test.profile.sh did not define TARGETS as a bash array.\n' >&2
+            printf 'cross: this job is built on that file, so it cannot pick a target set on its own.\n' >&2
+            exit 1
+          fi
+          if [[ -z ${CROSS_TIMEOUT:-} ]]; then
+            printf 'cross: ./cross-test.profile.sh no longer sets CROSS_TIMEOUT. This job executes\n' >&2
+            printf 'cross: nothing, so it cannot notice the execution budget going missing.\n' >&2
+            exit 1
+          fi
+          # The one documented exclusion: the runner's own triple. The `test`
+          # job compiles and runs x86_64-linux in four optimise modes, so a
+          # fifth build-only native leg would cost a runner and add no
+          # evidence about a foreign target.
+          covered_by_test=(x86_64-linux)
+          read -ra legs <<<"${CROSS_LEGS}"
+          expected=()
+          for t in "${TARGETS[@]}"; do
+            keep=1
+            for c in "${covered_by_test[@]}"; do
+              if [[ ${t} == "${c}" ]]; then keep=0; fi
+            done
+            if (( keep )); then expected+=("${t}"); fi
+          done
+          missing=() extra=()
+          for t in "${expected[@]}"; do
+            if [[ " ${CROSS_LEGS} " != *" ${t} "* ]]; then missing+=("${t}"); fi
+          done
+          for l in "${legs[@]}"; do
+            if [[ " ${expected[*]} " != *" ${l} "* ]]; then extra+=("${l}"); fi
+          done
+          if (( ${#missing[@]} + ${#extra[@]} > 0 )); then
+            printf 'cross: this job and cross-test.profile.sh disagree about the target set.\n' >&2
+            printf 'cross:   in the profile, not built here: %s\n' "${missing[*]:-(none)}" >&2
+            printf 'cross:   built here, not in the profile: %s\n' "${extra[*]:-(none)}" >&2
+            printf 'cross: The profile is the contract; update the matrix in this job on purpose.\n' >&2
+            exit 1
+          fi
+          case " ${CROSS_LEGS} " in
+            *" ${CROSS_TARGET} "*) ;;
+            *)
+              printf 'cross: this leg builds %s, which is not in CROSS_LEGS (%s).\n' \
+                "${CROSS_TARGET}" "${CROSS_LEGS}" >&2
+              exit 1
+              ;;
+          esac
+          printf 'cross: %d target(s) agree with cross-test.profile.sh: %s\n' \
+            "${#legs[@]}" "${CROSS_LEGS}"
+          printf 'cross: profile execution budget is CROSS_TIMEOUT=%ss; it does not bind here, this job runs nothing.\n' \
+            "${CROSS_TIMEOUT}"
 
       - name: Restore the Zig local cache
         uses: actions/cache@v4
@@ -359,7 +504,7 @@ jobs:
 # the first time one job saves it and refuses every save that arrives for a
 # key already reserved, so a key shared by a matrix is a key that works only
 # while one leg is running. Without this dimension the four test legs, the
-# three cross legs and the bench job - eight jobs, in the very runs the cache
+# four cross legs and the bench job - nine jobs, in the very runs the cache
 # exists to make cheap - all wrote one key, and the cache was warm only on a
 # quiet commit.
 # If you are reading this and about to drop the matrix value from the key
