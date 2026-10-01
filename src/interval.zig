@@ -458,6 +458,22 @@ pub const Interval = struct {
     /// the two intermediates sit in different binades, where a step taken
     /// on the small one pays for nothing on the large one.
     ///
+    /// That paragraph is not an assertion, it is a measured result, and the
+    /// measurement is `docs/scale-enclosure.md`. Item O1 of
+    /// `docs/next-work-plan.md` asked for the enclosure a direct formulation
+    /// would need — one outward step per endpoint, against the six this one
+    /// spends — and the argument there is that no fixed number of steps
+    /// supplies it. One step buys half an ULP of the ENDPOINT; the chain
+    /// delivers an error on the scale of an ULP of the MIDPOINT; and on
+    /// `[-1, 2^k]` at `|factor| = 1 - 2^-53` the two differ by `2^(k-1)`,
+    /// with no ceiling. On that family the fused form returns a lower bound
+    /// `2^39 - 3/2` ULP above the true one at `k = 40`, and a sweep of 2.9
+    /// million cases finds it unsound on 14 to 27 % of them while this
+    /// form is sound on all of them. So the six steps stay, and this is
+    /// what they buy: each one's outwardness is the budget the next one
+    /// spends, which is the only reason the cancellation at the end is
+    /// paid for at all.
+    ///
     /// Each arm then puts both of its terms on the protective side: the
     /// lower bound subtracts an upper half-width from a lower midpoint,
     /// the upper bound adds an upper half-width to an upper midpoint. Each

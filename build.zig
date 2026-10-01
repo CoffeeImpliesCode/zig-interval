@@ -105,21 +105,6 @@ pub fn build(b: *std.Build) void {
     const run_lp_tests = b.addRunArtifact(lp_tests);
     test_step.dependOn(&run_lp_tests.step);
 
-    // The soundness oracle imports the same public `interval` module the
-    // other tests do, for the reason given above: a second registration of
-    // any file under `src/` is a hard "file exists in modules" error.
-    const soundness_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/soundness_test.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    soundness_tests.root_module.addImport("interval", interval);
-    soundness_tests.root_module.addOptions("probe_runner_options", probe_runner_options);
-    const run_soundness_tests = b.addRunArtifact(soundness_tests);
-    test_step.dependOn(&run_soundness_tests.step);
-
     // The corpus tier is a separate binary from the in-tree oracle, for the
     // reason the corpus file's own header gives: its reference is not written
     // in this tree. It is MPFR, at 256 bits, via scripts/gen_corpus.c, and the
@@ -135,6 +120,31 @@ pub fn build(b: *std.Build) void {
     corpus_tests.root_module.addImport("interval", interval);
     const run_corpus_tests = b.addRunArtifact(corpus_tests);
     test_step.dependOn(&run_corpus_tests.step);
+
+    // The extracted exact-arithmetic block's own tests take `lp_exact` as
+    // their ONLY project module and construct no `System` at all. That is the
+    // observable proof the block is pure: no allocator is named anywhere in
+    // the compilation, and every question is put to a function of its
+    // arguments rather than reached by driving the solver.
+    //
+    // It is a separate module rather than another import on `interval`,
+    // because `interval` already reaches `lp_exact.zig` by relative path and
+    // registering the same file twice is a hard "file exists in modules"
+    // error.
+    const lp_exact_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/lp_exact_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    lp_exact_tests.root_module.addImport("lp_exact", b.createModule(.{
+        .root_source_file = b.path("src/lp_exact.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    const run_lp_exact_tests = b.addRunArtifact(lp_exact_tests);
+    test_step.dependOn(&run_lp_exact_tests.step);
 
     // The NaN-trap probe is a separate executable rather than a test,
     // because the contract it pins is that a NaN scalar operand ABORTS, and
@@ -160,14 +170,83 @@ pub fn build(b: *std.Build) void {
     // adds no file of its own under `src/`, so no registration overlaps.
     nan_probe.root_module.addImport("interval", interval);
 
-    // The probe's built path, as a compile-time constant the soundness test
-    // hands to `std.process.Child`. An options module rather than a run-step
-    // environment variable, so the path is right however the test binary is
-    // launched, and `addOptionPath` records the dependency: the probe cannot
-    // be missing or stale when the test that runs it executes.
+    // The probe's built path, as a compile-time constant the soundness
+    // reproducers test hands to `std.process.Child`. An options module rather
+    // than a run-step environment variable, so the path is right however the
+    // test binary is launched, and `addOptionPath` records the dependency:
+    // the probe cannot be missing or stale when the test that runs it
+    // executes.
     const nan_probe_options = b.addOptions();
     nan_probe_options.addOptionPath("probe_path", nan_probe.getEmittedBin());
-    soundness_tests.root_module.addOptions("nan_probe_options", nan_probe_options);
+
+    // The soundness oracle is FOUR test binaries rather than one, one per
+    // concern: the tanh band and the reference it pins, the random sweeps,
+    // the directed frontier sweep, and the named reproducers and guards.
+    //
+    // They are SIBLINGS over one shared module, `tests/soundness_shared.zig`,
+    // and not a chain, and the reason is a property of `zig test` rather than
+    // a preference: it collects the tests of EVERY file the root reaches,
+    // imported or not, so a concern file that `@import`ed another concern
+    // file would run that file's tests a second time and print its report
+    // twice. Four roots over one vocabulary runs each of the sixty-eight
+    // tests exactly once, in exactly one binary, which is what the single
+    // binary did before the split.
+    //
+    // Each takes the same public `interval` module the other tests do, for
+    // the reason given at the top of this file: a second registration of
+    // any file under `src/` is a hard "file exists in modules" error.
+    const soundness_reference_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/soundness_reference_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    soundness_reference_tests.root_module.addImport("interval", interval);
+    const run_soundness_reference_tests = b.addRunArtifact(soundness_reference_tests);
+    test_step.dependOn(&run_soundness_reference_tests.step);
+
+    const soundness_fuzz_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/soundness_fuzz_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    soundness_fuzz_tests.root_module.addImport("interval", interval);
+    const run_soundness_fuzz_tests = b.addRunArtifact(soundness_fuzz_tests);
+    test_step.dependOn(&run_soundness_fuzz_tests.step);
+
+    const soundness_frontier_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/soundness_frontier_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    soundness_frontier_tests.root_module.addImport("interval", interval);
+    const run_soundness_frontier_tests = b.addRunArtifact(soundness_frontier_tests);
+    test_step.dependOn(&run_soundness_frontier_tests.step);
+
+    // The NaN-scalar trap is the one thing in the four that reaches for a
+    // build option, and it is the whole reason this step is declared here
+    // rather than beside its three siblings: `runProbe` spawns
+    // `tests/nan_probe.zig` and reads the probe's built path out of
+    // `nan_probe_options`, and on a cross target the child needs the same
+    // user-mode emulator as this test binary. The other three reach for
+    // nothing but `interval`.
+    const soundness_reproducers_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/soundness_reproducers_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    soundness_reproducers_tests.root_module.addImport("interval", interval);
+    soundness_reproducers_tests.root_module.addOptions("probe_runner_options", probe_runner_options);
+    soundness_reproducers_tests.root_module.addOptions("nan_probe_options", nan_probe_options);
+    const run_soundness_reproducers_tests = b.addRunArtifact(soundness_reproducers_tests);
+    test_step.dependOn(&run_soundness_reproducers_tests.step);
 
     // The fixture is a real external package: it declares this one as a
     // dependency and resolves `interval` through the module graph, which the

@@ -47,20 +47,40 @@
 //!
 //! The general form reaches that same straddle by a second route,
 //! cancellation: two equal products subtracted from one another, each of them
-//! already widened on the way in. `combinedColumn` decides that case on the
-//! operands rather than on the widened products, in `f128` where the
-//! question has an exact answer, and writes the structural zero when the
+//! already widened on the way in. `lp_exact.combinedColumn` decides that
+//! case on the operands rather than on the widened products, in `f128` where
+//! the question has an exact answer, and writes the structural zero when the
 //! exact coefficient is zero.
+//!
+//! THAT DECISION IS NOT IN THIS FILE. The whole exact block moved to
+//! `lp_exact.zig`, which names no allocator and takes a `Side` rather than a
+//! `Part`, and the reason is that it could not be tested on its own here:
+//! while it sat in this file the only way to reach it was through a
+//! `System`, so every question about it had to be paid for with an
+//! allocated system, a set of added rows, and an elimination driven until
+//! the operands happened to appear. What is left in this file is the
+//! memory, the rule, and the arithmetic over that rule.
 
 const std = @import("std");
 
 const Interval = @import("interval.zig").Interval;
 
+/// The exact arithmetic: `combinedColumn`, `combinedBound`,
+/// `cancelsExactly`, and the predicates they rest on. Aliased rather than
+/// copied, so every caller here reaches the one decision rather than a
+/// second reading of it.
+const exact = @import("lp_exact.zig");
+
 /// The degenerate interval written into a combined row for the eliminated
 /// index. The two `x_k` terms cancel analytically, so the exact zero is the
 /// truthful value; anything else would leave a rounding-thin straddle behind
 /// that later reads as a bound on a variable that no longer appears.
-const zero = Interval.init(0.0, 0.0);
+///
+/// Published by `lp_exact`, the block that also writes it, and aliased
+/// rather than repeated here so that "the structural zero" has one answer in
+/// the tree: `appendCombined` writes it into the eliminated column and
+/// `combinedColumn` writes it into a column no row mentions.
+const zero = exact.zero;
 
 /// Comparison requested by the caller. See the module comment for how each
 /// variant is stored.
@@ -112,6 +132,23 @@ pub const Part = struct {
     row: Lin,
 };
 
+/// The exact block's view of one side of a pairing, built from a `Part`.
+///
+/// `lp_exact` names no solver type, and this is the one place the solver's
+/// `Part` is flattened into the block's `Side`: the multiplier piece, the
+/// row's coefficients and the row's right-hand side, which is everything the
+/// block reads and nothing that it does not. `Lin` carries a slice the system
+/// owns, so a struct that named one would have dragged that ownership across
+/// with it, and the block would be reachable only by building the thing it
+/// is separable from.
+fn sideOf(part: Part) exact.Side {
+    return .{
+        .coeff = part.coeff,
+        .coeffs = part.row.coeffs,
+        .rhs = part.row.rhs,
+    };
+}
+
 /// One round's rows, split by the sign of their `x_k` coefficient.
 ///
 /// `carried` holds the rows that do not mention the variable and pass
@@ -148,9 +185,10 @@ pub const Partition = struct {
 /// two facts about them that cost a single pass to establish.
 ///
 /// `flat` says the row is the exact [0, 0] in every column except `k`, and
-/// `exact` says the multiplier is the exact [0, 0]. Neither is a property of
-/// the row alone: `exact` is about the piece, which for a straddling
-/// coefficient is a different interval in each of the two buckets.
+/// `Cand.exact` says the multiplier is the exact [0, 0]. Neither is a
+/// property of the row alone: `Cand.exact` is about the piece, which for a
+/// straddling coefficient is a different interval in each of the two
+/// buckets.
 const Cand = struct {
     coeff: Interval,
     row: Lin,
@@ -158,10 +196,11 @@ const Cand = struct {
     exact: bool,
 };
 
-/// A `Cand` for one bucket. `exact` is derived rather than passed, so a
-/// candidate cannot claim a multiplier is the exact zero when it is not.
+/// A `Cand` for one bucket. The `exact` field is derived rather than passed,
+/// so a candidate cannot claim a multiplier is the exact zero when it is not;
+/// the derivation is `lp_exact`'s, because that module owns the question.
 fn candidate(coeff: Interval, row: Lin, flat: bool) Cand {
-    return .{ .coeff = coeff, .row = row, .flat = flat, .exact = isExactZero(coeff) };
+    return .{ .coeff = coeff, .row = row, .flat = flat, .exact = exact.isExactZero(coeff) };
 }
 
 /// Where `partitionInto` puts each row it classifies.
@@ -310,8 +349,8 @@ const Tally = struct {
 /// variable bounds nothing in either direction and is dropped; a lower
 /// piece that does not reach below zero bounds nothing from below, and an
 /// upper piece that does not reach above zero bounds nothing from above.
-/// What a piece is DIVIDED by is `boundDivisor`'s question, and the reason
-/// it cannot be the piece itself is that piece's doc gives.
+/// What a piece is DIVIDED by is `lp_exact.boundDivisor`'s question, and the
+/// reason it cannot be the piece itself is that function's doc gives.
 const BoundReader = struct {
     lower: ?f64 = null,
     upper: ?f64 = null,
@@ -320,13 +359,13 @@ const BoundReader = struct {
 
     fn addLower(self: *BoundReader, part: Part) !void {
         if (!(part.coeff.lo < 0)) return;
-        const q = part.row.rhs.div(boundDivisor(part));
+        const q = part.row.rhs.div(exact.boundDivisor(sideOf(part)));
         self.lower = if (self.lower) |v| @max(v, q.lo) else q.lo;
     }
 
     fn addUpper(self: *BoundReader, part: Part) !void {
         if (!(part.coeff.hi > 0)) return;
-        const q = part.row.rhs.div(boundDivisor(part));
+        const q = part.row.rhs.div(exact.boundDivisor(sideOf(part)));
         self.upper = if (self.upper) |v| @min(v, q.hi) else q.hi;
     }
 };
@@ -346,12 +385,12 @@ const CandWriter = struct {
     fn addCarried(_: *CandWriter, _: Lin) !void {}
 
     fn addLower(self: *CandWriter, part: Part) !void {
-        self.cands[self.lower_len] = candidate(part.coeff, part.row, isFlatApartFrom(part.row.coeffs, self.k));
+        self.cands[self.lower_len] = candidate(part.coeff, part.row, exact.isFlatApartFrom(part.row.coeffs, self.k));
         self.lower_len += 1;
     }
 
     fn addUpper(self: *CandWriter, part: Part) !void {
-        self.cands[self.n + self.upper_len] = candidate(part.coeff, part.row, isFlatApartFrom(part.row.coeffs, self.k));
+        self.cands[self.n + self.upper_len] = candidate(part.coeff, part.row, exact.isFlatApartFrom(part.row.coeffs, self.k));
         self.upper_len += 1;
     }
 };
@@ -740,7 +779,27 @@ pub const System = struct {
             try scratch.eliminate(j);
             if (scratch.unsat) return null;
         }
+        return scratch.projectBounds(k);
+    }
 
+    /// Read the projection of `k` off a system that has already lost every
+    /// variable but `k`, and decide both of the emptiness questions on the
+    /// rows that are left. `bounds` reaches that state by sweeping the other
+    /// variables away one at a time on a private copy; `box` reaches it by
+    /// way of a walk that shares its eliminations between projections. The
+    /// reading is one function because it has to be ONE reading: two copies
+    /// of it could agree on the arithmetic and still disagree on which rows
+    /// bound `k` from which side, and then `bounds(k)` and `box` would give
+    /// two answers for one system. The two emptiness tests are here and
+    /// nowhere else for the same reason; `bounds` states what they mean.
+    ///
+    /// `self.alive[k]` may be false, which is a request for the same rows
+    /// with one fewer question asked: a variable already eliminated has an
+    /// exact [0, 0] in every column, so there is nothing to read and the
+    /// answer is null through the reader rather than through a test. The
+    /// contradiction check below is skipped in that case for the reason its
+    /// own comment gives.
+    fn projectBounds(self: System, k: usize) !?Interval {
         // After the sweep every row holds an exact [0, 0] in every slot but
         // k, so each surviving row reads `a * x_k <= rhs`. A negative `a`
         // bounds x_k from below and says nothing about how large it can be; a
@@ -753,19 +812,19 @@ pub const System = struct {
         // that can be read from above, and a coefficient that reaches zero
         // sits in both, carrying the piece that belongs to each side.
         var reader = BoundReader{};
-        try scratch.partitionInto(k, &reader);
+        try self.partitionInto(k, &reader);
 
         const lo = reader.lower orelse return null;
         const hi = reader.upper orelse return null;
         if (lo > hi) return null;
 
-        // The sweep above keeps `k` alive on purpose, because that is what
-        // leaves a row to read a bound from, and it is also why the rows
-        // cannot contradict one another on their own: a contradiction is a
-        // row with every coefficient exactly zero, and while `k` is alive no
-        // derived row is that. Dropping `k` as well is the only way a
-        // contradiction among the rows becomes visible here, so the question
-        // is asked before the answer is handed back.
+        // The sweep keeps `k` alive on purpose, because that is what leaves a
+        // row to read a bound from, and it is also why the rows cannot
+        // contradict one another on their own: a contradiction is a row with
+        // every coefficient exactly zero, and while `k` is alive no derived
+        // row is that. Dropping `k` as well is the only way a contradiction
+        // among the rows becomes visible here, so the question is asked
+        // before the answer is handed back.
         //
         // It is asked as `derivesContradiction` and not as `eliminate(k)`
         // because `lo` and `hi` are already read off by this point and no
@@ -774,8 +833,8 @@ pub const System = struct {
         // is a question about the rows rather than a request for the rows.
         // On the straddling generator that is 14,641 derived rows and a scan
         // over every one of them against no rows at all.
-        if (scratch.alive[k]) {
-            if (try scratch.derivesContradiction(k)) return null;
+        if (self.alive[k]) {
+            if (try self.derivesContradiction(k)) return null;
         }
         return Interval.init(lo, hi);
     }
@@ -887,8 +946,12 @@ pub const System = struct {
                 const lowest_b = l.coeff.lo * @min(u.row.rhs.lo, u.row.rhs.hi);
                 if (widest_a >= lowest_b) continue;
 
-                const lower: Part = .{ .coeff = l.coeff, .row = l.row };
-                const upper: Part = .{ .coeff = u.coeff, .row = u.row };
+                // A `Side` rather than a `Part`: the exact block is handed
+                // the three values it reads and names nothing else, so it
+                // takes no ownership and cannot be reached only through a
+                // system.
+                const lower = exact.Side{ .coeff = l.coeff, .coeffs = l.row.coeffs, .rhs = l.row.rhs };
+                const upper = exact.Side{ .coeff = u.coeff, .coeffs = u.row.coeffs, .rhs = u.row.rhs };
                 const proved_all_zero = (l.exact and u.exact) or
                     (l.exact and l.flat) or
                     (u.exact and u.flat) or
@@ -897,14 +960,14 @@ pub const System = struct {
                     var all_zero = true;
                     for (0..vc) |j| {
                         if (j == k) continue;
-                        if (!isExactZero(combinedColumn(lower, upper, j))) {
+                        if (!exact.isExactZero(exact.combinedColumn(lower, upper, j))) {
                             all_zero = false;
                             break;
                         }
                     }
                     if (!all_zero) continue;
                 }
-                if (combinedBound(lower, upper).hi < 0) return true;
+                if (exact.combinedBound(lower, upper).hi < 0) return true;
             }
         }
         return false;
@@ -922,21 +985,167 @@ pub const System = struct {
     ///     }
     ///
     /// Same precondition as `bounds`: call it while the variables are live.
+    ///
+    /// ONE WALK, NOT `m` SWEEPS. Write the variables in increasing index
+    /// order as `v_1 .. v_m`. The form this replaces called `bounds(k)` for
+    /// each `k`, and each of those began at its own deep copy of this system
+    /// and swept away `m - 1` variables to leave one, so a box cost `m`
+    /// clones and `m * (m - 1)` eliminations - while throwing away every
+    /// answer but the one in front of it. The sweep for the second variable
+    /// rebuilt the row set the sweep for the first had already built and
+    /// already discarded, and so on down the line: close to half of those
+    /// eliminations were spent reconstructing a state that had existed a
+    /// moment earlier.
+    ///
+    /// What this does instead is keep ONE scratch system, `chain`, and take
+    /// every projection off it. The chain eliminates `v_1`, then `v_2`, and
+    /// so on, so when projection `k` comes up the chain holds exactly the
+    /// state the old sweep had reached after `v_1 .. v_{k-1}`: every
+    /// variable before `k` gone, every one from `k` on still alive. A
+    /// projection needs every OTHER variable gone, and the ones still
+    /// missing are precisely the ones after `k`, so the projection is a COPY
+    /// of the chain state with `v_{k+1} .. v_m` eliminated on the copy:
+    /// `m - k` eliminations. The last variable is the exception the walk is
+    /// built around: nothing follows it, so its projection reads the chain
+    /// itself, and the chain is never eliminated past `v_{m-1}`.
+    ///
+    /// The cost is `m - 1` eliminations on the chain plus `m - 1` more for
+    /// the projection of `v_1`, `m - 2` for `v_2`, and so on down to none:
+    /// `(m - 1) * (m + 2) / 2` against the `m * (m - 1)` it replaces. Just
+    /// over half, and the gap widens with `m` - fourteen eliminations against
+    /// twenty at five variables, fifty-four against ninety at ten. That count
+    /// depends only on how many variables follow each one and not on which
+    /// they are, so taking them in ascending index order costs nothing in
+    /// rounds and is worth having for the reason two paragraphs down.
+    ///
+    /// The copies are still `m` of them - one of the caller's own system, and
+    /// `m - 1` more - and that is not an oversight left for later. A
+    /// projection wants a system with exactly `v_k` alive, and a walk of
+    /// eliminations reaches such a state exactly once, because every round
+    /// removes one variable and the chain's live set only ever shrinks
+    /// towards empty. Two projections therefore cannot share one system, and
+    /// sharing an elimination would have to mean undoing one, and no
+    /// elimination here can be undone. What the walk does change is what
+    /// those copies are copies OF. The old form cloned the caller's system
+    /// every time; this clones it once and clones the states the walk has
+    /// already reached after that. On a generator whose rows compound that
+    /// is MORE memory copied than before, traded against rather less
+    /// arithmetic: an elimination is a cross product of interval operations
+    /// over every column, some of them soft-float, where a copy is a
+    /// `memcpy`. The trade is stated here rather than left to be found on a
+    /// profile. The peak row count any one system reaches is unchanged, for
+    /// the reason the next paragraph gives; what does change is that two
+    /// systems are alive at once - the chain and one copy - where the old
+    /// form held one, and that is the other half of the same price.
+    ///
+    /// WHY THE ANSWER IS THE SAME ANSWER, NOT A MERELY WIDER ONE.
+    /// Soundness would have settled the question either way: every
+    /// elimination is a sound over-approximation, so a projection taken from
+    /// a shared prefix is at least as valid as one taken from a private copy,
+    /// and the only thing sharing could cost is TIGHTNESS. It costs none,
+    /// and the reason is that the walk runs the OLD ORDER. For projection
+    /// `k` the eliminations are `v_1 .. v_{k-1}` and then `v_{k+1} .. v_m`,
+    /// in that order, because that is the order `bounds(k)` used: it walked
+    /// the live indices in increasing order and skipped `k`. The chain
+    /// performed that prefix and the copy performs that suffix, `eliminate`
+    /// is deterministic, and the chain state after `v_1 .. v_{k-1}` is
+    /// therefore bit for bit the state the old sweep held at that point.
+    /// Every row after it is written by the same code from the same operands,
+    /// the bound read off those rows is the same `f64`, and the peak row
+    /// count of any one system is the peak the old sweep reached for the same
+    /// projection. So the box this returns is not wider: it is the same
+    /// numbers, and a caller pinning them - or the benchmark's geometry line,
+    /// which says whether every variable came back bounded - sees no change
+    /// at all.
+    ///
+    /// WHY THE `null` CANNOT MOVE. Two of the three ways to answer null are
+    /// decided in `projectBounds`, which this walk shares with `bounds` and
+    /// runs over the same rows, so they cannot differ. The third is the
+    /// contradiction check after every elimination, and the walk does run
+    /// eliminations `bounds` never did: the chain's own. A chain round that
+    /// proves a contradiction is not new information, and the shape of the
+    /// walk is why. After eliminating `v_1 .. v_k` the chain holds a state
+    /// the old sweep reached as the first `k` rounds of its projection for
+    /// `v_{k+1}`, because that sweep walked the indices in increasing order
+    /// as well and skipped only `v_{k+1}`. Every state the chain can prove
+    /// unsatisfiable is one the old `box` proved unsatisfiable on the very
+    /// next projection, and answered null there. The walk also stops one
+    /// variable short of eliminating everything, because the state with no
+    /// variable alive is a state no projection ever reads - and dropping
+    /// `v_m` as well would buy nothing even if it were read, since its round
+    /// pairs exactly the rows `derivesContradiction` already asks about and
+    /// the last projection is about to ask that question anyway.
     pub fn box(self: System) !?[]Interval {
         if (self.unsat) return null;
         const out = try self.gpa.alloc(Interval, self.var_count);
         errdefer self.gpa.free(out);
+
+        // A variable that is not live answers null, and takes the whole box
+        // with it: its column is the structural zero in every row, so no row
+        // bounds it and `projectBounds` returns null for it. The precondition
+        // above already excludes such a system, but the old form answered
+        // null for it rather than something, and an unwritten slot in `out`
+        // is what "something" would look like.
+        var live_left: usize = 0;
+        for (self.alive) |a| {
+            if (a) live_left += 1;
+        }
+        if (live_left != self.var_count) {
+            self.gpa.free(out);
+            return null;
+        }
+
+        var chain = try self.clone();
+        defer chain.deinit();
+
         for (0..self.var_count) |k| {
-            out[k] = (try self.bounds(k)) orelse {
+            live_left -= 1;
+
+            // The last variable is the one projection that needs no copy:
+            // nothing follows it, so the chain already holds the system with
+            // every other variable eliminated.
+            if (live_left == 0) {
+                out[k] = (try chain.projectBounds(k)) orelse {
+                    self.gpa.free(out);
+                    return null;
+                };
+                continue;
+            }
+
+            // The variables after `k` are what this projection is still
+            // missing, and the chain state is what it is missing them from,
+            // so the copy continues from the row set the old sweep would have
+            // reached after the `k` eliminations it had already done.
+            var tail = try chain.clone();
+            defer tail.deinit();
+            for (k + 1..self.var_count) |j| {
+                try tail.eliminate(j);
+                if (tail.unsat) {
+                    self.gpa.free(out);
+                    return null;
+                }
+            }
+
+            out[k] = (try tail.projectBounds(k)) orelse {
                 self.gpa.free(out);
                 return null;
             };
+
+            // Only now does the chain take `k` away, which is the round the
+            // next projection starts from and the one place this walk does
+            // something the old form never did.
+            try chain.eliminate(k);
+            if (chain.unsat) {
+                self.gpa.free(out);
+                return null;
+            }
         }
         return out;
     }
 
-    /// Deep copy, including the allocator. `bounds` and `eliminationOrder`
-    /// simulate eliminations and must not touch the caller's system.
+    /// Deep copy, including the allocator. `bounds`, `box` and
+    /// `eliminationOrder` simulate eliminations and must not touch the
+    /// caller's system.
     fn clone(self: System) !System {
         var out = try System.init(self.gpa, self.var_count);
         errdefer out.deinit();
@@ -1048,275 +1257,30 @@ fn appendCombined(
     k: usize,
     vc: usize,
 ) !void {
+    const l = sideOf(lower);
+    const u = sideOf(upper);
     for (0..vc) |j| {
         if (j == k) {
             try coeffs.append(gpa, zero);
             continue;
         }
-        try coeffs.append(gpa, combinedColumn(lower, upper, j));
+        try coeffs.append(gpa, exact.combinedColumn(l, u, j));
     }
-    try rhs.append(gpa, combinedBound(lower, upper));
+    try rhs.append(gpa, exact.combinedBound(l, u));
 }
 
-/// The coefficient in column `j` of the row that pairs `lower` with `upper`.
+/// True when every coefficient of a row is the exact zero interval.
 ///
-/// This is the branch logic of `appendCombined`, lifted out so that
-/// `System.derivesContradiction` can ask the same question about the same
-/// pair. It has to be the same question: a predicate that decided
-/// all-zero-ness by a different rule would be answering about a row the
-/// elimination never builds, and the difference would show up as a projection
-/// that claims solutions exist where none do.
-///
-/// A zero coefficient is structural, not numerical: the variable is simply
-/// absent from that row. A product with an exact zero factor is exactly zero,
-/// `x - 0` is `x`, and `-x` is `Interval.neg`, which is exact. So a variable
-/// that no row mentions stays exactly [0, 0] through the whole elimination
-/// instead of drifting.
-///
-/// Letting the general form run on a structural zero would hand it to the
-/// outward widening, which turns [0, 0] into a subnormal straddle. Every
-/// later elimination reads that straddle as a constraint from both sides and
-/// pairs rows that share no variable at all, and the row count compounds for
-/// nothing. It is a soundness question too: a coefficient that is exactly
-/// zero must be free of the variable, and a straddle does not say that.
-///
-/// The general branch reaches the same straddle by a different route, which
-/// is the one the three branches above cannot catch: cancellation. A derived
-/// row from `r0: x + y <= 1` paired with `r1: x + y >= 0` has an `x`
-/// coefficient of `1 * -1 - -1 * 1`, which is exactly zero, and both products
-/// have been widened by the time the subtraction sees them, so the widened
-/// difference straddles zero and a row that does not mention `x` at all is
-/// stored as one that bounds it from both sides by 3.0e15. The exactness test
-/// runs on the four operands, which are the only version of the question that
-/// has an exact answer; on the widened products it can only ever compare two
-/// approximations of a zero.
-inline fn combinedColumn(lower: Part, upper: Part, j: usize) Interval {
-    const lj = lower.row.coeffs[j];
-    const uj = upper.row.coeffs[j];
-    if (isExactZero(lj) and isExactZero(uj)) return zero;
-    if (isExactZero(lj)) return lower.coeff.mul(uj).neg();
-    if (isExactZero(uj)) return upper.coeff.mul(lj);
-    if (cancelsExactly(upper.coeff, lj, lower.coeff, uj)) return zero;
-    return upper.coeff.mul(lj).sub(lower.coeff.mul(uj));
-}
-
-/// One interval in `f128`: the pair of endpoints `Interval` would carry if
-/// its arithmetic were exact and it applied no outward step. It never is,
-/// which is why nothing here is stored in one - this is a decision's
-/// intermediate, not an answer.
-const Exact = struct {
-    lo: f128,
-    hi: f128,
-};
-
-/// Do `u * a` and `l * b` cancel, so that the coefficient they form is zero
-/// for EVERY realisation of the four operands?
-///
-/// THE PROPERTY, AND WHAT IS NOT BEING ASKED. This asks whether the two exact
-/// product intervals are the same interval. When they are, every realisation
-/// of `u`, `a`, `l` and `b` yields the same coefficient, zero, so the derived
-/// row genuinely does not mention the variable - the invariant
-/// `combinedColumn`'s doc claims and the one `isExactZero` reads back. What it
-/// does NOT ask is whether the difference is small. A coefficient of 1e-300
-/// is a coefficient: writing it as [0, 0] discards a real constraint on the
-/// variable, and no tolerance appears anywhere in this function, so two
-/// products that differ by one ULP fail the test and fall through to the
-/// widened path, which is where every nonzero coefficient belongs.
-///
-/// WHY IT CANNOT NARROW A NONZERO RESULT. Nothing on this path is rounded,
-/// and that is a property of the arithmetic rather than a hope about the
-/// operands. Widening an `f64` endpoint to `f128` is exact; a product of two
-/// doubles is exact at 106 significand bits against the 113 the type carries
-/// (`tests/soundness_test.zig:11-18`); and the verdict is an EQUALITY between
-/// two such products rather than a subtraction of them, so no sum is ever
-/// evaluated that would want the extra bits a sum wants. The products cannot
-/// overflow either: the largest product of two doubles is about 3.3e616
-/// against an `f128` range that reaches 1.2e4932. Nor can one underflow
-/// towards a zero: every double is an integer multiple of 2^-1074, so every
-/// product is an integer multiple of 2^-2148, which is an ordinary normal
-/// `f128`. So `p.lo == q.hi` is a claim about the mathematics and not about a
-/// rounding of it, and two products that differ cannot be reported as equal.
-/// Where the two intervals differ this function declines and the widened
-/// path answers, exactly as it answered before; the only answer it ever
-/// replaces is one it can prove to be the exact zero.
-///
-/// THE ONE CASE IT DECLINES. An infinite endpoint makes a corner `0 * inf`,
-/// which IEEE makes a NaN, and a single NaN poisons the reduction that picks
-/// the endpoints. The exact image of a zero interval against an unbounded one
-/// is the zero interval, but recovering that from the corners is a special
-/// case worth nothing on this path, so those operands go to the widened path
-/// unchanged. Nothing is unproven there: it is the answer this function has
-/// always given.
-///
-/// WHERE THE COST USED TO GO, AND WHY IT IS NOT HERE ANY MORE. This is the
-/// innermost predicate of the pairing loop: `combinedColumn` asks it once
-/// per column of every pair of rows, and on both generators the answer to
-/// almost every one of those questions is no. The form this replaces reached
-/// for `f128` to find that out, and an `f128` multiply on x86-64 is a
-/// soft-float call, so a predicate that declines nearly always was paying
-/// eight of them to do it. Two filters now sit in front of the exact
-/// arithmetic, and both are consequences of the mathematics rather than
-/// approximations of it.
-///
-/// THE FIRST IS STRUCTURAL. `exactProduct` returns a minimum of the four
-/// corners as `lo` and a maximum of the same corners as `hi`, so `p.lo` is
-/// never above `p.hi` whatever the operands are. That makes the old verdict
-/// `p.lo == q.hi and p.hi == q.lo` a chain that closes on itself:
-///
-///     p.lo = q.hi <= q.lo = p.hi <= p.lo
-///
-/// and every link is an identity. Both products are therefore points, and a
-/// product of two intervals is a point only if one of them is. Suppose
-/// neither `u` nor `a` is a point: then `a.lo != a.hi`, so `u.lo * a.lo` and
-/// `u.lo * a.hi` differ unless `u.lo == 0`; and if `u.lo == 0` then
-/// `u.lo != u.hi` forces `u.hi != 0`, and `u.hi * a.lo`, `u.hi * a.hi` differ
-/// instead. Either way one pair of corners straddles and the hull is wide,
-/// so the old test could not have been true. Hence the guard below, and its
-/// mirror for `l` and `b`.
-///
-/// Nothing the old form accepted is refused here: an unsound "no" would
-/// have to be a pair of corner hulls that collapsed and did not, and the
-/// paragraph above is the proof that none exists. It is the shape of the
-/// question, not a tolerance on the operands, and no real coefficient
-/// anywhere near zero is turned away by it.
-///
-/// THE SECOND IS ROUNDING. Among the survivors the corners are still built
-/// in `f128`, but first they are built in `f64` and compared there. That is
-/// sound because rounding to nearest is monotone: `x <= y` implies
-/// `r(x) <= r(y)`, so the minimum of the rounded corners is the rounding of
-/// the minimum, and two hulls that coincide exactly cannot differ after
-/// rounding. Inequality of the rounded hulls therefore proves inequality of
-/// the exact ones, and only hulls that already agree in `f64` are worth the
-/// soft-float call. `doubleProduct` is never stored and is not an enclosure;
-/// its only use is this comparison, and it is the only claim made about it.
-inline fn cancelsExactly(u: Interval, a: Interval, l: Interval, b: Interval) bool {
-    if (!isPoint(u) and !isPoint(a)) return false;
-    if (!isPoint(l) and !isPoint(b)) return false;
-    if (!allFinite(u) or !allFinite(a) or !allFinite(l) or !allFinite(b)) return false;
-    const fp = doubleProduct(u, a);
-    const fq = doubleProduct(l, b);
-    if (fp.lo != fq.hi or fp.hi != fq.lo) return false;
-    const p = exactProduct(u, a);
-    const q = exactProduct(l, b);
-    return p.lo == q.hi and p.hi == q.lo;
-}
-
-/// The same four corners as `exactProduct`, rounded to the nearest double.
-///
-/// NOT AN ENCLOSURE. Rounding each corner independently pulls the hull
-/// inwards at both ends, so this is NARROWER than the exact image it is built
-/// from, and nothing may be stored in it or read a bound off it. It is a
-/// decision's intermediate, like `Exact`, and it exists only to be compared
-/// against the same construction on the other pair of operands; see
-/// `cancelsExactly` for the monotonicity argument that makes that comparison
-/// a sound filter rather than a guess.
-inline fn doubleProduct(a: Interval, b: Interval) Interval {
-    const p: f64 = a.lo * b.lo;
-    const q: f64 = a.lo * b.hi;
-    const r: f64 = a.hi * b.lo;
-    const s: f64 = a.hi * b.hi;
-    return .{
-        .lo = @min(@min(p, q), @min(r, s)),
-        .hi = @max(@max(p, q), @max(r, s)),
-    };
-}
-
-/// The exact image of `[a.lo, a.hi] * [b.lo, b.hi]`, as an `f128` interval.
-///
-/// The product of two intervals is the hull of the four corners, and every
-/// corner of a rectangle over the reals is attained, so the two endpoints are
-/// a min and a max of the four products. None of that is widened, because each
-/// corner is exact (`cancelsExactly` carries the bit count). The caller must
-/// have rejected an infinite endpoint: `0 * inf` is a NaN corner and a NaN
-/// loses the reduction.
-fn exactProduct(a: Interval, b: Interval) Exact {
-    const p: f128 = @as(f128, a.lo) * @as(f128, b.lo);
-    const q: f128 = @as(f128, a.lo) * @as(f128, b.hi);
-    const r: f128 = @as(f128, a.hi) * @as(f128, b.lo);
-    const s: f128 = @as(f128, a.hi) * @as(f128, b.hi);
-    return .{
-        .lo = @min(@min(p, q), @min(r, s)),
-        .hi = @max(@max(p, q), @max(r, s)),
-    };
-}
-
-/// True when neither endpoint is an infinity or a NaN, which is the
-/// precondition `exactProduct` needs to keep a corner from being a NaN.
-fn allFinite(v: Interval) bool {
-    return std.math.isFinite(v.lo) and std.math.isFinite(v.hi);
-}
-
-/// The right-hand side of the row that pairs `lower` with `upper`: the same
-/// expression `appendCombined` stores, lifted out for the same reason.
-inline fn combinedBound(lower: Part, upper: Part) Interval {
-    return upper.coeff.mul(lower.row.rhs)
-        .sub(lower.coeff.mul(upper.row.rhs));
-}
-
-/// The divisor one side of a bound is read off with: the multiplier piece
-/// itself where that piece does not reach zero, and its endpoint farthest
-/// from zero as a point where it does.
-///
-/// `Interval.div` answers a divisor that reaches zero with the whole line,
-/// which is not a bound in either direction, so a piece that touches zero
-/// has to go in as a single endpoint. FAR is the right endpoint because the
-/// row must hold for EVERY realisation of the coefficient: `x_k` has one
-/// sign, and the coefficient sitting on the other side of it is the one
-/// that makes `a * x_k` largest.
-///
-/// This is the same one-sided reading `eliminate` performs, asked of the
-/// same object. `eliminate` needs only the SIGN of a multiplier, and a
-/// piece that touches zero still has one, so it multiplies by the piece
-/// whole. The guards an earlier form of this arm used - `neg_part.hi < 0`
-/// and `pos_part.lo > 0` - were not merely narrow, they were
-/// unsatisfiable: a piece that reaches zero has `lo <= 0 <= hi`, so
-/// `min(hi, 0) < 0` and `max(lo, 0) > 0` can both never hold, and that arm
-/// contributed nothing whatsoever. One round of elimination with an
-/// uncertain coefficient is enough to put a zero-touching endpoint in
-/// almost every derived coefficient, so almost every bounded variable read
-/// as unbounded.
-fn boundDivisor(part: Part) Interval {
-    if (part.coeff.lo != 0 and part.coeff.hi != 0) return part.coeff;
-    const far = if (@abs(part.coeff.lo) >= @abs(part.coeff.hi))
-        part.coeff.lo
-    else
-        part.coeff.hi;
-    return Interval.init(far, far);
-}
-
-/// True only for the exact zero interval, not for a widening artefact that
-/// happens to be small.
-fn isExactZero(a: Interval) bool {
-    return a.lo == 0 and a.hi == 0;
-}
-
-/// True when `row` is the exact [0, 0] in every column except `k`: the
-/// shape a final round of elimination leaves behind, a row that mentions
-/// `x_k` and nothing else. Asked once per side list, so a coefficient that
-/// reaches zero has it computed twice. That is one extra pass over the
-/// columns and it buys the shared buckets.
-fn isFlatApartFrom(coeffs: []const Interval, k: usize) bool {
-    for (coeffs, 0..) |a, j| {
-        if (j == k) continue;
-        if (!isExactZero(a)) return false;
-    }
-    return true;
-}
-
-/// True when the interval names a single real, `lo == hi`.
-///
-/// Not the same question as `isExactZero`, which asks whether that one real
-/// is zero. `cancelsExactly` needs this one because a product hull is a point
-/// only when a factor collapses, and a factor collapses at any value, not at
-/// zero. It is two comparisons, and it is the first thing the pairing loop
-/// asks, so it sits where the cheapest answer can end the question.
-inline fn isPoint(a: Interval) bool {
-    return a.lo == a.hi;
-}
-
+/// The one predicate left in this file that reads nothing but coefficients:
+/// it is a whole-row scan rather than part of the pairing arithmetic, and it
+/// has no multiplier, so `lp_exact` has nothing to take from it. The test it
+/// rests on is that module's `isExactZero`, not a second copy of it - a
+/// rounding-thin straddle is a variable the row still mentions, and reading
+/// it as an absent one is how a derived row comes to look like a
+/// contradiction when it is not.
 fn isAllZero(coeffs: []const Interval) bool {
     for (coeffs) |a| {
-        if (!isExactZero(a)) return false;
+        if (!exact.isExactZero(a)) return false;
     }
     return true;
 }

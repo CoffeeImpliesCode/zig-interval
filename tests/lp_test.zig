@@ -1230,3 +1230,59 @@ test "the row-budget count reads a poisoned coefficient the same way" {
     try std.testing.expectEqual(clean_part.rowsProduced(), part.rowsProduced());
     try std.testing.expectEqual(try clean.rowsAfterEliminating(0), try sys.rowsAfterEliminating(0));
 }
+
+test "box: the shared walk answers exactly what a private sweep per variable answers" {
+    // O2 replaced `m` private sweeps with one shared elimination walk, on the
+    // argument that every elimination step is a sound over-approximation, so a
+    // projection read off a shared prefix is AT LEAST AS VALID as one from a
+    // private copy. That word "least" is the sound half and it does not give
+    // tightness. This is the tightness half.
+    //
+    // The old form is two lines and is exactly what `box` used to do, so
+    // comparing against it compares against the real thing rather than against
+    // a restatement of it. Bit-identity is what the walk actually achieves,
+    // because it runs the same elimination ORDER; the containment assertions
+    // are kept as well, so the test would still hold — the looser one — if a
+    // future change to the order made every projection merely wider.
+    const Case = struct { n: usize, rows: []const []const f64, rhs: []const f64 };
+    const cases = [_]Case{
+        .{ .n = 2, .rows = &.{ &.{ 1, 1 }, &.{ 1, -1 }, &.{ -1, 1 }, &.{ -1, -1 } }, .rhs = &.{ 3, 2, 2, 1 } },
+        .{ .n = 3, .rows = &.{ &.{ 1, 1, 1 }, &.{ -1, -1, 0 }, &.{ 0, 1, -1 }, &.{ 1, -1, 1 }, &.{ -1, 1, 1 } }, .rhs = &.{ 6, 1, 1, 4, 4 } },
+        .{ .n = 4, .rows = &.{ &.{ 1, 1, 0, 0 }, &.{ 0, -1, 1, 0 }, &.{ 0, 0, -1, 1 }, &.{ 1, 0, 0, -1 }, &.{ -1, -1, -1, 1 } }, .rhs = &.{ 2, 1, 1, 3, 2 } },
+    };
+
+    for (cases) |case| {
+        var sys = try lp.System.init(gpa, case.n);
+        defer sys.deinit();
+        for (case.rows, case.rhs) |r, b| try addPoints(&sys, r, b);
+
+        // The old form, written out: one private sweep per variable.
+        const old = try gpa.alloc(Interval, case.n);
+        defer gpa.free(old);
+        var old_ok = true;
+        for (0..case.n) |k| {
+            old[k] = (try sys.bounds(k)) orelse {
+                old_ok = false;
+                break;
+            };
+        }
+
+        const walked = try sys.box();
+        defer if (walked) |w| gpa.free(w);
+
+        if (!old_ok) {
+            // `box` must agree that there is nothing to return, not merely that
+            // it happened to. This is the null contract.
+            try std.testing.expect(walked == null);
+            continue;
+        }
+        try std.testing.expect(walked != null);
+        for (0..case.n) |k| {
+            const got = walked.?[k];
+            try std.testing.expect(got.lo <= old[k].lo);
+            try std.testing.expect(got.hi >= old[k].hi);
+            try std.testing.expectEqual(old[k].lo, got.lo);
+            try std.testing.expectEqual(old[k].hi, got.hi);
+        }
+    }
+}

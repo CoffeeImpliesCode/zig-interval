@@ -12,11 +12,18 @@
  *   * The ternary return is 0 for exact, +1 for inexact-rounded-UP and -1 for
  *     inexact-rounded-DOWN. -1 is NOT "not a number". Guarding on `>= 0` reads
  *     every inexact result as a failure.
- *   * In MPFR 4.x the enum is RNDN=0 RNDZ=1 RNDU=2 RNDD=3 - RNDU and RNDD are
- *     SWAPPED relative to MPFR 3.x.
- *   * mpfr_get_d takes (srcptr, rnd). The `d` default parameter was removed in
- *     MPFR 4, and passing the old three-argument form silently reads the wrong
- *     register for the rounding mode.
+ *   * The rounding modes are an ENUM with the values RNDN=0 RNDZ=1 RNDU=2
+ *     RNDD=3, and that numbering is IDENTICAL in MPFR 3.1.6 and 4.2.1 - MPFR 4
+ *     did not renumber it. Use the named constants, and read the numbers out of
+ *     the header being compiled against: hardcoding 2 and 3 on the belief that
+ *     "4.x swapped them" is how the next version of this file breaks. Swapped
+ *     for real, they invert every bracket, which at least fails loudly.
+ *   * mpfr_get_d takes (srcptr, rnd) - exactly two arguments, in every release
+ *     from 3.1.6 to 4.2.1. There is no `d` parameter and there never was one.
+ *     The hazard is that MPFR 3 declares it through _MPFR_PROTO, which expands
+ *     to an unprototyped `()` for a K&R compiler, so a third argument is taken
+ *     without a diagnostic; on x86-64 it lands in %rdx while the rounding mode
+ *     is read from %esi.
  *
  * Evaluating the two directions SEPARATELY is not belt and braces. Evaluating
  * once and rounding the result to f64 rounds TWICE, and the second rounding is
@@ -26,17 +33,17 @@
  * oracle's own header warns about.
  *
  * Written in C, against the real mpfr.h, rather than through a hand-rolled
- * ctypes binding. That is not stylistic: on this host MPFR 4.2.1's mpfr_get_d
- * did not honour its rounding-mode argument for any mode other than
- * round-to-nearest when reached from Python, and a corpus built on unverified
- * rounding directions is wrong invisibly - it either rejects correct answers,
- * or, if the brackets are widened to compensate, accepts answers it should not.
- * Compiling against the header removes the question entirely - and it turns
- * out the header was what the Python binding needed most. MPFR 4.x dropped
- * the `d` default parameter: `mpfr_get_d` takes (srcptr, rnd), not
- * (srcptr, d, rnd). The earlier binding passed three arguments to a
- * two-argument function, so the rounding mode was never read at all and the
- * "alternation" was a mis-called ABI rather than a broken library.
+ * ctypes binding. That is not stylistic: `mpfr_get_d` has taken exactly two
+ * arguments in every release from 3.1.6 to 4.2.1, and the earlier binding
+ * passed three. The third landed in a register the function never reads, so
+ * the rounding mode was whatever that register happened to hold - usually 0,
+ * which is precisely why round-to-nearest looked like it worked while every
+ * other mode looked broken, and why the fault was hunted in the library
+ * instead of at the call site. A corpus built that way is wrong invisibly: it
+ * either rejects correct answers, or, if the brackets are widened to
+ * compensate, accepts answers it should not. Compiling against the real
+ * header removes the question entirely - and it turns out the header was what
+ * the Python binding needed most.
  *
  * Build:  see scripts/build_mpfr.sh
  * Usage:  ./gen_corpus > tests/corpus/elementary.txt

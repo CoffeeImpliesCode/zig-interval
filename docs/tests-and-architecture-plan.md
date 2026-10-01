@@ -491,8 +491,13 @@ from source to get one.
 Two more of the same kind, all found only because the corpus was verified
 against an independent source rather than assumed correct:
 
-- **The enum is reordered in MPFR 4.** `RNDN=0 RNDZ=1 RNDU=2 RNDD=3` — RNDU and
-  RNDD are swapped relative to MPFR 3.x.
+- **The rounding modes are an enum whose values did NOT change.** An earlier
+  draft of this entry claimed MPFR 4 swapped RNDU and RNDD relative to 3.x. It
+  did not: both headers read `RNDN=0 RNDZ=1 RNDU=2 RNDD=3 RNDA=4`, checked
+  against `mpfr-3.1.6/src/mpfr.h` and the 4.2.1 header directly. The claim was
+  inferred rather than measured, and the code was never affected because it
+  uses the named constants — but a wrong explanation in a record is still a
+  wrong record. Read the numbers out of the header being compiled against.
 - **The ternary is not a NaN flag.** It is `0` exact, `+1` inexact-rounded-up,
   `-1` inexact-rounded-**down**. An earlier version guarded with `t1 >= 0`, which
   reads every inexact result as a failure and silently kept only the exact rows:
@@ -1350,6 +1355,77 @@ stop compiling**. Second, the block's own tests run without constructing a
 **Ranked last deliberately.** It is the largest diff of the ten and the one with
 the least defect risk behind it. The renames of section 5 should ride along with
 it, not land alone.
+
+### A11 — OPEN: the guard in `boundDivisor` is an endpoint test, and its doc is a containment test
+
+**Open, and nothing was changed.** This is a record of a question, not a
+defect report: the tree is green and stays green, and the test that found the
+gap was corrected to describe the code, not the code to describe the test.
+
+**What the guard does.** `boundDivisor` (`src/lp_exact.zig:295-302`) hands the
+multiplier piece back whole when `coeff.lo != 0 and coeff.hi != 0`, and
+otherwise hands back the endpoint of larger magnitude as a point. The first
+test is about **endpoints**: neither of them is zero. It is not a test about
+the piece **containing** zero, which is `lo <= 0 <= hi` and is the question
+`Interval.signOf` branches on (`src/interval.zig:799-804`). The two come
+apart on exactly one shape — a piece that straddles zero and has no zero
+endpoint, `[-1, 1]` — and on that shape the function returns the piece whole.
+
+**What the doc above it intends.** The comment says the divisor is "the
+multiplier piece itself where that piece does not reach zero, and its
+endpoint farthest from zero as a point where it does", and the next paragraph
+argues from the one-sided reading `eliminate` performs: a piece that touches
+zero still has a sign, so it multiplies by the piece whole. Both "reaches
+zero" and "touches zero" read as containment in that text, and on that
+reading the sentence describes a guard the code does not have.
+
+**The tree already draws the line the guard does not.** `Interval.div`
+branches on containment, `other.lo <= 0.0 and 0.0 <= other.hi`
+(`src/interval.zig:894`), and the soundness reference calls the two cases by
+name: a divisor that REACHES zero from one side, whose true quotient set is
+one ray with a finite end, and a divisor with zero in its INTERIOR, whose
+hull is the whole line (`tests/soundness_shared.zig:1372-1383`). So the
+division and the divisor already answer different questions about the same
+piece: `div` treats `[-1, 1]` as zero-reaching, and `boundDivisor` does not.
+
+**Whether the two agree.** On every piece the SOLVER builds, yes. In general,
+no. `partitionInto` (`src/lp.zig:583-601`) files a straddling coefficient as
+`[a.lo, 0]` in the lower bucket and `[0, a.hi]` in the upper, and
+`BoundReader` (`src/lp.zig:360-370`) is the only caller and calls the
+function only for a piece whose `lo` is below zero or whose `hi` is above
+zero. Every piece that therefore reaches the guard is one-sided outright, or
+one-sided and touching zero at one endpoint, and on those two shapes the
+endpoint test and the containment test are the same question. The magnitude
+comparison in the second branch is a tie on `[0, 0]` alone, and there both
+candidates are zero, so the tie decides nothing observable.
+
+**What is NOT known.** Whether the contract should be the doc's containment
+reading. The answer is not "the tighter one wins", which is why this is
+recorded rather than fixed. `Interval.div` (`src/interval.zig:889-896`)
+answers a `.zero` or `.straddle` divisor with the whole line, so a straddling
+piece yields no bound at all, while the doc's reading would hand `bounds` the
+far endpoint `-1` as a point and a real quotient. That is tighter, and the
+argument for it is ONE-SIDED — the far endpoint is the one that makes
+`a * x_k` largest because `x_k` has one sign — so it does not carry to a
+piece with no fixed sign. Settling it needs a proof written for the
+straddling case. The shape is unreachable from `bounds` and `box`
+(`src/lp.zig:802-818`), so tightening the guard to match the doc would change
+no solver answer today: it is a change to the module's contract, for the sake
+of a future caller that does not come through `partitionInto`.
+
+**Acceptance, when it is decided.** Either the doc comment above
+`boundDivisor` is corrected down to "neither endpoint is zero", and the test
+as rewritten stands; or the guard becomes `lo > 0 or hi < 0` — the complement
+of containment — the straddling case is proved sound against `Interval.div`,
+and the test's straddling expectation changes with it. Decidable either way.
+Not this pass.
+
+**How it was found.** By `tests/lp_exact_test.zig`, which is A10's test and
+pins the extracted block without building a `System`, and not by an audit.
+Its draft of this test asserted the doc's reading and failed on the
+straddling case: expected `pt(-1.0)`, got `[-1, 1]`. The body is
+**pre-existing**: `HEAD:src/lp.zig:1278-1285` carries the identical guard,
+so the extraction moved it verbatim and did not introduce it.
 
 ---
 
