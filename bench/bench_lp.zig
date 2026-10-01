@@ -217,7 +217,7 @@ fn mixedRhs(seed: u32, r: usize) Interval {
 
 /// `rows` rows over `var_count` variables with the mixed distribution above.
 fn buildMixed(seed: u32, var_count: usize, rows: usize) !System {
-    var sys = System.init(gpa, var_count);
+    var sys = try System.init(gpa, var_count);
     errdefer sys.deinit();
     const scratch = try gpa.alloc(Interval, var_count);
     defer gpa.free(scratch);
@@ -245,7 +245,7 @@ fn straddling(seed: u32, r: usize, j: usize) Interval {
 }
 
 fn buildStraddling(seed: u32, var_count: usize, rows: usize) !System {
-    var sys = System.init(gpa, var_count);
+    var sys = try System.init(gpa, var_count);
     errdefer sys.deinit();
     const scratch = try gpa.alloc(Interval, var_count);
     defer gpa.free(scratch);
@@ -272,7 +272,7 @@ fn buildStraddling(seed: u32, var_count: usize, rows: usize) !System {
 /// zero, which silently caps the row count and hides the very blowup this
 /// benchmark exists to show.
 fn buildHeuristic(var_count: usize, pairs: usize) !System {
-    var sys = System.init(gpa, var_count);
+    var sys = try System.init(gpa, var_count);
     errdefer sys.deinit();
     const cheap = var_count - 1;
     const scratch = try gpa.alloc(Interval, var_count);

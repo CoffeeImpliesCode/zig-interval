@@ -1013,7 +1013,7 @@ for feeding an interval-arithmetic computation that must stay sound.
 | Type | Meaning |
 | --- | --- |
 | `Cmp` | The comparison in a linear inequality: `enum { le, lt, ge, gt, eq }`. |
-| `Lin` | One linear inequality: `struct { coeffs: []Interval, op: Cmp, rhs: Interval }` — `sum(coeffs[i] * x_i) op rhs`. |
+| `Lin` | One stored inequality, always `<=`: `struct { coeffs: []const Interval, rhs: Interval }` — `sum(coeffs[i] * x_i) <= rhs`. **`coeffs` is `const`**, so a row from `at` is a view and writing through it does not compile. There is no comparison field, because every stored row is `<=` and nothing on one could say otherwise. |
 | `System` | A mutable collection of `Lin` plus the variable count. |
 
 A coefficient is **universal** and a right-hand side is **existential**. A row
@@ -1032,7 +1032,9 @@ into the system's own storage. They are invalidated by the next `add` or
 
 Every row is **normalised to `<=` on insertion**: `eq` splits into a `<=` and a
 `>=`, and `ge`/`gt` are multiplied through by `-1` and stored as `<=` too. So
-`(try sys.at(i)).op` is always `.le`, and an `eq` you add shows up as two rows.
+`Lin` carries no comparison field to read: a row is `<=` because that is the
+only shape there is, not because a field says so. An `eq` you add shows up as
+two rows.
 
 Strict comparisons are additionally **relaxed** on the way in, because
 strictness is not representable in a closed interval: `gt` becomes `ge` and
@@ -1044,12 +1046,12 @@ strictly bounded has its bound widen, never tighten.
 
 | Method | Semantics |
 | --- | --- |
-| `init(gpa, var_count: usize) System` | An empty system over `var_count` variables. |
+| `init(gpa, var_count: usize) !System` | An empty system over `var_count` variables. Allocating the liveness flags is the one fallible step in building a system, and it is reported as `error.OutOfMemory` like every other allocation rather than panicked. |
 | `deinit(self: *System) void` | Free everything. |
 | `varCount(self) usize` | The number of variables, fixed at `init`. |
 | `count(self) usize` | The number of rows currently stored. |
 | `add(self, coeffs: []const Interval, op: Cmp, rhs: Interval) !void` | Insert a constraint, copying `coeffs`. `coeffs.len` must equal `varCount()`, else `error.BadVariableCount`. An `eq` inserts two rows. |
-| `at(self, i: usize) !Lin` | Row `i`, borrowed. `error.BadRow` for an index at or above `count()`. |
+| `at(self, i: usize) !Lin` | Row `i`, borrowed and **read-only**: `error.BadRow` for an index at or above `count()`, and `row.coeffs` is a `[]const` so a write through the view is a compile error rather than a silent edit of the solver's own storage. |
 | `isUnsat(self) bool` | True once the system holds a derived row with an all-zero coefficient vector and a strictly negative right-hand side. Only an `eliminate` derives one, so this is `false` on a system that merely holds conflicting rows. |
 | `eliminate(self, k: usize) !void` | Eliminate variable `k` exactly. `error.BadVariable` for an out-of-range index, `error.VariableEliminated` for one already gone. |
 | `eliminateAll(self, count_out: *bool) !void` | Eliminate every variable in turn. Writes `false` into `*count_out` and returns early if it proves the system unsatisfiable. |
@@ -1110,7 +1112,7 @@ const interval = @import("interval");
 const lp = interval.lp;
 
 pub fn main() !void {
-    var sys = lp.System.init(std.heap.page_allocator, 2);
+    var sys = try lp.System.init(std.heap.page_allocator, 2);
     defer sys.deinit();
 
     // x + y <= 10
@@ -1161,7 +1163,7 @@ const interval = @import("interval");
 const lp = interval.lp;
 
 pub fn main() !void {
-    var sys = lp.System.init(std.heap.page_allocator, 1);
+    var sys = try lp.System.init(std.heap.page_allocator, 1);
     defer sys.deinit();
 
     // x <= 1

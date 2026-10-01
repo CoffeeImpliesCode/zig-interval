@@ -798,7 +798,7 @@ fn readmeEliminateAll() !void {
 
     // Two rows over two variables: x + y <= 10 and -x - y <= -4, so x + y is
     // pinned to a range rather than to a point and the system is satisfiable.
-    var sys = lp.System.init(std.heap.page_allocator, 2);
+    var sys = try lp.System.init(std.heap.page_allocator, 2);
     defer sys.deinit();
     try sys.add(
         &.{ Interval.init(1, 1), Interval.init(1, 1) },
@@ -847,7 +847,7 @@ fn readmeEliminateAll() !void {
 fn readmeFourierMotzkinWorkedExample() !void {
     const lp = interval.lp;
 
-    var sys = lp.System.init(std.heap.page_allocator, 2);
+    var sys = try lp.System.init(std.heap.page_allocator, 2);
     defer sys.deinit();
 
     // x + y <= 10
@@ -890,7 +890,7 @@ fn readmeUnsatisfiable() !void {
     const lp = interval.lp;
 
     // --- README, "An unsatisfiable system" ---
-    var sys = lp.System.init(std.heap.page_allocator, 1);
+    var sys = try lp.System.init(std.heap.page_allocator, 1);
     defer sys.deinit();
 
     // x <= 1

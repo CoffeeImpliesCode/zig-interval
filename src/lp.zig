@@ -6,7 +6,10 @@
 //! outward can only enlarge the answer, never clip a real solution.
 //!
 //! Constraints are stored normalised. `a . x  <=  r` is the only internal
-//! shape, and `Lin.op` always reads back as `.le`:
+//! shape, so `Lin` carries no comparison field at all: there is nothing on a
+//! stored row for one to say. It used to carry one that always read back
+//! `.le`, which was a write door into the solver's own storage on which
+//! every value but one was a lie.
 //!
 //!   * `eq` is exactly the conjunction of `le` and `ge`, so it is stored as
 //!     two rows, `(a, .le, r)` and `(-a, .le, -r)`.
@@ -67,7 +70,16 @@ pub const Cmp = enum { le, lt, ge, gt, eq };
 ///
 /// `coeffs` has one entry per variable and points into the system's own
 /// storage: it is invalidated by the next `add` or `eliminate`, and freed by
-/// `deinit`. Every stored row has `op == .le`.
+/// `deinit`.
+///
+/// It is a `[]const` because the row is a VIEW. A caller who writes through
+/// it edits the solver's own coefficients in place, and that changes what
+/// `bounds`, `box` and `isUnsat` answer — silently, with nothing thrown and
+/// nothing logged. One assignment to a coefficient of a row from `at` was
+/// measured turning `bounds(0)` from a real interval into `null` while
+/// `isUnsat()` still said no: a solver that had proved a projection unbounded
+/// reported it as proven. There is no runtime guard for that here, because the
+/// type is the guard and the compiler is the one that raises it.
 ///
 /// A coefficient is UNIVERSAL and a right-hand side is EXISTENTIAL, and
 /// the difference decides what a projection may legitimately conclude. A
@@ -83,8 +95,7 @@ pub const Cmp = enum { le, lt, ge, gt, eq };
 /// makes a projection come back too small, and a system reported
 /// unsatisfiable that is not.
 pub const Lin = struct {
-    coeffs: []Interval,
-    op: Cmp,
+    coeffs: []const Interval,
     rhs: Interval,
 };
 
@@ -358,11 +369,16 @@ pub const System = struct {
     alive: []bool,
     unsat: bool,
 
-    /// Empty system over `var_count` variables. Allocating the liveness flags
-    /// can fail and this signature has no error to report it in, so it panics
-    /// on out of memory.
-    pub fn init(gpa: std.mem.Allocator, var_count: usize) System {
-        const flags = gpa.alloc(bool, var_count) catch @panic("lp.System.init: out of memory");
+    /// Empty system over `var_count` variables.
+    ///
+    /// Allocating the liveness flags is the one fallible step in building a
+    /// system, and it is reported like every other allocation in this file
+    /// rather than panicked. It used to be the only allocator call here that
+    /// could not fail visibly, which meant a program that wanted to handle
+    /// exhaustion instead of dying had no way to ask for that.
+    pub fn init(gpa: std.mem.Allocator, var_count: usize) !System {
+        const flags = try gpa.alloc(bool, var_count);
+        errdefer gpa.free(flags);
         @memset(flags, true);
         return .{
             .gpa = gpa,
@@ -399,12 +415,14 @@ pub const System = struct {
     /// check is not decoration: the slice below is built by arithmetic, so an
     /// unchecked `i` reads whatever the allocator left past the rows, and
     /// ReleaseFast elides the slicing assertion that would otherwise stop it.
+    ///
+    /// The view is `const`. Writing to `row.coeffs` does not compile, and
+    /// there is no `.op` to write to at all.
     pub fn at(self: System, i: usize) !Lin {
         if (i >= self.rhs.items.len) return error.BadRow;
         const start = i * self.var_count;
         return .{
             .coeffs = self.coeffs.items[start..][0..self.var_count],
-            .op = .le,
             .rhs = self.rhs.items[i],
         };
     }
@@ -919,7 +937,7 @@ pub const System = struct {
     /// Deep copy, including the allocator. `bounds` and `eliminationOrder`
     /// simulate eliminations and must not touch the caller's system.
     fn clone(self: System) !System {
-        var out = System.init(self.gpa, self.var_count);
+        var out = try System.init(self.gpa, self.var_count);
         errdefer out.deinit();
         try out.coeffs.appendSlice(self.gpa, self.coeffs.items);
         try out.rhs.appendSlice(self.gpa, self.rhs.items);

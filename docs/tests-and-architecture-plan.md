@@ -697,7 +697,44 @@ and most are a probe that must **stop compiling**. A2 and A4 are **done** and
 keep their letters because the other two documents cite them; each says what it
 bought and, where it applies, what it did not.
 
-### A1 — `Lin.coeffs` becomes `[]const Interval`, and `Lin.op` is deleted
+### A1 — DONE: `Lin.coeffs` is `[]const Interval`, and `Lin.op` is deleted
+
+**Done.** Both write doors are closed at the type level, which is the only
+place they can be: `Lin` is now `struct { coeffs: []const Interval, rhs:
+Interval }`, and `at` hands out that view.
+
+**What it bought.** A caller who wrote through a row from `at` was editing the
+solver's own coefficient storage, and the measured consequence was `bounds(0)`
+going from a real interval to `null` while `isUnsat()` still said no — a
+solver that had proved a projection unbounded, reporting it as proven. That is
+now a compile error rather than a silent wrong answer. The `op` door was worse
+in kind and is gone entirely: it was `.le` in every row by construction, so a
+write to it changed nothing and read back as a lie.
+
+**The cutover was source-compatible in-tree, as this item predicted.** Every
+site that touched a row was a read, and the single test that asserted
+`.op == .le` now asserts the shape a row reads back with instead.
+
+**How the acceptance was checked, and what is permanent.** The two compile
+probes are in the tree at `probe/row_coeffs.zig` and `probe/row_op.zig`,
+deliberately outside `tests/**` so the house gate's `test-paths` glob cannot
+pick up a file that is supposed to fail. Both were compiled: the first fails
+with `cannot assign to constant` at the write, the second with
+`no field named 'op' in struct 'lp.Lin'`.
+
+A file that must not compile cannot belong to a build step, so the PERMANENT
+check is a type-level assertion in `tests/lp_test.zig`: `@hasField(lp.Lin,
+"op")` is false, and a `comptime` block fails the build if `Lin.coeffs` stops
+being exactly `[]const Interval`. It was mutation-verified — relaxing the field
+back to `[]Interval` fails the build with its own message — which is what
+stops a probe from quietly starting to compile again.
+
+**What automatic compile-failure wiring would take, and where it belongs.**
+Running those probes from the build needs a step that compiles each and
+inverts its exit status. That is the machinery `T8` is about, and it belongs
+there rather than being built twice.
+
+**What it was.**
 
 `src/lp.zig:76-80`, read by `at` at `:177`. Two live write doors into the
 solver's own storage, and both change its answers **silently**.
@@ -888,7 +925,29 @@ rename compiles across the tree. Second, a named test asserts
 `rowCount() == 4` for three constraints of which exactly one is `.eq`, so the
 distinction is pinned rather than merely renamed away.
 
-### A7 — `System.init` returns an error union instead of panicking
+### A7 — DONE: `System.init` returns an error union instead of panicking
+
+**Done.** `init` is `!System`, the allocation is `try`n with an `errdefer` that
+frees the flags if anything after it fails, and every caller in the tree uses
+`try`: the README's two worked examples, the fixture, `clone`, the three
+benchmark builders, and 35 sites in `tests/lp_test.zig`.
+
+**What it bought.** A caller in a program that wanted to *handle* exhaustion
+rather than die can now ask for that. Before this, `init` was the one allocator
+call in the file that could not fail visibly, and the panic made the decision
+for the caller.
+
+**The probe is a permanent test, not a throwaway.** The acceptance named a probe
+built against a failing allocator; `tests/lp_test.zig` now carries it, because
+`std.testing.FailingAllocator` makes it a two-line test rather than a program.
+It sets `fail_index = 0` and asserts `error.OutOfMemory`, and then — the half
+that matters — builds the same allocator with nothing failing and checks the
+system it returns actually works. A probe that only proved the failure would
+pass against an `init` that could never succeed at all.
+
+**Acceptance. MET.**
+
+**What it was.**
 
 `src/lp.zig:139-141` is the only allocator call in the file that cannot report
 failure; every other one propagates. It panics with a message, which means a

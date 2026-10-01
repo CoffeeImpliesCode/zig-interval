@@ -79,8 +79,8 @@ fn yExists(rows: []const Exact, x: f128) bool {
     return lo <= hi;
 }
 
-test "normalisation: eq splits in two, ge flips, at() always reports le" {
-    var sys = lp.System.init(gpa, 2);
+test "normalisation: eq splits in two, ge flips, and every stored row is <= by construction" {
+    var sys = try lp.System.init(gpa, 2);
     defer sys.deinit();
 
     const c = [_]Interval{ pt(1), pt(2) };
@@ -90,8 +90,15 @@ test "normalisation: eq splits in two, ge flips, at() always reports le" {
 
     // One row for `le`, one for `ge`, two for the `eq` pair.
     try std.testing.expectEqual(@as(usize, 4), sys.count());
+
+    // There is no `.op` to read back. Every stored row is `<=` by
+    // construction, and the type now says so by not carrying the field at
+    // all; the old assertion here read `.le` off a field a caller could have
+    // written to anything else. What replaces it is that every row still
+    // reads back with the shape it was stored with, one coefficient per
+    // variable.
     for (0..sys.count()) |i| {
-        try std.testing.expectEqual(lp.Cmp.le, (try sys.at(i)).op);
+        try std.testing.expectEqual(sys.varCount(), (try sys.at(i)).coeffs.len);
     }
 
     // `x + 2y >= 1` is stored as `-x - 2y <= -1`.
@@ -109,8 +116,53 @@ test "normalisation: eq splits in two, ge flips, at() always reports le" {
     try std.testing.expectEqual(@as(f64, -3.0), eq_hi.rhs.lo);
 }
 
+test "Lin is a read-only view: coeffs is const, and there is no op field" {
+    // The permanent regression check for the two write doors A1 closed.
+    //
+    // `probe/row_coeffs.zig` and `probe/row_op.zig` are the compile-failure
+    // probes and belong to no build step, because a file that must not
+    // compile cannot be in one. These two assertions are what keep them true:
+    // relax either and a probe starts compiling again, which is exactly the
+    // regression worth catching.
+    //
+    // They are read from the type rather than by writing to a row, because a
+    // successful write cannot be written down inside a test that has to
+    // build.
+    try std.testing.expect(!@hasField(lp.Lin, "op"));
+
+    comptime {
+        const Coeffs = @TypeOf(@as(lp.Lin, undefined).coeffs);
+        if (Coeffs != []const Interval) {
+            @compileError("Lin.coeffs must be []const Interval. A mutable slice " ++
+                "re-opens the door A1 closed: writing through a row from at() " ++
+                "edits the solver's own storage and changes what bounds, box " ++
+                "and isUnsat answer, silently.");
+        }
+    }
+}
+
+test "init reports exhaustion instead of panicking" {
+    // The one allocator call in this file that used to be unable to fail
+    // visibly. Every other one propagates, and this one aborted, so a caller
+    // in a program that wanted to handle exhaustion had no way to ask for
+    // that; the panic decided it instead.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    failing.fail_index = 0;
+    try std.testing.expectError(error.OutOfMemory, lp.System.init(failing.allocator(), 1));
+
+    // And the same allocator with nothing failing still builds a working
+    // system, so the error above is the allocator refusing and not the shape
+    // of the call. A test that only proved the failure would pass against an
+    // `init` that could never succeed at all.
+    var ok = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var sys = try lp.System.init(ok.allocator(), 2);
+    defer sys.deinit();
+    try std.testing.expectEqual(@as(usize, 2), sys.varCount());
+    try std.testing.expectEqual(@as(usize, 0), sys.count());
+}
+
 test "at rejects a row index past the end of the system" {
-    var sys = lp.System.init(gpa, 2);
+    var sys = try lp.System.init(gpa, 2);
     defer sys.deinit();
     try sys.add(&[_]Interval{ pt(1), pt(0) }, .le, pt(1));
     try std.testing.expectEqual(@as(usize, 1), sys.count());
@@ -127,7 +179,7 @@ test "at rejects a row index past the end of the system" {
     try std.testing.expectError(error.BadRow, sys.at(std.math.maxInt(usize)));
 
     // An empty system has no row to return either.
-    var empty = lp.System.init(gpa, 1);
+    var empty = try lp.System.init(gpa, 1);
     defer empty.deinit();
     try std.testing.expectError(error.BadRow, empty.at(0));
 
@@ -143,7 +195,7 @@ test "lt and gt relax outward, never inward" {
     // outward: the answer must admit the two endpoints the strict system
     // excludes, because a tighter answer would cut the feasible set.
     const one = [_]Interval{pt(1)};
-    var strict = lp.System.init(gpa, 1);
+    var strict = try lp.System.init(gpa, 1);
     defer strict.deinit();
     try strict.add(&one, .lt, pt(3));
     try strict.add(&one, .gt, pt(1));
@@ -157,7 +209,7 @@ test "lt and gt relax outward, never inward" {
 
     // The same system written non-strict. Its true range is the closed
     // [1, 3], so the relaxed reading may not come back tighter than that.
-    var closed = lp.System.init(gpa, 1);
+    var closed = try lp.System.init(gpa, 1);
     defer closed.deinit();
     try closed.add(&one, .le, pt(3));
     try closed.add(&one, .ge, pt(1));
@@ -167,7 +219,7 @@ test "lt and gt relax outward, never inward" {
 }
 
 test "add rejects a coefficient vector of the wrong length" {
-    var sys = lp.System.init(gpa, 2);
+    var sys = try lp.System.init(gpa, 2);
     defer sys.deinit();
 
     const too_short = [_]Interval{pt(1)};
@@ -176,7 +228,7 @@ test "add rejects a coefficient vector of the wrong length" {
 }
 
 test "a bounded two-variable system projects its exact box" {
-    var sys = lp.System.init(gpa, 2);
+    var sys = try lp.System.init(gpa, 2);
     defer sys.deinit();
 
     // 2 <= x + y <= 10 and -1 <= x - y <= 3. With u = x + y and v = x - y
@@ -204,7 +256,7 @@ test "a bounded two-variable system projects its exact box" {
 }
 
 test "unsatisfiable by contradiction, reported through isUnsat" {
-    var sys = lp.System.init(gpa, 1);
+    var sys = try lp.System.init(gpa, 1);
     defer sys.deinit();
 
     // x <= 0 and x >= 1.
@@ -240,7 +292,7 @@ test "unsatisfiable by contradiction, reported through isUnsat" {
 }
 
 test "a system whose straddling row contradicts another one projects to nothing" {
-    var sys = lp.System.init(gpa, 2);
+    var sys = try lp.System.init(gpa, 2);
     defer sys.deinit();
 
     // Five rows, two of which say something about x and three about y:
@@ -275,7 +327,7 @@ test "a system whose straddling row contradicts another one projects to nothing"
     // Reading only the second row back, with the first one dropped, leaves an
     // ordinary satisfiable system with the same shape, so the null above
     // comes from the straddling row and not from the layout.
-    var fine = lp.System.init(gpa, 2);
+    var fine = try lp.System.init(gpa, 2);
     defer fine.deinit();
     try fine.add(&[_]Interval{ pt(1), pt(0) }, .le, pt(-3));
     try fine.add(&[_]Interval{ pt(-1), pt(0) }, .le, pt(5));
@@ -288,7 +340,7 @@ test "a system whose straddling row contradicts another one projects to nothing"
 }
 
 test "a variable pinned from both sides collapses to a point" {
-    var sys = lp.System.init(gpa, 1);
+    var sys = try lp.System.init(gpa, 1);
     defer sys.deinit();
 
     // x <= 3 and x >= 3.
@@ -307,7 +359,7 @@ test "a variable pinned from both sides collapses to a point" {
 }
 
 test "an unconstrained variable makes the whole box null" {
-    var sys = lp.System.init(gpa, 2);
+    var sys = try lp.System.init(gpa, 2);
     defer sys.deinit();
 
     // Only x is mentioned; y is free in both directions.
@@ -324,7 +376,7 @@ test "an unconstrained variable makes the whole box null" {
 }
 
 test "a coefficient interval straddling zero stays a sound superset" {
-    var sys = lp.System.init(gpa, 2);
+    var sys = try lp.System.init(gpa, 2);
     defer sys.deinit();
 
     // [-1, 1] * x + y <= 4, with x <= 5, 0 <= y <= 3 and x >= -1.
@@ -352,7 +404,7 @@ test "a coefficient interval straddling zero stays a sound superset" {
     // The same system with the straddling coefficient pinned to its largest
     // realisation, 1 * x + y <= 4. That is the tightest reading of the
     // interval, so its projection must sit inside the straddling one.
-    var tight = lp.System.init(gpa, 2);
+    var tight = try lp.System.init(gpa, 2);
     defer tight.deinit();
     try tight.add(&[_]Interval{ pt(1), pt(1) }, .le, pt(4));
     try tight.add(&[_]Interval{ pt(1), pt(0) }, .le, pt(5));
@@ -377,7 +429,7 @@ test "a coefficient interval straddling zero stays a sound superset" {
 }
 
 test "a coefficient that only reaches zero still bounds the variable" {
-    var sys = lp.System.init(gpa, 2);
+    var sys = try lp.System.init(gpa, 2);
     defer sys.deinit();
 
     // [-2, 2] * x + y <= 3 and [-2, 2] * x - y <= -1. Each row has to hold
@@ -444,7 +496,7 @@ test "a contradiction only the last round can see is still reported" {
     // negative: `0 <= -1` with nothing left to satisfy it. That is the
     // contradiction test, and the answer is null. Remove the round and this
     // system comes back as the interval above.
-    var sys = lp.System.init(gpa, 1);
+    var sys = try lp.System.init(gpa, 1);
     defer sys.deinit();
     try sys.add(&[_]Interval{Interval.init(0.0, 1.0)}, .le, pt(-1));
     try sys.add(&[_]Interval{pt(1)}, .le, pt(-1));
@@ -494,7 +546,7 @@ test "the same system one unit away is not a contradiction" {
     // feasible set, cutting it is the one failure this library has no answer
     // for, and the two tests are the pair that says the predicate has to be
     // right on both sides of the same boundary.
-    var sys = lp.System.init(gpa, 1);
+    var sys = try lp.System.init(gpa, 1);
     defer sys.deinit();
     try sys.add(&[_]Interval{Interval.init(0.0, 1.0)}, .le, pt(0));
     try sys.add(&[_]Interval{pt(1)}, .le, pt(-1));
@@ -544,7 +596,7 @@ test "a straddling system with a finite answer still hands that answer back" {
     // x >= 0 and y >= 0. The feasible set is then the triangle
     // x >= 0, y >= 0, x + y <= 1, and the true range of each variable is
     // [0, 1].
-    var sys = lp.System.init(gpa, 2);
+    var sys = try lp.System.init(gpa, 2);
     defer sys.deinit();
     try sys.add(&[_]Interval{ Interval.init(-1.0, 1.0), Interval.init(-1.0, 1.0) }, .le, pt(1));
     try sys.add(&[_]Interval{ Interval.init(-1.0, 0.0), Interval.init(-1.0, 0.0) }, .le, pt(0));
@@ -634,7 +686,7 @@ test "one unit of slack separates the empty system from the feasible one" {
     try std.testing.expect(!yExists(&dead_rows, 0));
     try std.testing.expect(!yExists(&dead_rows, 4));
 
-    var dead = lp.System.init(gpa, 2);
+    var dead = try lp.System.init(gpa, 2);
     defer dead.deinit();
     try dead.add(&[_]Interval{ Interval.init(0.0, 1.0), pt(0) }, .le, pt(-1));
     try dead.add(&[_]Interval{ pt(1), pt(0) }, .le, pt(-1));
@@ -665,7 +717,7 @@ test "one unit of slack separates the empty system from the feasible one" {
     try std.testing.expect(!yExists(&live_rows, -2));
     try std.testing.expect(!yExists(&live_rows, 0));
 
-    var live = lp.System.init(gpa, 2);
+    var live = try lp.System.init(gpa, 2);
     defer live.deinit();
     try live.add(&[_]Interval{ Interval.init(0.0, 1.0), pt(0) }, .le, pt(0));
     try live.add(&[_]Interval{ pt(1), pt(0) }, .le, pt(-1));
@@ -699,7 +751,7 @@ test "one unit of slack separates the empty system from the feasible one" {
 }
 
 test "an uncertain coefficient does not make a satisfiable system look empty" {
-    var sys = lp.System.init(gpa, 2);
+    var sys = try lp.System.init(gpa, 2);
     defer sys.deinit();
 
     // The four rows of the infeasibility report, unchanged:
@@ -740,7 +792,7 @@ test "an uncertain coefficient does not make a satisfiable system look empty" {
 }
 
 test "eliminationOrder is a permutation with no repeats" {
-    var sys = lp.System.init(gpa, 3);
+    var sys = try lp.System.init(gpa, 3);
     defer sys.deinit();
 
     try addPoints(&sys, &.{ 1, 1, 1 }, 12);
@@ -784,7 +836,7 @@ test "eliminationOrder is a permutation with no repeats" {
 }
 
 test "eliminate rejects a bad or already eliminated variable" {
-    var sys = lp.System.init(gpa, 2);
+    var sys = try lp.System.init(gpa, 2);
     defer sys.deinit();
 
     try addPoints(&sys, &.{ 1, 0 }, 2);
@@ -796,7 +848,7 @@ test "eliminate rejects a bad or already eliminated variable" {
 }
 
 test "a well-posed three-variable system projects [0, 6] in every slot" {
-    var sys = lp.System.init(gpa, 3);
+    var sys = try lp.System.init(gpa, 3);
     defer sys.deinit();
 
     // x + y + z in [0, 12], each variable at most the sum of the other two,
@@ -858,7 +910,7 @@ test "Tupper's order does measurably less work than the mirror order" {
     // to avoid, and it is what an arbitrary or reversed order amounts to.
     const worst = [_]usize{ 3, 1, 0, 2 };
 
-    var sys = lp.System.init(gpa, 4);
+    var sys = try lp.System.init(gpa, 4);
     defer sys.deinit();
     for (rows, rhs) |r, b| try addPoints(&sys, r, b);
     try std.testing.expectEqual(@as(usize, 5), sys.count());
@@ -870,7 +922,7 @@ test "Tupper's order does measurably less work than the mirror order" {
     try std.testing.expect(!std.mem.eql(usize, order, &worst));
 
     // Drive both orders by hand and record how many rows each step produced.
-    var good = lp.System.init(gpa, 4);
+    var good = try lp.System.init(gpa, 4);
     defer good.deinit();
     for (rows, rhs) |r, b| try addPoints(&good, r, b);
     var good_peak = good.count();
@@ -879,7 +931,7 @@ test "Tupper's order does measurably less work than the mirror order" {
         good_peak = @max(good_peak, good.count());
     }
 
-    var bad = lp.System.init(gpa, 4);
+    var bad = try lp.System.init(gpa, 4);
     defer bad.deinit();
     for (rows, rhs) |r, b| try addPoints(&bad, r, b);
     var bad_peak = bad.count();
@@ -903,7 +955,7 @@ test "Tupper's order does measurably less work than the mirror order" {
     try std.testing.expect(bad_peak >= 20);
 
     // And the shipped path agrees with the plan it advertises.
-    var chosen = lp.System.init(gpa, 4);
+    var chosen = try lp.System.init(gpa, 4);
     defer chosen.deinit();
     for (rows, rhs) |r, b| try addPoints(&chosen, r, b);
     try std.testing.expect(try chosen.eliminateInOrderOfChoice());
@@ -934,7 +986,7 @@ test "a cancelling pair of products is stored as the structural zero" {
     // of zero. `isExactZero` calls that a coefficient, the next round pairs
     // rows that share no variable, and `bounds` divides a right-hand side by
     // an endpoint of it.
-    var sys = lp.System.init(gpa, 2);
+    var sys = try lp.System.init(gpa, 2);
     defer sys.deinit();
     try sys.add(&[_]Interval{ pt(1), pt(1) }, .le, pt(1));
     try sys.add(&[_]Interval{ pt(1), pt(1) }, .ge, pt(0));
@@ -943,7 +995,7 @@ test "a cancelling pair of products is stored as the structural zero" {
 
     // The round is driven by hand because `bounds` runs it on a scratch copy,
     // and the row it reads there is not observable from outside it.
-    var drive = lp.System.init(gpa, 2);
+    var drive = try lp.System.init(gpa, 2);
     defer drive.deinit();
     try drive.add(&[_]Interval{ pt(1), pt(1) }, .le, pt(1));
     try drive.add(&[_]Interval{ pt(1), pt(1) }, .ge, pt(0));
@@ -1006,7 +1058,7 @@ test "a cancelled row that constrains nothing bounds nothing" {
     // landed on - `bounds` keeps the tightest lower bound and the tightest
     // upper bound - and 3.0e15 is not out of range, it is merely absurd, which
     // an enclosure has no test for.
-    var sys = lp.System.init(gpa, 2);
+    var sys = try lp.System.init(gpa, 2);
     defer sys.deinit();
     try sys.add(&[_]Interval{ pt(1), pt(1) }, .le, pt(1));
     try sys.add(&[_]Interval{ pt(1), pt(1) }, .ge, pt(0));
@@ -1016,7 +1068,7 @@ test "a cancelled row that constrains nothing bounds nothing" {
     // only all-zero row after the round, and the reader may take no bound from
     // it. One ULP either side of zero is not a structural zero and this count
     // was zero before the change.
-    var drive = lp.System.init(gpa, 2);
+    var drive = try lp.System.init(gpa, 2);
     defer drive.deinit();
     try drive.add(&[_]Interval{ pt(1), pt(1) }, .le, pt(1));
     try drive.add(&[_]Interval{ pt(1), pt(1) }, .ge, pt(0));
@@ -1054,7 +1106,7 @@ test "a poisoned coefficient enters one bucket whole and is never split" {
     };
 
     for (cases) |case| {
-        var sys = lp.System.init(gpa, 1);
+        var sys = try lp.System.init(gpa, 1);
         defer sys.deinit();
         try sys.add(&[_]Interval{case.coeff}, .le, pt(1));
 
@@ -1137,7 +1189,7 @@ test "the row-budget count reads a poisoned coefficient the same way" {
     // The straddle is what keeps the counts from being trivial: the side
     // lists are {poison, straddle} and {straddle, upper}, and the round emits
     // their cross product. Nothing is carried, so no row here is structural.
-    var sys = lp.System.init(gpa, 1);
+    var sys = try lp.System.init(gpa, 1);
     defer sys.deinit();
     try sys.add(&[_]Interval{.{ .lo = -5.0, .hi = std.math.nan(f64) }}, .le, pt(1));
     try sys.add(&[_]Interval{Interval.init(-1.0, 1.0)}, .le, pt(1));
@@ -1173,7 +1225,7 @@ test "the row-budget count reads a poisoned coefficient the same way" {
     // NaN is still in the multiplier - and the round cannot see the difference,
     // which is the point of routing a poison through ONE bucket rather than
     // two.
-    var clean = lp.System.init(gpa, 1);
+    var clean = try lp.System.init(gpa, 1);
     defer clean.deinit();
     try clean.add(&[_]Interval{Interval.init(-5.0, -5.0)}, .le, pt(1));
     try clean.add(&[_]Interval{Interval.init(-1.0, 1.0)}, .le, pt(1));
