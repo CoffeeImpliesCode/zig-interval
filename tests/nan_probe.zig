@@ -116,18 +116,35 @@ fn findOp(name: []const u8) ?*const Op {
     return null;
 }
 
+/// Write one line of the probe's own report to stderr, with nothing in front
+/// of the bytes.
+///
+/// `std.debug.print` is the debugging logger, and the exit status is this
+/// probe's protocol, not a debug aid: a reader watching a sweep wants the
+/// reason on the terminal and a machine reading the status to get the status.
+/// So the line goes to stderr through a writer of this function's own.
+fn report(comptime fmt: []const u8, io: std.Io, args: anytype) !void {
+    // SAFETY: the writer fills the buffer before reading any of it back, and
+    // nothing outside this scope can observe it before the flush below.
+    var buffer: [256]u8 = undefined;
+    var stderr = std.Io.File.stderr().writerStreaming(io, &buffer);
+    try stderr.interface.print(fmt, args);
+    try stderr.interface.flush();
+}
+
 pub fn main(init: std.process.Init) !u8 {
+    const io = init.io;
     const argv = try init.minimal.args.toSlice(init.arena.allocator());
     if (argv.len != 3) {
-        std.debug.print("usage: nan_probe <operation> <f64>\n", .{});
+        try report("usage: nan_probe <operation> <f64>\n", io, .{});
         return usage_status;
     }
     const op = findOp(argv[1]) orelse {
-        std.debug.print("nan_probe: no operation named '{s}'\n", .{argv[1]});
+        try report("nan_probe: no operation named '{s}'\n", io, .{argv[1]});
         return usage_status;
     };
     const value = std.fmt.parseFloat(f64, argv[2]) catch {
-        std.debug.print("nan_probe: '{s}' is not an f64\n", .{argv[2]});
+        try report("nan_probe: '{s}' is not an f64\n", io, .{argv[2]});
         return usage_status;
     };
 

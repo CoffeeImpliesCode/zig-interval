@@ -57,7 +57,7 @@
 //! something, they are not the same claim, and the earlier version of this
 //! file printed only the last while calling it the cost of the library.
 //!
-//! Inputs vary with the iteration index over a table of `kCases` distinct
+//! Inputs vary with the iteration index over a table of `case_count` distinct
 //! boxes, so no single cached case is measured a hundred thousand times.
 //! Every body folds its result into `ctx.keep`; a body whose result
 //! nothing reads is dead code the optimiser is entitled to delete, and its
@@ -76,13 +76,20 @@ const DynVec = interval.DynVec;
 
 /// Distinct input cases cycled through by the iteration index. A power of
 /// two, so selecting a case is a mask.
-const kCases = 16;
-const case_mask = kCases - 1;
+const case_count = 16;
+const case_mask = case_count - 1;
 
 /// Dimensions measured for both representations. The four the task calls
 /// for (2, 3, 4, 16) plus 8 and 32, because the cross-over question is
 /// only answerable if some dimensions bracket it.
-const dims = [_]Dim{ .{ .n = 2, .s = "2" }, .{ .n = 3, .s = "3" }, .{ .n = 4, .s = "4" }, .{ .n = 8, .s = "8" }, .{ .n = 16, .s = "16" }, .{ .n = 32, .s = "32" } };
+const dims = [_]Dim{
+    .{ .n = 2, .s = "2" },
+    .{ .n = 3, .s = "3" },
+    .{ .n = 4, .s = "4" },
+    .{ .n = 8, .s = "8" },
+    .{ .n = 16, .s = "16" },
+    .{ .n = 32, .s = "32" },
+};
 
 const Dim = struct { n: usize, s: []const u8 };
 
@@ -160,7 +167,7 @@ fn componentAt(shape: Shape, s: *u64) Interval {
     };
 }
 
-fn makeVecTable(comptime n: usize, comptime shape: Shape) [kCases]Vec(n) {
+fn makeVecTable(comptime n: usize, comptime shape: Shape) [case_count]Vec(n) {
     // Paying for the LCG loop itself, not for `Interval.init`: the two
     // comparisons in the constructor used to cost enough per row to push
     // this past six figures, and the whole table at the widest dimension
@@ -168,7 +175,7 @@ fn makeVecTable(comptime n: usize, comptime shape: Shape) [kCases]Vec(n) {
     // thousand, so the line stays.
     @setEvalBranchQuota(100_000);
     var s: u64 = lcg_state;
-    var out: [kCases]Vec(n) = undefined;
+    var out: [case_count]Vec(n) = undefined;
     for (&out) |*v| {
         var comps: [n]Interval = undefined;
         for (&comps) |*c| c.* = componentAt(shape, &s);
@@ -180,10 +187,10 @@ fn makeVecTable(comptime n: usize, comptime shape: Shape) [kCases]Vec(n) {
 /// Points for `contains` and `distance`. Half inside the corresponding
 /// `gen` box and half outside, so the fold does not always exit on the
 /// first component.
-fn makePointTable(comptime n: usize) [kCases][n]f64 {
+fn makePointTable(comptime n: usize) [case_count][n]f64 {
     @setEvalBranchQuota(100_000);
     var s: u64 = lcg_state ^ 0x9E37_79B9_7F4A_7C15;
-    var out: [kCases][n]f64 = undefined;
+    var out: [case_count][n]f64 = undefined;
     for (&out) |*p| {
         for (p) |*x| {
             const centre = (lcgUnit(&s) - 0.5) * 2000.0;
@@ -208,7 +215,7 @@ fn makePointTable(comptime n: usize) [kCases][n]f64 {
 // operation it is reporting.
 // ---------------------------------------------------------------------------
 
-fn keepVec(ctx: *timing.Ctx, comptime n: usize, v: Vec(n)) void {
+fn keepVec(comptime n: usize, ctx: *timing.Ctx, v: Vec(n)) void {
     var acc: f64 = 0;
     for (v.comps) |c| acc += c.lo + c.hi;
     ctx.keep(acc);
@@ -233,44 +240,44 @@ fn VecBench(comptime n: usize) type {
 
     return struct {
         pub fn add(ctx: *timing.Ctx, i: usize) void {
-            keepVec(ctx, n, gen[i & case_mask].add(gen[(i + 1) & case_mask]));
+            keepVec(n, ctx, gen[i & case_mask].add(gen[(i + 1) & case_mask]));
         }
 
         pub fn sub(ctx: *timing.Ctx, i: usize) void {
-            keepVec(ctx, n, gen[i & case_mask].sub(ovl[i & case_mask]));
+            keepVec(n, ctx, gen[i & case_mask].sub(ovl[i & case_mask]));
         }
 
         pub fn mul(ctx: *timing.Ctx, i: usize) void {
-            keepVec(ctx, n, gen[i & case_mask].mul(gen[(i + 1) & case_mask]));
+            keepVec(n, ctx, gen[i & case_mask].mul(gen[(i + 1) & case_mask]));
         }
 
         pub fn div(ctx: *timing.Ctx, i: usize) void {
-            keepVec(ctx, n, gen[i & case_mask].div(pos[i & case_mask]));
+            keepVec(n, ctx, gen[i & case_mask].div(pos[i & case_mask]));
         }
 
         pub fn neg(ctx: *timing.Ctx, i: usize) void {
-            keepVec(ctx, n, gen[i & case_mask].neg());
+            keepVec(n, ctx, gen[i & case_mask].neg());
         }
 
         pub fn recip(ctx: *timing.Ctx, i: usize) void {
-            keepVec(ctx, n, pos[i & case_mask].recip());
+            keepVec(n, ctx, pos[i & case_mask].recip());
         }
 
         pub fn abs(ctx: *timing.Ctx, i: usize) void {
-            keepVec(ctx, n, gen[i & case_mask].abs());
+            keepVec(n, ctx, gen[i & case_mask].abs());
         }
 
         pub fn sqr(ctx: *timing.Ctx, i: usize) void {
-            keepVec(ctx, n, gen[i & case_mask].sqr());
+            keepVec(n, ctx, gen[i & case_mask].sqr());
         }
 
         pub fn hull(ctx: *timing.Ctx, i: usize) void {
-            keepVec(ctx, n, gen[i & case_mask].hull(ovl[i & case_mask]));
+            keepVec(n, ctx, gen[i & case_mask].hull(ovl[i & case_mask]));
         }
 
         pub fn intersect(ctx: *timing.Ctx, i: usize) void {
             if (gen[i & case_mask].intersect(ovl[i & case_mask])) |r| {
-                keepVec(ctx, n, r);
+                keepVec(n, ctx, r);
             } else {
                 ctx.keep(0);
             }
@@ -278,9 +285,9 @@ fn VecBench(comptime n: usize) type {
 
         /// The early exit: `disjoint` is separated from `gen` on every
         /// component, so the fold stops at the first one.
-        pub fn intersect_disjoint(ctx: *timing.Ctx, i: usize) void {
+        pub fn intersectDisjoint(ctx: *timing.Ctx, i: usize) void {
             if (gen[i & case_mask].intersect(dis[i & case_mask])) |r| {
-                keepVec(ctx, n, r);
+                keepVec(n, ctx, r);
             } else {
                 ctx.keep(-1);
             }
@@ -297,21 +304,21 @@ fn VecBench(comptime n: usize) type {
         /// `mapResult` over `Vec(n)`: a stack array, no allocation, and a
         /// domain failure is a null with nothing to free. The `Vec(n)`
         /// instantiation cannot fail, so it returns a plain optional and
-        /// there is no error union to unwrap here — only the `DynVec` arms
-        /// below carry `catch unreachable`.
-        pub fn mapResult_sqrt(ctx: *timing.Ctx, i: usize) void {
+        /// there is no error union to report here. Only the `DynVec` arms
+        /// below reach an allocator, so those are the bodies that can fail.
+        pub fn mapResultSqrt(ctx: *timing.Ctx, i: usize) void {
             if (interval.mapResult(pos[i & case_mask], interval.sqrt)) |r| {
-                keepVec(ctx, n, r);
+                keepVec(n, ctx, r);
             } else {
                 ctx.keep(0);
             }
         }
 
-        pub fn mapResult_sqrt_out_of_domain(ctx: *timing.Ctx, i: usize) void {
+        pub fn mapResultSqrtOutOfDomain(ctx: *timing.Ctx, i: usize) void {
             // `gen` straddles zero, so `sqrt` fails on it. The fold stops
             // at the first component.
             if (interval.mapResult(gen[i & case_mask], interval.sqrt)) |r| {
-                keepVec(ctx, n, r);
+                keepVec(n, ctx, r);
             } else {
                 ctx.keep(-1);
             }
@@ -350,7 +357,7 @@ const DynEnv = struct {
     pos: []DynVec,
     ovl: []DynVec,
     dis: []DynVec,
-    pts: []f64, // kCases * n, row-major
+    pts: []f64, // case_count * n, row-major
     work: DynVec, // scratch of width n for the in-place bodies
 };
 
@@ -369,7 +376,7 @@ fn envOf(comptime a: Alloc, comptime n: usize) *DynEnv {
     return &dyn_envs[@intFromEnum(a)][dimSlot(n)];
 }
 
-fn setupEnv(env: *DynEnv, gpa: std.mem.Allocator, comptime n: usize) !void {
+fn setupEnv(comptime n: usize, gpa: std.mem.Allocator, env: *DynEnv) !void {
     const gen = comptime makeVecTable(n, .gen);
     const pos = comptime makeVecTable(n, .pos);
     const ovl = comptime makeVecTable(n, .ovl);
@@ -377,22 +384,22 @@ fn setupEnv(env: *DynEnv, gpa: std.mem.Allocator, comptime n: usize) !void {
     const pts = comptime makePointTable(n);
 
     env.gpa = gpa;
-    env.gen = try gpa.alloc(DynVec, kCases);
-    env.pos = try gpa.alloc(DynVec, kCases);
-    env.ovl = try gpa.alloc(DynVec, kCases);
-    env.dis = try gpa.alloc(DynVec, kCases);
-    env.pts = try gpa.alloc(f64, kCases * n);
+    env.gen = try gpa.alloc(DynVec, case_count);
+    env.pos = try gpa.alloc(DynVec, case_count);
+    env.ovl = try gpa.alloc(DynVec, case_count);
+    env.dis = try gpa.alloc(DynVec, case_count);
+    env.pts = try gpa.alloc(f64, case_count * n);
     env.work = try DynVec.init(gpa, n, Interval.init(0, 1));
-    for (0..kCases) |c| {
-        env.gen[c] = try boxFrom(gpa, n, gen[c]);
-        env.pos[c] = try boxFrom(gpa, n, pos[c]);
-        env.ovl[c] = try boxFrom(gpa, n, ovl[c]);
-        env.dis[c] = try boxFrom(gpa, n, dis[c]);
+    for (0..case_count) |c| {
+        env.gen[c] = try boxFrom(n, gpa, gen[c]);
+        env.pos[c] = try boxFrom(n, gpa, pos[c]);
+        env.ovl[c] = try boxFrom(n, gpa, ovl[c]);
+        env.dis[c] = try boxFrom(n, gpa, dis[c]);
         for (0..n) |k| env.pts[c * n + k] = pts[c][k];
     }
 }
 
-fn boxFrom(gpa: std.mem.Allocator, comptime n: usize, comps: Vec(n)) !DynVec {
+fn boxFrom(comptime n: usize, gpa: std.mem.Allocator, comps: Vec(n)) !DynVec {
     const v = try DynVec.init(gpa, n, Interval.init(0, 1));
     @memcpy(v.comps, comps.comps[0..]);
     return v;
@@ -421,10 +428,28 @@ fn DynBench(comptime n: usize, comptime a: Alloc) type {
     const env = envOf(a, n);
 
     return struct {
-        const Self = @This();
-
         fn point(c: usize) []const f64 {
             return env.pts[c * n ..][0..n];
+        }
+
+        /// The name a body here reports when it cannot do its work: the
+        /// operation, the width and the allocator, which is the whole of
+        /// what a failure in this file is about.
+        fn label(comptime op: []const u8) []const u8 {
+            return std.fmt.comptimePrint(
+                "bench_vec: dyn {s} (n={d}, {s})",
+                .{ op, n, @tagName(a) },
+            );
+        }
+
+        /// The one place a body below can fail. Every environment is built
+        /// once in `setupEnv` and lives for the whole run, so an error out
+        /// of one of these calls is the machine running out of memory and
+        /// not anything the measurement did. It ends the run with a name,
+        /// because a time for work that never happened is the one figure a
+        /// benchmark must not print.
+        fn fatal(comptime op: []const u8, io: std.Io, err: anyerror) noreturn {
+            timing.fail(label(op), io, err);
         }
 
         // -- value-returning: one allocation and one free per call -------
@@ -433,44 +458,46 @@ fn DynBench(comptime n: usize, comptime a: Alloc) type {
         // allocator, because every one of them calls `allocLike` (or
         // `mapResult`, which calls it) before the fold and frees after.
 
-        pub fn add_value(ctx: *timing.Ctx, i: usize) void {
+        pub fn addValue(ctx: *timing.Ctx, i: usize) void {
             const c = i & case_mask;
-            var r = env.gen[c].add(env.ovl[c]) catch unreachable;
+            var r = env.gen[c].add(env.ovl[c]) catch |e| fatal("add.value", ctx.io, e);
             defer r.deinit();
             keepDyn(ctx, r);
         }
 
-        pub fn sub_value(ctx: *timing.Ctx, i: usize) void {
+        pub fn subValue(ctx: *timing.Ctx, i: usize) void {
             const c = i & case_mask;
-            var r = env.gen[c].sub(env.ovl[c]) catch unreachable;
+            var r = env.gen[c].sub(env.ovl[c]) catch |e| fatal("sub.value", ctx.io, e);
             defer r.deinit();
             keepDyn(ctx, r);
         }
 
-        pub fn mul_value(ctx: *timing.Ctx, i: usize) void {
+        pub fn mulValue(ctx: *timing.Ctx, i: usize) void {
             const c = i & case_mask;
-            var r = env.gen[c].mul(env.ovl[c]) catch unreachable;
+            var r = env.gen[c].mul(env.ovl[c]) catch |e| fatal("mul.value", ctx.io, e);
             defer r.deinit();
             keepDyn(ctx, r);
         }
 
-        pub fn div_value(ctx: *timing.Ctx, i: usize) void {
+        pub fn divValue(ctx: *timing.Ctx, i: usize) void {
             const c = i & case_mask;
-            var r = env.gen[c].div(env.pos[c]) catch unreachable;
+            var r = env.gen[c].div(env.pos[c]) catch |e| fatal("div.value", ctx.io, e);
             defer r.deinit();
             keepDyn(ctx, r);
         }
 
-        pub fn hull_value(ctx: *timing.Ctx, i: usize) void {
+        pub fn hullValue(ctx: *timing.Ctx, i: usize) void {
             const c = i & case_mask;
-            var r = env.gen[c].hull(env.ovl[c]) catch unreachable;
+            var r = env.gen[c].hull(env.ovl[c]) catch |e| fatal("hull.value", ctx.io, e);
             defer r.deinit();
             keepDyn(ctx, r);
         }
 
-        pub fn intersect_value(ctx: *timing.Ctx, i: usize) void {
+        pub fn intersectValue(ctx: *timing.Ctx, i: usize) void {
             const c = i & case_mask;
-            var r = (env.gen[c].intersect(env.ovl[c]) catch unreachable) orelse {
+            const mapped = env.gen[c].intersect(env.ovl[c]) catch |e|
+                fatal("intersect.value", ctx.io, e);
+            var r = mapped orelse {
                 ctx.keep(0);
                 return;
             };
@@ -478,9 +505,11 @@ fn DynBench(comptime n: usize, comptime a: Alloc) type {
             keepDyn(ctx, r);
         }
 
-        pub fn intersect_disjoint_value(ctx: *timing.Ctx, i: usize) void {
+        pub fn intersectDisjointValue(ctx: *timing.Ctx, i: usize) void {
             const c = i & case_mask;
-            var r = (env.gen[c].intersect(env.dis[c]) catch unreachable) orelse {
+            const mapped = env.gen[c].intersect(env.dis[c]) catch |e|
+                fatal("intersect.disj.value", ctx.io, e);
+            var r = mapped orelse {
                 ctx.keep(-1);
                 return;
             };
@@ -499,28 +528,28 @@ fn DynBench(comptime n: usize, comptime a: Alloc) type {
         pub fn iadd(ctx: *timing.Ctx, i: usize) void {
             const c = i & case_mask;
             @memcpy(env.work.comps, env.gen[c].comps);
-            env.work.iadd(env.ovl[c]) catch unreachable;
+            env.work.iadd(env.ovl[c]) catch |e| fatal("iadd", ctx.io, e);
             keepDyn(ctx, env.work);
         }
 
         pub fn isub(ctx: *timing.Ctx, i: usize) void {
             const c = i & case_mask;
             @memcpy(env.work.comps, env.gen[c].comps);
-            env.work.isub(env.ovl[c]) catch unreachable;
+            env.work.isub(env.ovl[c]) catch |e| fatal("isub", ctx.io, e);
             keepDyn(ctx, env.work);
         }
 
         pub fn imul(ctx: *timing.Ctx, i: usize) void {
             const c = i & case_mask;
             @memcpy(env.work.comps, env.gen[c].comps);
-            env.work.imul(env.ovl[c]) catch unreachable;
+            env.work.imul(env.ovl[c]) catch |e| fatal("imul", ctx.io, e);
             keepDyn(ctx, env.work);
         }
 
         pub fn idiv(ctx: *timing.Ctx, i: usize) void {
             const c = i & case_mask;
             @memcpy(env.work.comps, env.gen[c].comps);
-            env.work.idiv(env.pos[c]) catch unreachable;
+            env.work.idiv(env.pos[c]) catch |e| fatal("idiv", ctx.io, e);
             keepDyn(ctx, env.work);
         }
 
@@ -566,9 +595,11 @@ fn DynBench(comptime n: usize, comptime a: Alloc) type {
 
         // -- mapResult: allocates from the box's own allocator ----------
 
-        pub fn mapResult_sqrt(ctx: *timing.Ctx, i: usize) void {
+        pub fn mapResultSqrt(ctx: *timing.Ctx, i: usize) void {
             const c = i & case_mask;
-            var r = (interval.mapResult(env.pos[c], interval.sqrt) catch unreachable) orelse {
+            const mapped = interval.mapResult(env.pos[c], interval.sqrt) catch |e|
+                fatal("mapResult.sqrt.value", ctx.io, e);
+            var r = mapped orelse {
                 ctx.keep(0);
                 return;
             };
@@ -576,9 +607,11 @@ fn DynBench(comptime n: usize, comptime a: Alloc) type {
             keepDyn(ctx, r);
         }
 
-        pub fn mapResult_sqrt_out_of_domain(ctx: *timing.Ctx, i: usize) void {
+        pub fn mapResultSqrtOutOfDomain(ctx: *timing.Ctx, i: usize) void {
             const c = i & case_mask;
-            var r = (interval.mapResult(env.gen[c], interval.sqrt) catch unreachable) orelse {
+            const mapped = interval.mapResult(env.gen[c], interval.sqrt) catch |e|
+                fatal("mapResult.sqrt.ood.value", ctx.io, e);
+            var r = mapped orelse {
                 // Allocated, walked one component, freed. Nothing else.
                 ctx.keep(-1);
                 return;
@@ -605,9 +638,6 @@ fn DynBench(comptime n: usize, comptime a: Alloc) type {
 // interpolated from a neighbour.
 // ---------------------------------------------------------------------------
 
-var smp_alloc: std.mem.Allocator = undefined;
-var dbg_alloc_storage: std.heap.DebugAllocator(.{}) = undefined;
-
 /// The bytes a `DynVec` of width n asks its allocator for, which is the
 /// same request `DynVec.allocLike` makes on every value-returning call.
 fn boxBytes(comptime n: usize) usize {
@@ -627,11 +657,31 @@ fn allocLabel(comptime n: usize) []const u8 {
     return std.fmt.comptimePrint("{d} components ({d} B)", .{ n, n * @sizeOf(Interval) });
 }
 
+/// A `DebugAllocator` of this file's own, for the allocation-only rows.
+///
+/// It is deliberately not one of the `DynVec` environments' allocators: a
+/// round trip is the cost of one `alloc`/`free` pair and nothing else, and
+/// these rows are the reference the `DynVec` figures are divided by, so they
+/// are measured on allocators that serve no other purpose.
+///
+/// `.init` is a comptime constant, so this is a definite value rather than a
+/// lazy one: the instance exists before the first body runs, which is when
+/// the equivalent assignment in `main` used to create it, and it is the
+/// only file-scope state these two rows need.
+var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+
+/// One allocator round trip at one size, under the allocator named by the
+/// body: `smp` is `std.heap.smp_allocator` itself, the allocator the hot
+/// path uses, and `debug` is `debug_allocator` above.
+///
+/// Both bodies are three operations and a read: one allocation of the box
+/// size, one byte touched, the byte read into the sink while the
+/// allocation is alive, and the free.
 fn AllocBench(comptime bytes: usize) type {
     return struct {
-        const Self = @This();
         pub fn smp(ctx: *timing.Ctx, i: usize) void {
-            const p = smp_alloc.alloc(u8, bytes) catch unreachable;
+            const p = std.heap.smp_allocator.alloc(u8, bytes) catch |e|
+                timing.fail("bench_vec: alloc round trip (smp)", ctx.io, e);
             // The touch is one byte: the point is the allocator, and a
             // first-touch page fault would be an mmap measurement.
             p[0] = @truncate(i);
@@ -645,14 +695,17 @@ fn AllocBench(comptime bytes: usize) type {
             // The value is what keeps the work observable; it has to be
             // taken while the allocation is still alive.
             ctx.keep(p[0]);
-            smp_alloc.free(p);
+            std.heap.smp_allocator.free(p);
         }
 
         pub fn debug(ctx: *timing.Ctx, i: usize) void {
-            const p = dbg_alloc_storage.allocator().alloc(u8, bytes) catch unreachable;
+            // `.allocator()` is called per iteration here, as it always was:
+            // building the view is part of what this row measures.
+            const p = debug_allocator.allocator().alloc(u8, bytes) catch |e|
+                timing.fail("bench_vec: alloc round trip (debug)", ctx.io, e);
             p[0] = @truncate(i);
             ctx.keep(p[0]);
-            dbg_alloc_storage.allocator().free(p);
+            debug_allocator.allocator().free(p);
         }
     };
 }
@@ -664,11 +717,10 @@ fn AllocBench(comptime bytes: usize) type {
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(gpa.deinit() == .ok);
-    smp_alloc = std.heap.smp_allocator;
-    dbg_alloc_storage = .init;
 
     var runner = try timing.Runner.init(gpa.allocator());
     defer runner.deinit();
+    var out = timing.Out.init(runner.io);
 
     // Two environments per dimension, one per allocator, on the same
     // inputs, so a value-returning figure under one can be set against the
@@ -678,90 +730,115 @@ pub fn main() !void {
     var dyn_gpa: std.heap.DebugAllocator(.{}) = .init;
     defer std.debug.assert(dyn_gpa.deinit() == .ok);
     inline for (dims) |d| {
-        try setupEnv(envOf(.smp, d.n), smp_alloc, d.n);
-        try setupEnv(envOf(.dbg, d.n), dyn_gpa.allocator(), d.n);
+        try setupEnv(d.n, std.heap.smp_allocator, envOf(.smp, d.n));
+        try setupEnv(d.n, dyn_gpa.allocator(), envOf(.dbg, d.n));
     }
     defer inline for (dims) |d| {
         teardownEnv(envOf(.smp, d.n));
         teardownEnv(envOf(.dbg, d.n));
     };
 
-    std.debug.print("\n=== Vec(n): fixed dimension, inline components ===\n", .{});
+    try out.print("\n=== Vec(n): fixed dimension, inline components ===\n", .{});
     inline for (dims) |d| {
-        const B = VecBench(d.n);
+        const vec = VecBench(d.n);
         const it = itersFor(d.n);
         const p = "vec" ++ d.s ++ ".";
-        try timing.measure(&runner, p ++ "add", it, B.add);
-        try timing.measure(&runner, p ++ "sub", it, B.sub);
-        try timing.measure(&runner, p ++ "mul", it, B.mul);
-        try timing.measure(&runner, p ++ "div", it, B.div);
-        try timing.measure(&runner, p ++ "neg", it, B.neg);
-        try timing.measure(&runner, p ++ "recip", it, B.recip);
-        try timing.measure(&runner, p ++ "abs", it, B.abs);
-        try timing.measure(&runner, p ++ "sqr", it, B.sqr);
-        try timing.measure(&runner, p ++ "hull", it, B.hull);
-        try timing.measure(&runner, p ++ "intersect", it, B.intersect);
-        try timing.measure(&runner, p ++ "intersect.disjoint", it, B.intersect_disjoint);
-        try timing.measure(&runner, p ++ "mapResult.sqrt", it, B.mapResult_sqrt);
-        try timing.measure(&runner, p ++ "mapResult.sqrt.ood", it, B.mapResult_sqrt_out_of_domain);
-        try timing.measure(&runner, p ++ "contains", it, B.contains);
-        try timing.measure(&runner, p ++ "distance", it, B.distance);
+        try timing.measure(p ++ "add", vec.add, &runner, it);
+        try timing.measure(p ++ "sub", vec.sub, &runner, it);
+        try timing.measure(p ++ "mul", vec.mul, &runner, it);
+        try timing.measure(p ++ "div", vec.div, &runner, it);
+        try timing.measure(p ++ "neg", vec.neg, &runner, it);
+        try timing.measure(p ++ "recip", vec.recip, &runner, it);
+        try timing.measure(p ++ "abs", vec.abs, &runner, it);
+        try timing.measure(p ++ "sqr", vec.sqr, &runner, it);
+        try timing.measure(p ++ "hull", vec.hull, &runner, it);
+        try timing.measure(p ++ "intersect", vec.intersect, &runner, it);
+        try timing.measure(p ++ "intersect.disjoint", vec.intersectDisjoint, &runner, it);
+        try timing.measure(p ++ "mapResult.sqrt", vec.mapResultSqrt, &runner, it);
+        try timing.measure(
+            p ++ "mapResult.sqrt.ood",
+            vec.mapResultSqrtOutOfDomain,
+            &runner,
+            it,
+        );
+        try timing.measure(p ++ "contains", vec.contains, &runner, it);
+        try timing.measure(p ++ "distance", vec.distance, &runner, it);
     }
 
-    std.debug.print("\n=== DynVec: runtime dimension, heap components ===\n", .{});
+    try out.print("\n=== DynVec: runtime dimension, heap components ===\n", .{});
     inline for (dims) |d| {
-        // `S` and `D` are the same bodies over the same inputs on the two
-        // allocators. Only the value-returning ones differ: they are the
+        // `smp` and `dbg` are the same bodies over the same inputs on the
+        // two allocators. Only the value-returning ones differ: they are the
         // ones that reach `env.gpa`. The in-place and no-allocation bodies
-        // are measured once, from `S`, because a second run of them under
-        // `D` would be the same number printed twice.
-        const S = DynBench(d.n, .smp);
-        const D = DynBench(d.n, .dbg);
+        // are measured once, from `smp`, because a second run of them under
+        // `dbg` would be the same number printed twice.
+        const smp = DynBench(d.n, .smp);
+        const dbg = DynBench(d.n, .dbg);
         const it = itersFor(d.n);
         const p = "dyn" ++ d.s ++ ".";
-        try timing.measure(&runner, p ++ "seed", it, S.seed);
-        try timing.measure(&runner, p ++ "add.value.smp", it, S.add_value);
-        try timing.measure(&runner, p ++ "add.value.dbg", it, D.add_value);
-        try timing.measure(&runner, p ++ "add.inplace", it, S.iadd);
-        try timing.measure(&runner, p ++ "sub.value.smp", it, S.sub_value);
-        try timing.measure(&runner, p ++ "sub.value.dbg", it, D.sub_value);
-        try timing.measure(&runner, p ++ "sub.inplace", it, S.isub);
-        try timing.measure(&runner, p ++ "mul.value.smp", it, S.mul_value);
-        try timing.measure(&runner, p ++ "mul.value.dbg", it, D.mul_value);
-        try timing.measure(&runner, p ++ "mul.inplace", it, S.imul);
-        try timing.measure(&runner, p ++ "div.value.smp", it, S.div_value);
-        try timing.measure(&runner, p ++ "div.value.dbg", it, D.div_value);
-        try timing.measure(&runner, p ++ "div.inplace", it, S.idiv);
-        try timing.measure(&runner, p ++ "hull.value.smp", it, S.hull_value);
-        try timing.measure(&runner, p ++ "hull.value.dbg", it, D.hull_value);
-        try timing.measure(&runner, p ++ "intersect.value.smp", it, S.intersect_value);
-        try timing.measure(&runner, p ++ "intersect.value.dbg", it, D.intersect_value);
-        try timing.measure(&runner, p ++ "intersect.disj.value.smp", it, S.intersect_disjoint_value);
-        try timing.measure(&runner, p ++ "intersect.disj.value.dbg", it, D.intersect_disjoint_value);
-        try timing.measure(&runner, p ++ "neg.inplace", it, S.neg);
-        try timing.measure(&runner, p ++ "recip.inplace", it, S.recip);
-        try timing.measure(&runner, p ++ "abs.inplace", it, S.abs);
-        try timing.measure(&runner, p ++ "sqr.inplace", it, S.sqr);
-        try timing.measure(&runner, p ++ "mapResult.sqrt.value.smp", it, S.mapResult_sqrt);
-        try timing.measure(&runner, p ++ "mapResult.sqrt.value.dbg", it, D.mapResult_sqrt);
-        try timing.measure(&runner, p ++ "mapResult.sqrt.ood.value.smp", it, S.mapResult_sqrt_out_of_domain);
-        try timing.measure(&runner, p ++ "mapResult.sqrt.ood.value.dbg", it, D.mapResult_sqrt_out_of_domain);
-        try timing.measure(&runner, p ++ "contains", it, S.contains);
-        try timing.measure(&runner, p ++ "distance", it, S.distance);
+        try timing.measure(p ++ "seed", smp.seed, &runner, it);
+        try timing.measure(p ++ "add.value.smp", smp.addValue, &runner, it);
+        try timing.measure(p ++ "add.value.dbg", dbg.addValue, &runner, it);
+        try timing.measure(p ++ "add.inplace", smp.iadd, &runner, it);
+        try timing.measure(p ++ "sub.value.smp", smp.subValue, &runner, it);
+        try timing.measure(p ++ "sub.value.dbg", dbg.subValue, &runner, it);
+        try timing.measure(p ++ "sub.inplace", smp.isub, &runner, it);
+        try timing.measure(p ++ "mul.value.smp", smp.mulValue, &runner, it);
+        try timing.measure(p ++ "mul.value.dbg", dbg.mulValue, &runner, it);
+        try timing.measure(p ++ "mul.inplace", smp.imul, &runner, it);
+        try timing.measure(p ++ "div.value.smp", smp.divValue, &runner, it);
+        try timing.measure(p ++ "div.value.dbg", dbg.divValue, &runner, it);
+        try timing.measure(p ++ "div.inplace", smp.idiv, &runner, it);
+        try timing.measure(p ++ "hull.value.smp", smp.hullValue, &runner, it);
+        try timing.measure(p ++ "hull.value.dbg", dbg.hullValue, &runner, it);
+        try timing.measure(p ++ "intersect.value.smp", smp.intersectValue, &runner, it);
+        try timing.measure(p ++ "intersect.value.dbg", dbg.intersectValue, &runner, it);
+        try timing.measure(
+            p ++ "intersect.disj.value.smp",
+            smp.intersectDisjointValue,
+            &runner,
+            it,
+        );
+        try timing.measure(
+            p ++ "intersect.disj.value.dbg",
+            dbg.intersectDisjointValue,
+            &runner,
+            it,
+        );
+        try timing.measure(p ++ "neg.inplace", smp.neg, &runner, it);
+        try timing.measure(p ++ "recip.inplace", smp.recip, &runner, it);
+        try timing.measure(p ++ "abs.inplace", smp.abs, &runner, it);
+        try timing.measure(p ++ "sqr.inplace", smp.sqr, &runner, it);
+        try timing.measure(p ++ "mapResult.sqrt.value.smp", smp.mapResultSqrt, &runner, it);
+        try timing.measure(p ++ "mapResult.sqrt.value.dbg", dbg.mapResultSqrt, &runner, it);
+        try timing.measure(
+            p ++ "mapResult.sqrt.ood.value.smp",
+            smp.mapResultSqrtOutOfDomain,
+            &runner,
+            it,
+        );
+        try timing.measure(
+            p ++ "mapResult.sqrt.ood.value.dbg",
+            dbg.mapResultSqrtOutOfDomain,
+            &runner,
+            it,
+        );
+        try timing.measure(p ++ "contains", smp.contains, &runner, it);
+        try timing.measure(p ++ "distance", smp.distance, &runner, it);
     }
 
     // One round trip per dimension, at that dimension's own box size, so
     // the share printed in the report divides a value-returning figure by
     // the round trip that figure actually pays.
-    std.debug.print("\n=== allocator round trip, alone ===\n", .{});
+    try out.print("\n=== allocator round trip, alone ===\n", .{});
     inline for (dims) |d| {
         const it = itersFor(d.n);
-        try timing.measure(&runner, allocName(d.s, "smp"), it, AllocBench(boxBytes(d.n)).smp);
-        try timing.measure(&runner, allocName(d.s, "debug"), it, AllocBench(boxBytes(d.n)).debug);
+        try timing.measure(allocName(d.s, "smp"), AllocBench(boxBytes(d.n)).smp, &runner, it);
+        try timing.measure(allocName(d.s, "debug"), AllocBench(boxBytes(d.n)).debug, &runner, it);
     }
 
-    report(&runner);
-    runner.report.print();
+    try report(&runner);
+    try runner.report.print();
 }
 
 // ---------------------------------------------------------------------------
@@ -809,9 +886,17 @@ const ops = [_]Op{
     .{ .name = "abs", .vec = "vec{s}.abs", .dyn_in = "dyn{s}.abs.inplace" },
     .{ .name = "sqr", .vec = "vec{s}.sqr", .dyn_in = "dyn{s}.sqr.inplace" },
     .{ .name = "intersect", .vec = "vec{s}.intersect", .dyn_val = "dyn{s}.intersect.value.{s}" },
-    .{ .name = "intersect (disjoint)", .vec = "vec{s}.intersect.disjoint", .dyn_val = "dyn{s}.intersect.disj.value.{s}" },
+    .{
+        .name = "intersect (disjoint)",
+        .vec = "vec{s}.intersect.disjoint",
+        .dyn_val = "dyn{s}.intersect.disj.value.{s}",
+    },
     .{ .name = "mapResult sqrt", .vec = "vec{s}.mapResult.sqrt", .dyn_val = "dyn{s}.mapResult.sqrt.value.{s}" },
-    .{ .name = "mapResult sqrt (out of domain)", .vec = "vec{s}.mapResult.sqrt.ood", .dyn_val = "dyn{s}.mapResult.sqrt.ood.value.{s}" },
+    .{
+        .name = "mapResult sqrt (out of domain)",
+        .vec = "vec{s}.mapResult.sqrt.ood",
+        .dyn_val = "dyn{s}.mapResult.sqrt.ood.value.{s}",
+    },
     .{ .name = "contains", .vec = "vec{s}.contains", .dyn_none = "dyn{s}.contains" },
     .{ .name = "distance", .vec = "vec{s}.distance", .dyn_none = "dyn{s}.distance" },
 };
@@ -898,10 +983,10 @@ const dash80 = dash70 ++ dash10;
 const dash100 = dash80 ++ dash10 ++ dash10;
 const dash110 = dash100 ++ dash10;
 
-fn columnHeader() void {
-    std.debug.print("{s:>34}", .{"operation"});
-    for (dims) |d| std.debug.print("  {s:>13}", .{d.s});
-    std.debug.print("\n{s}\n", .{dash100});
+fn columnHeader(out: *timing.Out) !void {
+    try out.print("{s:>34}", .{"operation"});
+    for (dims) |d| try out.print("  {s:>13}", .{d.s});
+    try out.print("\n{s}\n", .{dash100});
 }
 
 /// Which `DynVec` form a cross-over column is built from. The two
@@ -916,11 +1001,17 @@ const DynForm = enum { inpl_net, value_smp, value_dbg };
 /// forms are what a caller writing `dv = dv.add(other)` pays, once per
 /// allocator. A dash means the operation has no such form, not that it was
 /// fast.
-fn crossOver(runner: *timing.Runner, title: []const u8, note: []const u8, comptime form: DynForm) void {
-    std.debug.print("\n=== {s} ===\n", .{title});
-    columnHeader();
+fn crossOver(
+    comptime form: DynForm,
+    out: *timing.Out,
+    runner: *timing.Runner,
+    title: []const u8,
+    note: []const u8,
+) !void {
+    try out.print("\n=== {s} ===\n", .{title});
+    try columnHeader(out);
     for (0..ops.len) |oi| {
-        std.debug.print("{s:>34}", .{ops[oi].name});
+        try out.print("{s:>34}", .{ops[oi].name});
         for (0..dims.len) |di| {
             const pr = plan[di][oi];
             const v = if (pr.vec) |k| nsFor(runner, k) else null;
@@ -930,43 +1021,43 @@ fn crossOver(runner: *timing.Runner, title: []const u8, note: []const u8, compti
                 .value_dbg => if (pr.val[@intFromEnum(Alloc.dbg)]) |k| nsFor(runner, k) else null,
             };
             if (v != null and d != null) {
-                std.debug.print("  {d:>6.2}/{d:>5.2}", .{ v.?, d.? / v.? });
+                try out.print("  {d:>6.2}/{d:>5.2}", .{ v.?, d.? / v.? });
             } else {
-                std.debug.print("  {s:>13}", .{"-"});
+                try out.print("  {s:>13}", .{"-"});
             }
         }
-        std.debug.print("\n", .{});
+        try out.print("\n", .{});
     }
-    std.debug.print("\n{s}\n", .{note});
+    try out.print("\n{s}\n", .{note});
 }
 
 /// A figure, or a dash when the operation has no such form. Never 0.00 for
 /// a missing cell: 0 ns would be a claim about a measurement, whereas a
 /// dash is only a claim about the table.
-fn cell(ns: ?f64) void {
+fn cell(out: *timing.Out, ns: ?f64) !void {
     if (ns) |v| {
-        std.debug.print("{d:>13.2}", .{v});
+        try out.print("{d:>13.2}", .{v});
     } else {
-        std.debug.print("{s:>13}", .{"-"});
+        try out.print("{s:>13}", .{"-"});
     }
 }
 
 /// The round trip as a percentage of a whole call, or a dash when either
 /// side of the ratio is missing.
-fn shareCell(rt: ?f64, call: ?f64) void {
+fn shareCell(out: *timing.Out, rt: ?f64, call: ?f64) !void {
     const r = rt orelse {
-        std.debug.print("{s:>11}", .{"-"});
+        try out.print("{s:>11}", .{"-"});
         return;
     };
     const c = call orelse {
-        std.debug.print("{s:>11}", .{"-"});
+        try out.print("{s:>11}", .{"-"});
         return;
     };
     if (c <= 0) {
-        std.debug.print("{s:>11}", .{"-"});
+        try out.print("{s:>11}", .{"-"});
         return;
     }
-    std.debug.print("{d:>11.1}", .{100.0 * r / c});
+    try out.print("{d:>11.1}", .{100.0 * r / c});
 }
 
 /// The `add` row of `ops`, used as the reference for the allocator share:
@@ -980,61 +1071,64 @@ const add_op: usize = blk: {
     @compileError("no `add` row in `ops`");
 };
 
-fn report(runner: *timing.Runner) void {
-    std.debug.print("\n=== Vec(n): ns per call / ns per component ===\n", .{});
-    columnHeader();
+fn report(runner: *timing.Runner) !void {
+    var out = timing.Out.init(runner.io);
+    try out.print("\n=== Vec(n): ns per call / ns per component ===\n", .{});
+    try columnHeader(&out);
     for (0..ops.len) |oi| {
-        std.debug.print("{s:>34}", .{ops[oi].name});
+        try out.print("{s:>34}", .{ops[oi].name});
         for (0..dims.len) |di| {
             const key = plan[di][oi].vec;
             const ns = if (key) |k| nsFor(runner, k) else null;
             if (ns) |v| {
-                std.debug.print("  {d:>6.2}/{d:>5.2}", .{ v, v / @as(f64, @floatFromInt(dims[di].n)) });
+                try out.print("  {d:>6.2}/{d:>5.2}", .{ v, v / @as(f64, @floatFromInt(dims[di].n)) });
             } else {
-                std.debug.print("  {s:>13}", .{"-"});
+                try out.print("  {s:>13}", .{"-"});
             }
         }
-        std.debug.print("\n", .{});
+        try out.print("\n", .{});
     }
-    std.debug.print("\n  left of the slash is ns per call, right is ns per component\n", .{});
+    try out.print("\n  left of the slash is ns per call, right is ns per component\n", .{});
 
     // One row per (operation, dimension) rather than a matrix: a dimension
     // column now carries four figures instead of two, and a matrix of
     // those runs off the side of a screen.
-    std.debug.print("\n=== DynVec: what each form costs, ns per call ===\n", .{});
-    std.debug.print("{s:>34}{s:>5}{s:>13}{s:>13}{s:>13}{s:>13}\n", .{
+    try out.print("\n=== DynVec: what each form costs, ns per call ===\n", .{});
+    try out.print("{s:>34}{s:>5}{s:>13}{s:>13}{s:>13}{s:>13}\n", .{
         "operation", "dim", "inpl(net)", "no-alloc", "value/smp", "value/dbg",
     });
-    std.debug.print("{s}\n", .{dash100});
+    try out.print("{s}\n", .{dash100});
     for (0..ops.len) |oi| {
         for (0..dims.len) |di| {
             const pr = plan[di][oi];
             if (pr.inpl == null and pr.noalloc == null and pr.val[0] == null) continue;
-            std.debug.print("{s:>34}{s:>5}", .{ ops[oi].name, dims[di].s });
-            cell(dynInPlaceNet(runner, di, pr.inpl));
-            cell(if (pr.noalloc) |k| nsFor(runner, k) else null);
-            cell(if (pr.val[@intFromEnum(Alloc.smp)]) |k| nsFor(runner, k) else null);
-            cell(if (pr.val[@intFromEnum(Alloc.dbg)]) |k| nsFor(runner, k) else null);
-            std.debug.print("\n", .{});
+            try out.print("{s:>34}{s:>5}", .{ ops[oi].name, dims[di].s });
+            try cell(&out, dynInPlaceNet(runner, di, pr.inpl));
+            try cell(&out, if (pr.noalloc) |k| nsFor(runner, k) else null);
+            try cell(&out, if (pr.val[@intFromEnum(Alloc.smp)]) |k| nsFor(runner, k) else null);
+            try cell(&out, if (pr.val[@intFromEnum(Alloc.dbg)]) |k| nsFor(runner, k) else null);
+            try out.print("\n", .{});
         }
     }
-    std.debug.print("\n  inpl(net) allocates nothing; it is the in-place body minus its re-seed copy\n", .{});
-    std.debug.print("  no-alloc returns a scalar rather than a box, so it has nothing to allocate\n", .{});
-    std.debug.print("  value/smp and value/dbg are the same body allocating and freeing on every\n", .{});
-    std.debug.print("  call, once under smp_allocator and once under a DebugAllocator. The gap\n", .{});
-    std.debug.print("  between those two columns is the allocator, not the library.\n", .{});
-    std.debug.print("  A dash is an operation that has no such form, never a dropped measurement.\n", .{});
+    try out.print("\n  inpl(net) allocates nothing; it is the in-place body minus its re-seed copy\n", .{});
+    try out.print("  no-alloc returns a scalar rather than a box, so it has nothing to allocate\n", .{});
+    try out.print("  value/smp and value/dbg are the same body allocating and freeing on every\n", .{});
+    try out.print("  call, once under smp_allocator and once under a DebugAllocator. The gap\n", .{});
+    try out.print("  between those two columns is the allocator, not the library.\n", .{});
+    try out.print("  A dash is an operation that has no such form, never a dropped measurement.\n", .{});
 
-    std.debug.print("\n=== DynVec in-place, net of the re-seed copy ===\n", .{});
-    std.debug.print("{s:>34}{s:>8}{s:>12}{s:>12}{s:>12}\n", .{ "operation", "dim", "as measured", "re-seed", "net" });
-    std.debug.print("{s}\n", .{dash80});
+    try out.print("\n=== DynVec in-place, net of the re-seed copy ===\n", .{});
+    try out.print("{s:>34}{s:>8}{s:>12}{s:>12}{s:>12}\n", .{
+        "operation", "dim", "as measured", "re-seed", "net",
+    });
+    try out.print("{s}\n", .{dash80});
     for (0..ops.len) |oi| {
         for (0..dims.len) |di| {
             const gross = if (plan[di][oi].inpl) |k| nsFor(runner, k) else null;
             const net = dynInPlaceNet(runner, di, plan[di][oi].inpl);
             const seed = nsFor(runner, seed_names[di]) orelse 0;
             if (gross != null and net != null) {
-                std.debug.print("{s:>34}{s:>8}{d:>12.2}{d:>12.2}{d:>12.2}\n", .{
+                try out.print("{s:>34}{s:>8}{d:>12.2}{d:>12.2}{d:>12.2}\n", .{
                     ops[oi].name, dims[di].s, gross.?, seed, net.?,
                 });
             }
@@ -1042,47 +1136,65 @@ fn report(runner: *timing.Runner) void {
     }
 
     const ratio_note = "  left is Vec(n) ns/call, right is the ratio; above 1.00 the fixed form is cheaper";
-    crossOver(runner, "cross-over: DynVec in-place (net) / Vec(n)", ratio_note, .inpl_net);
-    crossOver(runner, "cross-over: DynVec value-returning under smp_allocator / Vec(n)", ratio_note, .value_smp);
-    crossOver(runner, "cross-over: DynVec value-returning under DebugAllocator / Vec(n)", ratio_note, .value_dbg);
+    try crossOver(
+        .inpl_net,
+        &out,
+        runner,
+        "cross-over: DynVec in-place (net) / Vec(n)",
+        ratio_note,
+    );
+    try crossOver(
+        .value_smp,
+        &out,
+        runner,
+        "cross-over: DynVec value-returning under smp_allocator / Vec(n)",
+        ratio_note,
+    );
+    try crossOver(
+        .value_dbg,
+        &out,
+        runner,
+        "cross-over: DynVec value-returning under DebugAllocator / Vec(n)",
+        ratio_note,
+    );
 
-    std.debug.print("\n=== allocator round trip on its own, ns per alloc+free ===\n", .{});
-    std.debug.print("{s:>34}{s:>13}{s:>13}\n", .{ "box", "smp", "Debug" });
-    std.debug.print("{s}\n", .{dash60});
+    try out.print("\n=== allocator round trip on its own, ns per alloc+free ===\n", .{});
+    try out.print("{s:>34}{s:>13}{s:>13}\n", .{ "box", "smp", "Debug" });
+    try out.print("{s}\n", .{dash60});
     inline for (dims) |d| {
-        std.debug.print("{s:>34}", .{allocLabel(d.n)});
-        cell(nsFor(runner, allocName(d.s, "smp")));
-        cell(nsFor(runner, allocName(d.s, "debug")));
-        std.debug.print("\n", .{});
+        try out.print("{s:>34}", .{allocLabel(d.n)});
+        try cell(&out, nsFor(runner, allocName(d.s, "smp")));
+        try cell(&out, nsFor(runner, allocName(d.s, "debug")));
+        try out.print("\n", .{});
     }
-    std.debug.print("\n  'smp' is std.heap.smp_allocator, which the hot path uses, and 'Debug' is a\n", .{});
-    std.debug.print("  DebugAllocator. One row per box size, so a share can be divided by the round\n", .{});
-    std.debug.print("  trip that box actually pays rather than by one measured at another size.\n", .{});
+    try out.print("\n  'smp' is std.heap.smp_allocator, which the hot path uses, and 'Debug' is a\n", .{});
+    try out.print("  DebugAllocator. One row per box size, so a share can be divided by the round\n", .{});
+    try out.print("  trip that box actually pays rather than by one measured at another size.\n", .{});
 
-    std.debug.print("\n=== how much of a value-returning add is the allocator ===\n", .{});
-    std.debug.print("{s:>34}{s:>13}{s:>13}{s:>13}{s:>13} {s:>11}{s:>11}\n", .{
+    try out.print("\n=== how much of a value-returning add is the allocator ===\n", .{});
+    try out.print("{s:>34}{s:>13}{s:>13}{s:>13}{s:>13} {s:>11}{s:>11}\n", .{
         "box", "rt smp", "rt Debug", "add smp", "add Debug", "% rt smp", "% rt Debug",
     });
-    std.debug.print("{s}\n", .{dash110});
+    try out.print("{s}\n", .{dash110});
     inline for (dims) |d| {
         const pr = plan[dimSlot(d.n)][add_op];
         const rt_smp = nsFor(runner, allocName(d.s, "smp"));
         const rt_dbg = nsFor(runner, allocName(d.s, "debug"));
         const val_smp = if (pr.val[@intFromEnum(Alloc.smp)]) |k| nsFor(runner, k) else null;
         const val_dbg = if (pr.val[@intFromEnum(Alloc.dbg)]) |k| nsFor(runner, k) else null;
-        std.debug.print("{s:>34}", .{allocLabel(d.n)});
-        cell(rt_smp);
-        cell(rt_dbg);
-        cell(val_smp);
-        cell(val_dbg);
-        shareCell(rt_smp, val_smp);
-        shareCell(rt_dbg, val_dbg);
-        std.debug.print("\n", .{});
+        try out.print("{s:>34}", .{allocLabel(d.n)});
+        try cell(&out, rt_smp);
+        try cell(&out, rt_dbg);
+        try cell(&out, val_smp);
+        try cell(&out, val_dbg);
+        try shareCell(&out, rt_smp, val_smp);
+        try shareCell(&out, rt_dbg, val_dbg);
+        try out.print("\n", .{});
     }
-    std.debug.print("\n  'rt' is the round trip at that exact box size, 'add' the value-returning add\n", .{});
-    std.debug.print("  on the same allocator. The percentage is the round trip's share of that one\n", .{});
-    std.debug.print("  call; the remainder is the componentwise fold and the sink, and is the\n", .{});
-    std.debug.print("  library's. The same division holds for every value-returning row above.\n", .{});
-    std.debug.print("  Every figure is the minimum of seven repetitions, so a share above 100 just\n", .{});
-    std.debug.print("  means the round trip's best repetition beat the call's.\n", .{});
+    try out.print("\n  'rt' is the round trip at that exact box size, 'add' the value-returning add\n", .{});
+    try out.print("  on the same allocator. The percentage is the round trip's share of that one\n", .{});
+    try out.print("  call; the remainder is the componentwise fold and the sink, and is the\n", .{});
+    try out.print("  library's. The same division holds for every value-returning row above.\n", .{});
+    try out.print("  Every figure is the minimum of seven repetitions, so a share above 100 just\n", .{});
+    try out.print("  means the round trip's best repetition beat the call's.\n", .{});
 }

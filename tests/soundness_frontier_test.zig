@@ -53,6 +53,7 @@ const min_subnormal = shared.min_subnormal;
 const neg_inf128 = shared.neg_inf128;
 const neg_inf64 = shared.neg_inf64;
 const quotientHolds = shared.quotientHolds;
+const reportErr = shared.reportErr;
 const showCase = shared.showCase;
 const sumGeq = shared.sumGeq;
 const sumLeq = shared.sumLeq;
@@ -333,16 +334,6 @@ const Canonical = struct {
     lo_unbounded: bool,
     hi_unbounded: bool,
 
-    /// The set as a `Span`, for the references that are built out of spans.
-    fn span(c: Canonical) Span {
-        return .{
-            .lo = ex(c.lo),
-            .hi = ex(c.hi),
-            .lo_open = c.lo_unbounded,
-            .hi_open = c.hi_unbounded,
-        };
-    }
-
     /// Whether the SET these canonical ends denote contains zero. BOTH ends
     /// decide it, not the low one alone: `[-3,-1]` has a low end below zero
     /// and does not reach it, and reading only the low end makes the whole
@@ -354,10 +345,6 @@ const Canonical = struct {
     /// and `[-inf, 3]` is true, which is right.
     fn reachesZero(c: Canonical) bool {
         return c.lo <= 0.0 and c.hi >= 0.0;
-    }
-
-    fn isLine(c: Canonical) bool {
-        return c.lo_unbounded and c.hi_unbounded;
     }
 };
 
@@ -398,12 +385,6 @@ fn lowOf(c: Canonical) f128 {
 /// The mirror of `lowOf` for the high end.
 fn highOf(c: Canonical) f128 {
     return if (c.hi_unbounded) inf128 else ex(c.hi);
-}
-
-fn endpointOf(x: f64) End {
-    if (x == inf64) return .{ .ray = .{ .c = ex(std.math.floatMax(f64)), .up = true } };
-    if (x == neg_inf64) return .{ .ray = .{ .c = -ex(std.math.floatMax(f64)), .up = false } };
-    return .{ .value = ex(x) };
 }
 
 /// The two endpoints of a canonical operand as the SETS they stand for: the
@@ -798,16 +779,31 @@ fn frontierReference(op: Op, a: Canonical, b: Canonical, _: f64) ?Range {
 /// for the reason `Op.oracle` gives for the finite sweep.
 fn frontierOracle(op: Op) []const u8 {
     return switch (op) {
-        .add => "the sum of the two attained closed ends, held as its two f64 operands and judged through the TwoSum residual, with the image running off below or above exactly when one of the two ends of an operand does",
-        .sub => "the crossed corner sums of the attained closed ends, held as their two f64 operands and judged through the TwoSum residual; rays of opposite sign cannot cancel, and the same ray cancels to the whole line",
-        .translate => "the reference add gives, against the canonical overflow ray an infinite delta stands for rather than the infinity as a point",
-        .expand => "the whole line at a positive ray margin, and at a negative ray margin the union over every real margin at or below -floatMax, which is the attained closed ends pushed apart by exactly floatMax",
-        .neg => "the reflected canonical ray, the ends swapping so that an infinite end becomes the infinity it reflects to and a finite one its own negation",
-        .mul => "the hull of the four corner SETS, each a point or a ray, with a zero factor collapsing its corner to the point zero",
-        .abs => "the attained closed-end magnitudes, with exactly zero where the interval spans it and +inf wherever either end is unbounded",
-        .sqr => "the attained closed-end squares, with exactly zero where the interval spans it and +inf wherever either end is unbounded",
-        .scale => "for an unbounded input the operand itself at |factor| = 1 and the whole line at every other factor, and for a bounded input the exact affine extrema compared through the five-term f128 expansion of the original f64 endpoints, with the whole line demanded at an infinite factor on any box that has width and the point itself demanded on one that does not",
-        .div, .recip => "the whole line where the divisor reaches zero or is the whole line, zero as an accumulation point at every ray end of the divisor, the matching infinity at every ray end of the dividend, and exact cross-multiplication of every attained corner",
+        .add => "the sum of the two attained closed ends, held as its two f64 operands and judged through the" ++
+            "TwoSum residual, with the image running off below or above exactly when one of the two ends of an" ++
+            "operand does",
+        .sub => "the crossed corner sums of the attained closed ends, held as their two f64 operands and judged" ++
+            "through the TwoSum residual; rays of opposite sign cannot cancel, and the same ray cancels to the whole" ++
+            "line",
+        .translate => "the reference add gives, against the canonical overflow ray an infinite delta stands for" ++
+            "rather than the infinity as a point",
+        .expand => "the whole line at a positive ray margin, and at a negative ray margin the union over every real" ++
+            "margin at or below -floatMax, which is the attained closed ends pushed apart by exactly floatMax",
+        .neg => "the reflected canonical ray, the ends swapping so that an infinite end becomes the infinity it" ++
+            "reflects to and a finite one its own negation",
+        .mul => "the hull of the four corner SETS, each a point or a ray, with a zero factor collapsing its corner" ++
+            "to the point zero",
+        .abs => "the attained closed-end magnitudes, with exactly zero where the interval spans it and +inf" ++
+            "wherever either end is unbounded",
+        .sqr => "the attained closed-end squares, with exactly zero where the interval spans it and +inf wherever" ++
+            "either end is unbounded",
+        .scale => "for an unbounded input the operand itself at |factor| = 1 and the whole line at every other" ++
+            "factor, and for a bounded input the exact affine extrema compared through the five-term f128 expansion" ++
+            "of the original f64 endpoints, with the whole line demanded at an infinite factor on any box that has" ++
+            "width and the point itself demanded on one that does not",
+        .div, .recip => "the whole line where the divisor reaches zero or is the whole line, zero as an" ++
+            "accumulation point at every ray end of the divisor, the matching infinity at every ray end of the" ++
+            "dividend, and exact cross-multiplication of every attained corner",
         .hull, .intersect => "the min and the max of the two lower and upper ends, exact, and null where they cross",
         else => unreachable,
     };
@@ -880,7 +876,7 @@ fn classifyRow(op: Op, a: Shape, b: ?Shape, s: f64) Row {
 /// same reference and answer differently.
 fn frontierHolds(op: Op, a: Canonical, b: Canonical, s: f64, c: Case, got: Value) bool {
     if (frontierSum(op, a, b, s)) |f| return f.holds(got.intervalOrNull() orelse return false);
-    const one = Canonical{ .lo = 1.0, .hi = 1.0, .lo_unbounded = false, .hi_unbounded = false };
+    const one: Canonical = .{ .lo = 1.0, .hi = 1.0, .lo_unbounded = false, .hi_unbounded = false };
     switch (op) {
         .div => return frontierQuotientHolds(a, b, got.intervalOrNull() orelse return false),
         .recip => return frontierQuotientHolds(one, a, got.intervalOrNull() orelse return false),
@@ -933,13 +929,24 @@ const Skips = struct {
     /// that a skipped count in the log is never a bare number.
     fn report(s: Skips, op: Op) void {
         if (s.unordered > 0) {
-            std.debug.print("      {d} rows not called: the pair is not ordered, and Interval.init traps on it\n", .{s.unordered});
+            reportErr(
+                "      {d} rows not called: the pair is not ordered, and Interval.init traps on it\n",
+                .{s.unordered},
+            );
         }
         if (s.expand_width > 0) {
-            std.debug.print("      {d} rows not called: {s} needs margin >= -(hi - lo) / 2, and this bounded box refuses the margin\n", .{ s.expand_width, op.label() });
+            reportErr(
+                "      {d} rows not called: {s} needs margin >= -(hi - lo) / 2, and this bounded box refuses the" ++
+                    "margin\n",
+                .{ s.expand_width, op.label() },
+            );
         }
         if (s.expand_negative_ray > 0) {
-            std.debug.print("      {d} rows not called: the margin is the negative overflow ray, every real margin at or below -floatMax, and no bounded box accepts any of them - [-floatMax,floatMax] included\n", .{s.expand_negative_ray});
+            reportErr(
+                "      {d} rows not called: the margin is the negative overflow ray, every real margin at or below" ++
+                    "-floatMax, and no bounded box accepts any of them - [-floatMax,floatMax] included\n",
+                .{s.expand_negative_ray},
+            );
         }
     }
 };
@@ -961,7 +968,10 @@ const frontier_trace = true;
 fn rowText(buf: []u8, op: Op, a: Shape, b: ?Shape, s: f64) []const u8 {
     if (op.usesScalar()) {
         if (b) |x| {
-            return std.fmt.bufPrint(buf, "a = {s}, b = {s}, s = {e}", .{ a.label(), x.label(), s }) catch "a shape pair";
+            const text = std.fmt.bufPrint(buf, "a = {s}, b = {s}, s = {e}", .{
+                a.label(), x.label(), s,
+            }) catch "a shape pair";
+            return text;
         }
         return std.fmt.bufPrint(buf, "a = {s}, s = {e}", .{ a.label(), s }) catch "one shape";
     }
@@ -976,7 +986,7 @@ fn rowText(buf: []u8, op: Op, a: Shape, b: ?Shape, s: f64) []const u8 {
 /// anything else because every operation that ignores `b` ignores it
 /// entirely, and a stand-in that is a valid canonical set means the
 /// reference cannot be disturbed by a choice made here.
-fn b_canonical(b: ?Shape) Canonical {
+fn bCanonical(b: ?Shape) Canonical {
     if (b) |x| return x.canonical();
     return .{ .lo = 0.0, .hi = 0.0, .lo_unbounded = false, .hi_unbounded = false };
 }
@@ -992,7 +1002,7 @@ fn frontierRow(op: Op, t: *Tally, skips: *Skips, a: Shape, b: ?Shape, s: f64) vo
             return;
         },
     }
-    const c = Case{
+    const c: Case = .{
         .op = op,
         .a = a.interval(),
         .b = if (b) |x| x.interval() else Interval.init(0.0, 0.0),
@@ -1000,21 +1010,21 @@ fn frontierRow(op: Op, t: *Tally, skips: *Skips, a: Shape, b: ?Shape, s: f64) vo
     };
     var buf: [96]u8 = undefined;
     if (frontier_trace) {
-        std.debug.print("    row {s}: {s}\n", .{ op.label(), rowText(&buf, op, a, b, s) });
+        reportErr("    row {s}: {s}\n", .{ op.label(), rowText(&buf, op, a, b, s) });
     }
     const got = apply(c);
-    if (frontierHolds(op, a.canonical(), b_canonical(b), s, c, got)) {
+    if (frontierHolds(op, a.canonical(), bCanonical(b), s, c, got)) {
         t.checked += 1;
         return;
     }
     t.failures += 1;
     if (t.shown >= max_detail) return;
     t.shown += 1;
-    std.debug.print("    FAIL frontier {s}: the answer is not what the frontier reference requires\n", .{op.label()});
-    std.debug.print("      shapes    {s}\n", .{rowText(&buf, op, a, b, s)});
+    reportErr("    FAIL frontier {s}: the answer is not what the frontier reference requires\n", .{op.label()});
+    reportErr("      shapes    {s}\n", .{rowText(&buf, op, a, b, s)});
     showCase(c, got);
-    diagnoseFrontier(op, a.canonical(), b_canonical(b), s, got);
-    std.debug.print("      the frontier reference is {s}\n", .{frontierOracle(op)});
+    diagnoseFrontier(op, a.canonical(), bCanonical(b), s, got);
+    reportErr("      the frontier reference is {s}\n", .{frontierOracle(op)});
 }
 
 /// What the answer missed, in the terms of the reference that missed it.
@@ -1028,54 +1038,79 @@ fn diagnoseFrontier(op: Op, a: Canonical, b: Canonical, s: f64, got: Value) void
         const lo = twoSum(f.alo, f.blo);
         const hi = twoSum(f.ahi, f.bhi);
         if (f.lo_unbounded) {
-            std.debug.print("      the true image runs off to -inf, so only a lo of -inf encloses it\n", .{});
+            reportErr("      the true image runs off to -inf, so only a lo of -inf encloses it\n", .{});
         } else {
-            std.debug.print("      true lo = {e} + {e} = {e} + {e} exactly\n", .{ f.alo, f.blo, lo.s, lo.err });
+            reportErr("      true lo = {e} + {e} = {e} + {e} exactly\n", .{ f.alo, f.blo, lo.s, lo.err });
         }
         if (f.hi_unbounded) {
-            std.debug.print("      the true image runs off to +inf, so only a hi of +inf encloses it\n", .{});
+            reportErr("      the true image runs off to +inf, so only a hi of +inf encloses it\n", .{});
         } else {
-            std.debug.print("      true hi = {e} + {e} = {e} + {e} exactly\n", .{ f.ahi, f.bhi, hi.s, hi.err });
+            reportErr("      true hi = {e} + {e} = {e} + {e} exactly\n", .{ f.ahi, f.bhi, hi.s, hi.err });
         }
-        if (!f.lowerOk(g.lo)) std.debug.print("      the lower bound excludes the true minimum\n", .{});
-        if (!f.upperOk(g.hi)) std.debug.print("      the upper bound excludes the true maximum\n", .{});
+        if (!f.lowerOk(g.lo)) reportErr("      the lower bound excludes the true minimum\n", .{});
+        if (!f.upperOk(g.hi)) reportErr("      the upper bound excludes the true maximum\n", .{});
         return;
     }
     if (op == .scale and (a.lo_unbounded or a.hi_unbounded)) {
         if (@abs(ex(s)) == 1.0) {
-            std.debug.print("      |factor| = 1 is the identity for every centre, so the answer has to be the operand itself\n", .{});
+            reportErr(
+                "      |factor| = 1 is the identity for every centre, so the answer has to be the operand itself\n",
+                .{},
+            );
         } else {
-            std.debug.print("      no centre exists for an unbounded input, so the contract's answer is the whole line at every factor but +/-1\n", .{});
+            reportErr(
+                "      no centre exists for an unbounded input, so the contract's answer is the whole line at every" ++
+                    "factor but +/-1\n",
+                .{},
+            );
         }
         return;
     }
     if (op == .scale) {
-        const bound = ScaleBound{ .lo = a.lo, .hi = a.hi, .mag = @abs(s) };
+        const bound: ScaleBound = .{ .lo = a.lo, .hi = a.hi, .mag = @abs(s) };
         if (@abs(s) == inf64 and a.lo < a.hi) {
-            std.debug.print("      an infinite factor is an unknown finite magnitude, and the union over all of them is the whole line for a box with width\n", .{});
+            reportErr(
+                "      an infinite factor is an unknown finite magnitude, and the union over all of them is" ++
+                    "the whole line for a box with width\n",
+                .{},
+            );
         } else {
-            std.debug.print("      A = {e}, B = {e}, G = {e}, judged through the exact five-term expansion and never through a midpoint\n", .{ bound.lo, bound.hi, bound.mag });
+            reportErr(
+                "      A = {e}, B = {e}, G = {e}, judged through the exact five-term expansion and never through a" ++
+                    "midpoint\n",
+                .{ bound.lo, bound.hi, bound.mag },
+            );
         }
-        if (!bound.lowerOk(g.lo)) std.debug.print("      the lower bound excludes the true minimum\n", .{});
-        if (!bound.upperOk(g.hi)) std.debug.print("      the upper bound excludes the true maximum\n", .{});
+        if (!bound.lowerOk(g.lo)) reportErr("      the lower bound excludes the true minimum\n", .{});
+        if (!bound.upperOk(g.hi)) reportErr("      the upper bound excludes the true maximum\n", .{});
         return;
     }
     if (op == .div or op == .recip) {
-        std.debug.print("      quotient containment, by exact cross-multiplication; see the frontier reference for the rule each corner falls under\n", .{});
+        reportErr(
+            "      quotient containment, by exact cross-multiplication; see the frontier reference for the rule each" ++
+                "corner falls under\n",
+            .{},
+        );
         return;
     }
     const r = frontierReference(op, a, b, s) orelse return;
-    std.debug.print("      frontier lo = {e}\n", .{r.lo});
-    std.debug.print("      frontier hi = {e}\n", .{r.hi});
+    reportErr("      frontier lo = {e}\n", .{r.lo});
+    reportErr("      frontier hi = {e}\n", .{r.hi});
     if (r.lo_beyond) {
-        std.debug.print("      the true minimum is a real past the end of the f64 range, so a returned lo of +inf excludes it\n", .{});
+        reportErr(
+            "      the true minimum is a real past the end of the f64 range, so a returned lo of +inf excludes it\n",
+            .{},
+        );
     } else if (!lowerOk(r.lo, g.lo)) {
-        std.debug.print("      lower bound is ABOVE the true minimum and excludes it\n", .{});
+        reportErr("      lower bound is ABOVE the true minimum and excludes it\n", .{});
     }
     if (r.hi_beyond) {
-        std.debug.print("      the true maximum is a real past the end of the f64 range, so a returned hi of -inf excludes it\n", .{});
+        reportErr(
+            "      the true maximum is a real past the end of the f64 range, so a returned hi of -inf excludes it\n",
+            .{},
+        );
     } else if (!upperOk(r.hi, g.hi)) {
-        std.debug.print("      upper bound is BELOW the true maximum and excludes it\n", .{});
+        reportErr("      upper bound is BELOW the true maximum and excludes it\n", .{});
     }
 }
 
@@ -1097,7 +1132,7 @@ fn diagnoseFrontier(op: Op, a: Canonical, b: Canonical, s: f64, got: Value) void
 fn expectCanonicalRays() !void {
     const pos = Interval.init(inf64, inf64);
     const neg = Interval.init(neg_inf64, neg_inf64);
-    std.debug.print(
+    reportErr(
         "      canonical rays from the constructor: [+inf,+inf] -> [{e}, {e}], [-inf,-inf] -> [{e}, {e}]\n",
         .{ pos.lo, pos.hi, neg.lo, neg.hi },
     );
@@ -1274,7 +1309,7 @@ test "the exact bounded-scale comparator rejects the inward bounds an f128 midpo
     // minimum and which therefore refuses the sound bound `[min_subnormal,
     // floatMax]`. The exact predicate accepts it, because the two signed
     // differences are zero to the last bit.
-    const identity = ScaleBound{ .lo = tiny, .hi = fmax, .mag = 1.0 };
+    const identity: ScaleBound = .{ .lo = tiny, .hi = fmax, .mag = 1.0 };
     try std.testing.expect(identity.lowerOk(tiny));
     try std.testing.expect(identity.upperOk(fmax));
     try std.testing.expect(!identity.lowerOk(interval.nextUp(tiny)));
@@ -1286,11 +1321,14 @@ test "the exact bounded-scale comparator rejects the inward bounds an f128 midpo
     // `floatMax/2` exactly, which is a real half a subnormal below the true
     // centre, and the exact comparison refuses it as an UPPER bound while
     // accepting it as a lower one.
-    const centre = ScaleBound{ .lo = tiny, .hi = fmax, .mag = 0.0 };
+    const centre: ScaleBound = .{ .lo = tiny, .hi = fmax, .mag = 0.0 };
     const rounded_centre: f64 = @floatCast((ex(tiny) + ex(fmax)) / 2.0);
-    std.debug.print("\n  scale centre of [{e}, {e}] at a factor of zero\n", .{ tiny, fmax });
-    std.debug.print("    the rounded f128 midpoint is {e}, a real half a subnormal BELOW the true centre {e} + {e} / 2\n", .{ rounded_centre, fmax, tiny });
-    std.debug.print("    read as a lower bound {s}, as an upper bound {s}\n", .{
+    reportErr("\n  scale centre of [{e}, {e}] at a factor of zero\n", .{ tiny, fmax });
+    reportErr(
+        "    the rounded f128 midpoint is {e}, a real half a subnormal BELOW the true centre {e} + {e} / 2\n",
+        .{ rounded_centre, fmax, tiny },
+    );
+    reportErr("    read as a lower bound {s}, as an upper bound {s}\n", .{
         if (centre.lowerOk(rounded_centre)) "ACCEPTED" else "REJECTED",
         if (centre.upperOk(rounded_centre)) "ACCEPTED" else "REJECTED",
     });
@@ -1301,22 +1339,26 @@ test "the exact bounded-scale comparator rejects the inward bounds an f128 midpo
     // the true centre of `[-min_subnormal, floatMax]` is
     // `floatMax/2 - min_subnormal/2`, so `floatMax/2` is above it and is
     // not a lower bound.
-    const below = ScaleBound{ .lo = -tiny, .hi = fmax, .mag = 0.0 };
-    std.debug.print("    the mirror box [-{e}, {e}] puts its true centre at {e} / 2 - {e} / 2, a half subnormal below it, so read as a lower bound {s}, as an upper bound {s}\n", .{
-        tiny,
-        fmax,
-        fmax,
-        tiny,
-        if (below.lowerOk(rounded_centre)) "ACCEPTED" else "REJECTED",
-        if (below.upperOk(rounded_centre)) "ACCEPTED" else "REJECTED",
-    });
+    const below: ScaleBound = .{ .lo = -tiny, .hi = fmax, .mag = 0.0 };
+    reportErr(
+        "    the mirror box [-{e}, {e}] puts its true centre at {e} / 2 - {e} / 2, a half" ++
+            "subnormal below it, so read as a lower bound {s}, as an upper bound {s}\n",
+        .{
+            tiny,
+            fmax,
+            fmax,
+            tiny,
+            if (below.lowerOk(rounded_centre)) "ACCEPTED" else "REJECTED",
+            if (below.upperOk(rounded_centre)) "ACCEPTED" else "REJECTED",
+        },
+    );
     try std.testing.expect(!below.lowerOk(fmax / 2.0));
     try std.testing.expect(below.upperOk(fmax / 2.0));
 
     // The same predicate on a wholly subnormal lattice, where both extrema
     // are reals no `f64` holds: 1.25 and 1.75 times the smallest subnormal.
     // The box itself encloses them, and each inward point does not.
-    const lattice = ScaleBound{ .lo = tiny, .hi = 2.0 * tiny, .mag = 0.5 };
+    const lattice: ScaleBound = .{ .lo = tiny, .hi = 2.0 * tiny, .mag = 0.5 };
     try std.testing.expect(lattice.lowerOk(tiny));
     try std.testing.expect(lattice.upperOk(2.0 * tiny));
     try std.testing.expect(!lattice.lowerOk(2.0 * tiny));
@@ -1326,7 +1368,7 @@ test "the exact bounded-scale comparator rejects the inward bounds an f128 midpo
     // the case a rounded head cannot represent at all: `[-1,1]` at a factor
     // of one has `L = -1` and `H = 1` to the last bit, and one step in from
     // either end is a step inside.
-    const parity = ScaleBound{ .lo = -1.0, .hi = 1.0, .mag = 1.0 };
+    const parity: ScaleBound = .{ .lo = -1.0, .hi = 1.0, .mag = 1.0 };
     try std.testing.expect(parity.lowerOk(-1.0));
     try std.testing.expect(parity.upperOk(1.0));
     try std.testing.expect(!parity.lowerOk(interval.nextUp(-1.0)));
@@ -1337,7 +1379,7 @@ test "the exact bounded-scale comparator rejects the inward bounds an f128 midpo
     // are reals past the end of the `f64` range and not numbers at all in it.
     // The enclosing infinity is the only lower bound there is, and `floatMax`
     // is a real inside the image and is refused.
-    const overflowed = ScaleBound{ .lo = -fmax, .hi = fmax, .mag = 2.0 };
+    const overflowed: ScaleBound = .{ .lo = -fmax, .hi = fmax, .mag = 2.0 };
     try std.testing.expect(overflowed.lowerOk(neg_inf64));
     try std.testing.expect(overflowed.upperOk(inf64));
     try std.testing.expect(!overflowed.lowerOk(fmax));
@@ -1566,7 +1608,7 @@ test "frontier: the subtraction witness is the same ray, and the reflection is t
 // at the first one.
 test "guard: width and distanceTo are judged as VALUES - too large fails as loudly as too small" {
     const a = Interval.init(1.0, 2.0);
-    const width_case = Case{ .op = .width, .a = a, .b = Interval.init(0.0, 0.0), .s = 0.0 };
+    const width_case: Case = .{ .op = .width, .a = a, .b = Interval.init(0.0, 0.0), .s = 0.0 };
     const true_width = exactWidth(a);
     // Four times the true width, plus one. A rule that asks only "is it big
     // enough" takes this, and it is plenty big.
@@ -1584,7 +1626,7 @@ test "guard: width and distanceTo are judged as VALUES - too large fails as loud
     // bound. A rule that let +inf through for EVERY width is what left the
     // finite cases unguarded.
     const full = Interval.init(-std.math.floatMax(f64), std.math.floatMax(f64));
-    const full_case = Case{ .op = .width, .a = full, .b = Interval.init(0.0, 0.0), .s = 0.0 };
+    const full_case: Case = .{ .op = .width, .a = full, .b = Interval.init(0.0, 0.0), .s = 0.0 };
     const saturated = std.math.isInf(exactWidth(full));
     const full_ok = holds(full_case, .{ .scalar = full.width() });
     // A mutant answering the finite floatMax there is wrong: the true width
@@ -1593,25 +1635,49 @@ test "guard: width and distanceTo are judged as VALUES - too large fails as loud
 
     // `distanceTo` is a value for the same reasons and is judged the same
     // way, on both sides.
-    const far = Case{ .op = .distance_to, .a = Interval.init(1.0, 2.0), .b = Interval.init(0.0, 0.0), .s = 10.0 };
+    const far: Case = .{ .op = .distance_to, .a = Interval.init(1.0, 2.0), .b = Interval.init(0.0, 0.0), .s = 10.0 };
     const true_gap = exactDistanceTo(far.a, far.s);
     const gap_inflated: f64 = @floatCast(true_gap * 4.0 + 1.0);
     const gap_ok = holds(far, .{ .scalar = far.a.distanceTo(far.s) });
     const gap_mutant_ok = holds(far, .{ .scalar = gap_inflated });
     const gap_infinite_ok = holds(far, .{ .scalar = inf64 });
 
-    std.debug.print("\n  guard: width, the exact difference of two f64 endpoints, judged as a VALUE\n", .{});
-    std.debug.print("    the true width of [{e}, {e}] is exactly {e}\n", .{ a.lo, a.hi, @as(f64, @floatCast(true_width)) });
-    std.debug.print("    what the library answers ({e})                        -> {s}\n", .{ a.width(), if (true_ok) "ACCEPTED" else "REJECTED" });
-    std.debug.print("    a mutant four times too large ({e})                    -> {s}\n", .{ inflated, if (inflated_ok) "ACCEPTED" else "rejected" });
-    std.debug.print("    a mutant answering +inf for that finite width          -> {s}\n", .{if (infinite_ok) "ACCEPTED" else "rejected"});
-    std.debug.print("    the exact width of the whole format is {e}, and the answer {e} -> {s}\n", .{ exactWidth(full), full.width(), if (full_ok) "ACCEPTED" else "REJECTED" });
-    std.debug.print("    a mutant answering floatMax there                     -> {s}\n", .{if (full_mutant_ok) "ACCEPTED" else "rejected"});
-    std.debug.print("  guard: the distance from 10 to [1, 2], the same kind of value\n", .{});
-    std.debug.print("    the true distance is exactly {e}\n", .{@as(f64, @floatCast(true_gap))});
-    std.debug.print("    what the library answers ({e})                        -> {s}\n", .{ far.a.distanceTo(far.s), if (gap_ok) "ACCEPTED" else "REJECTED" });
-    std.debug.print("    a mutant four times too large ({e})                    -> {s}\n", .{ gap_inflated, if (gap_mutant_ok) "ACCEPTED" else "rejected" });
-    std.debug.print("    a mutant answering +inf for it                        -> {s}\n", .{if (gap_infinite_ok) "ACCEPTED" else "rejected"});
+    reportErr("\n  guard: width, the exact difference of two f64 endpoints, judged as a VALUE\n", .{});
+    reportErr("    the true width of [{e}, {e}] is exactly {e}\n", .{ a.lo, a.hi, @as(f64, @floatCast(true_width)) });
+    reportErr(
+        "    what the library answers ({e})                        -> {s}\n",
+        .{ a.width(), if (true_ok) "ACCEPTED" else "REJECTED" },
+    );
+    reportErr(
+        "    a mutant four times too large ({e})                    -> {s}\n",
+        .{ inflated, if (inflated_ok) "ACCEPTED" else "rejected" },
+    );
+    reportErr(
+        "    a mutant answering +inf for that finite width          -> {s}\n",
+        .{if (infinite_ok) "ACCEPTED" else "rejected"},
+    );
+    reportErr(
+        "    the exact width of the whole format is {e}, and the answer {e} -> {s}\n",
+        .{ exactWidth(full), full.width(), if (full_ok) "ACCEPTED" else "REJECTED" },
+    );
+    reportErr(
+        "    a mutant answering floatMax there                     -> {s}\n",
+        .{if (full_mutant_ok) "ACCEPTED" else "rejected"},
+    );
+    reportErr("  guard: the distance from 10 to [1, 2], the same kind of value\n", .{});
+    reportErr("    the true distance is exactly {e}\n", .{@as(f64, @floatCast(true_gap))});
+    reportErr(
+        "    what the library answers ({e})                        -> {s}\n",
+        .{ far.a.distanceTo(far.s), if (gap_ok) "ACCEPTED" else "REJECTED" },
+    );
+    reportErr(
+        "    a mutant four times too large ({e})                    -> {s}\n",
+        .{ gap_inflated, if (gap_mutant_ok) "ACCEPTED" else "rejected" },
+    );
+    reportErr(
+        "    a mutant answering +inf for it                        -> {s}\n",
+        .{if (gap_infinite_ok) "ACCEPTED" else "rejected"},
+    );
 
     try std.testing.expect(true_ok);
     try std.testing.expect(!inflated_ok);
@@ -1638,7 +1704,7 @@ test "guard: width and distanceTo are judged as VALUES - too large fails as loud
 // A struct literal rather than `init`, deliberately, and for the reason
 // `tests/nan_probe.zig` gives for building its poisoned operand the same
 // way: it is how a poisoned interval arrives from outside the type.
-test "guard: an inverted pair is refused by the constructor, and the two operations that never call it say so themselves" {
+test "guard: an inverted pair is refused by init, and hull and intersect never call it" {
     const inverted: Interval = .{ .lo = inf64, .hi = neg_inf64 };
 
     // `hull` forms its answer from a struct literal and never calls `init`,

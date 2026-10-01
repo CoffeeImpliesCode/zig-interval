@@ -24,6 +24,7 @@ const expectEnclosure = shared.expectEnclosure;
 const ex = shared.ex;
 const lowerOk = shared.lowerOk;
 const max_detail = shared.max_detail;
+const reportErr = shared.reportErr;
 const tanhRef = shared.tanhRef;
 const upperOk = shared.upperOk;
 
@@ -69,20 +70,24 @@ fn reportTanhMiss(x: f64, got: Interval, want: Range, shown: *usize) void {
     shown.* += 1;
     const gap_lo = @abs((ex(got.lo) - want.lo) * 0x1p52 / @max(@abs(ex(got.lo)), @abs(want.lo)));
     const gap_hi = @abs((ex(got.hi) - want.hi) * 0x1p52 / @max(@abs(ex(got.hi)), @abs(want.hi)));
-    std.debug.print("    FAIL tanh at x = {e}  bits 0x{X:0>16}\n", .{ x, @as(u64, @bitCast(x)) });
-    std.debug.print("      returned lo = {e}  bits 0x{X:0>16}\n", .{ got.lo, @as(u64, @bitCast(got.lo)) });
-    std.debug.print("      returned hi = {e}  bits 0x{X:0>16}\n", .{ got.hi, @as(u64, @bitCast(got.hi)) });
-    std.debug.print("      true        = {e}\n", .{want.lo});
+    reportErr("    FAIL tanh at x = {e}  bits 0x{X:0>16}\n", .{ x, @as(u64, @bitCast(x)) });
+    reportErr("      returned lo = {e}  bits 0x{X:0>16}\n", .{ got.lo, @as(u64, @bitCast(got.lo)) });
+    reportErr("      returned hi = {e}  bits 0x{X:0>16}\n", .{ got.hi, @as(u64, @bitCast(got.hi)) });
+    reportErr("      true        = {e}\n", .{want.lo});
     if (!lowerOk(want.lo, got.lo)) {
-        std.debug.print("      the lower bound is ABOVE the true value and excludes it by {e} ULP\n", .{gap_lo});
+        reportErr("      the lower bound is ABOVE the true value and excludes it by {e} ULP\n", .{gap_lo});
     }
     if (!upperOk(want.hi, got.hi)) {
-        std.debug.print("      the upper bound is BELOW the true value and excludes it by {e} ULP\n", .{gap_hi});
+        reportErr("      the upper bound is BELOW the true value and excludes it by {e} ULP\n", .{gap_hi});
     }
-    std.debug.print("      the nearest f64 to that truth is {e}, so an oracle built on f64 compares it with itself and reports this sound\n", .{@as(f64, @floatCast(want.lo))});
+    reportErr(
+        "      the nearest f64 to that truth is {e}, so an oracle built on f64" ++
+            "compares it with itself and reports this sound\n",
+        .{@as(f64, @floatCast(want.lo))},
+    );
 }
 
-test "reproducer 6: tanh at the argument where the primitive is 2.14 ULP out - the two-ULP bound cut the true value out" {
+test "reproducer 6: tanh at the witness argument, 2.14 ULP out and cut out by the two-ULP bound" {
     // The minimal case, named and pinned rather than left to a sweep. The
     // two-ULP widening returned [0.22735067345628182, 0.22735067345628193]
     // here, and the true value is 0.227350673456281817160566003737, which
@@ -106,7 +111,7 @@ test "reproducer 6: tanh at the argument where the primitive is 2.14 ULP out - t
     // `f64` would compare those two numbers, find them equal, and report
     // the defect sound — which is why the reference above is `f128`.
     const truth = tanhRef(x).lo;
-    const rounded = @as(f64, @floatCast(truth));
+    const rounded: f64 = @floatCast(truth);
     try std.testing.expect(rounded == 0.22735067345628182);
     try std.testing.expect(ex(rounded) > truth);
 }
@@ -135,11 +140,11 @@ test "tanh: every argument of the directed band over |x| <= 0.5 is enclosed" {
         failures += 1;
         reportTanhMiss(x, got, want, &shown);
     }
-    std.debug.print("  tanh band |x| <= {d}, 2^{d} steps: {d} checked, {d} FAILED\n", .{
+    reportErr("  tanh band |x| <= {d}, 2^{d} steps: {d} checked, {d} FAILED\n", .{
         tanh_band, tanh_band_log2, steps + 1, failures,
     });
     if (failures > shown) {
-        std.debug.print("  tanh band: {d} further failures not printed individually\n", .{failures - shown});
+        reportErr("  tanh band: {d} further failures not printed individually\n", .{failures - shown});
     }
     try std.testing.expectEqual(@as(usize, 0), failures);
 }

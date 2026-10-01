@@ -2,6 +2,11 @@ const std = @import("std");
 const interval = @import("interval");
 const Interval = interval.Interval;
 
+/// The build's choice of how to re-run this binary, named here rather
+/// than inside the probe that spawns it, so the import sits with the
+/// others. See `runOwnershipProbe`.
+const probe_runner_options = @import("probe_runner_options");
+
 /// The result must contain the exact value and must not reach more than
 /// one ULP past it on either side. Together the two bounds pin the
 /// outward-rounding contract, without hardcoding which of the two
@@ -39,7 +44,10 @@ fn probes(i: Interval, out: *[4]f64) usize {
     return n;
 }
 
-const I = Interval.init;
+/// The scalar constructor, named once: these tests are about the box
+/// operations, and the ranges under them are the same handful of
+/// literals written out again and again.
+const iv = Interval.init;
 
 /// The true square of the distance from a point to a box, over the EXACT
 /// values of the per-component `distanceTo` results, taken in `f128`.
@@ -93,17 +101,17 @@ fn expectNormBounded(got: f64, ds: []const f64) !void {
 /// axes up cannot pass.
 fn sample() interval.Vec(3) {
     return interval.Vec(3).fromArray(.{
-        I(1.0, 3.0),
-        I(-2.0, 4.0),
-        I(10.0, 20.0),
+        iv(1.0, 3.0),
+        iv(-2.0, 4.0),
+        iv(10.0, 20.0),
     });
 }
 
 fn other() interval.Vec(3) {
     return interval.Vec(3).fromArray(.{
-        I(10.0, 20.0),
-        I(5.0, 7.0),
-        I(2.0, 2.0),
+        iv(10.0, 20.0),
+        iv(5.0, 7.0),
+        iv(2.0, 2.0),
     });
 }
 
@@ -112,9 +120,9 @@ fn other() interval.Vec(3) {
 /// range that spans zero.
 fn invertible() interval.Vec(3) {
     return interval.Vec(3).fromArray(.{
-        I(1.0, 3.0),
-        I(-2.0, -1.0),
-        I(10.0, 20.0),
+        iv(1.0, 3.0),
+        iv(-2.0, -1.0),
+        iv(10.0, 20.0),
     });
 }
 
@@ -190,7 +198,7 @@ const ProbeVerdict = struct {
 /// exit status there reports the elided check and nothing else.
 fn probeDeinit(replace: bool) void {
     const gpa = std.testing.allocator;
-    var v = interval.DynVec.init(gpa, 3, I(1.0, 2.0)) catch @panic("probe: the box was not built");
+    var v = interval.DynVec.init(gpa, 3, iv(1.0, 2.0)) catch @panic("probe: the box was not built");
     const owned = v.comps;
     if (!replace) {
         v.deinit();
@@ -222,7 +230,7 @@ fn runOwnershipProbe(part: []const u8) !ProbeVerdict {
     defer env.deinit();
     try env.put(probe_var, part);
 
-    const runner = @import("probe_runner_options").runner;
+    const runner = probe_runner_options.runner;
     const argv = [_][]const u8{ runner orelse "", exe };
     var child = try std.process.spawn(std.testing.io, .{
         .argv = if (runner == null) argv[1..] else &argv,
@@ -237,6 +245,12 @@ fn runOwnershipProbe(part: []const u8) !ProbeVerdict {
     });
     defer child.kill(std.testing.io);
 
+    // The spawn above asked for a pipe on the child's standard error, so
+    // there is one to read. A child without it never reached the code
+    // under test and cannot report on it, which is a failure of this
+    // probe rather than a verdict about the library.
+    const stderr = child.stderr orelse return error.StderrPipeMissing;
+
     // The pipe is read BEFORE the wait, because the wait closes it, and to
     // the end, because the end of the stream is the child's exit. The buffer
     // is far below the capacity of a pipe, so a panic with a long stack
@@ -245,7 +259,7 @@ fn runOwnershipProbe(part: []const u8) !ProbeVerdict {
     var buf: [16384]u8 = undefined;
     var n: usize = 0;
     while (n < buf.len) {
-        const got = child.stderr.?.readStreaming(std.testing.io, &.{buf[n..]}) catch |err| switch (err) {
+        const got = stderr.readStreaming(std.testing.io, &.{buf[n..]}) catch |err| switch (err) {
             // The end of the stream is the child's exit, and it arrives as
             // an error rather than as a count of zero.
             error.EndOfStream => break,
@@ -355,7 +369,7 @@ test "contract: a comps replaced since construction traps deinit" {
 }
 
 test "Vec: init fills every component" {
-    const v = interval.Vec(3).init(I(1.0, 2.0));
+    const v = interval.Vec(3).init(iv(1.0, 2.0));
     try std.testing.expectEqual(@as(usize, 3), v.dim());
     for (v.slice()) |c| {
         try std.testing.expectEqual(@as(f64, 1.0), c.lo);
@@ -365,24 +379,24 @@ test "Vec: init fills every component" {
 
 test "Vec: fromArray keeps the components, dim is the comptime count" {
     const v = sample();
-    try std.testing.expect(v.get(0).eql(I(1.0, 3.0)));
-    try std.testing.expect(v.get(1).eql(I(-2.0, 4.0)));
-    try std.testing.expect(v.get(2).eql(I(10.0, 20.0)));
+    try std.testing.expect(v.get(0).eql(iv(1.0, 3.0)));
+    try std.testing.expect(v.get(1).eql(iv(-2.0, 4.0)));
+    try std.testing.expect(v.get(2).eql(iv(10.0, 20.0)));
     try std.testing.expectEqual(@as(usize, 3), v.dim());
-    try std.testing.expectEqual(@as(usize, 1), interval.Vec(1).init(I(0.0, 1.0)).dim());
-    try std.testing.expectEqual(@as(usize, 7), interval.Vec(7).init(I(0.0, 1.0)).dim());
+    try std.testing.expectEqual(@as(usize, 1), interval.Vec(1).init(iv(0.0, 1.0)).dim());
+    try std.testing.expectEqual(@as(usize, 7), interval.Vec(7).init(iv(0.0, 1.0)).dim());
 }
 
 test "Vec: get and set address one component" {
-    var v = interval.Vec(3).init(I(0.0, 1.0));
-    try std.testing.expect(v.get(0).eql(I(0.0, 1.0)));
-    try std.testing.expect(v.get(2).eql(I(0.0, 1.0)));
+    var v = interval.Vec(3).init(iv(0.0, 1.0));
+    try std.testing.expect(v.get(0).eql(iv(0.0, 1.0)));
+    try std.testing.expect(v.get(2).eql(iv(0.0, 1.0)));
 
-    v.set(1, I(-4.0, 9.0));
-    try std.testing.expect(v.get(1).eql(I(-4.0, 9.0)));
+    v.set(1, iv(-4.0, 9.0));
+    try std.testing.expect(v.get(1).eql(iv(-4.0, 9.0)));
     // The neighbours are untouched by set.
-    try std.testing.expect(v.get(0).eql(I(0.0, 1.0)));
-    try std.testing.expect(v.get(2).eql(I(0.0, 1.0)));
+    try std.testing.expect(v.get(0).eql(iv(0.0, 1.0)));
+    try std.testing.expect(v.get(2).eql(iv(0.0, 1.0)));
 }
 
 test "Vec: eql compares componentwise" {
@@ -390,13 +404,13 @@ test "Vec: eql compares componentwise" {
 
     // A box differing in exactly one component is not equal.
     var v = sample();
-    v.set(2, I(10.0, 21.0));
+    v.set(2, iv(10.0, 21.0));
     try std.testing.expect(!v.eql(sample()));
     try std.testing.expect(!sample().eql(v));
 
     // Endpoints are compared, not just containment.
-    try std.testing.expect(!interval.Vec(1).init(I(0.0, 1.0)).eql(interval.Vec(1).init(I(0.0, 2.0))));
-    try std.testing.expect(interval.Vec(1).init(I(0.0, 1.0)).eql(interval.Vec(1).init(I(0.0, 1.0))));
+    try std.testing.expect(!interval.Vec(1).init(iv(0.0, 1.0)).eql(interval.Vec(1).init(iv(0.0, 2.0))));
+    try std.testing.expect(interval.Vec(1).init(iv(0.0, 1.0)).eql(interval.Vec(1).init(iv(0.0, 1.0))));
 }
 
 test "Vec: elementwise add" {
@@ -435,9 +449,9 @@ test "Vec: elementwise div" {
 
 test "Vec: neg, abs, sqr are elementwise" {
     const v = interval.Vec(3).fromArray(.{
-        I(1.0, 3.0),
-        I(-2.0, 0.5),
-        I(10.0, 20.0),
+        iv(1.0, 3.0),
+        iv(-2.0, 0.5),
+        iv(10.0, 20.0),
     });
 
     const n = v.neg();
@@ -475,14 +489,14 @@ test "Vec: recip inverts each component" {
 
 test "Vec: hull takes the smallest covering box" {
     const a = interval.Vec(3).fromArray(.{
-        I(1.0, 3.0),
-        I(-2.0, 4.0),
-        I(10.0, 20.0),
+        iv(1.0, 3.0),
+        iv(-2.0, 4.0),
+        iv(10.0, 20.0),
     });
     const b = interval.Vec(3).fromArray(.{
-        I(2.0, 5.0),
-        I(0.0, 1.0),
-        I(0.0, 12.0),
+        iv(2.0, 5.0),
+        iv(0.0, 1.0),
+        iv(0.0, 12.0),
     });
     const h = a.hull(b);
     try expectOrdered(h.slice());
@@ -526,10 +540,10 @@ test "DynVec: a slice stays valid while its box is alive" {
     defer v.deinit();
     const seen = v.slice();
 
-    var pad = try interval.DynVec.init(gpa, 3, I(100.0, 200.0));
+    var pad = try interval.DynVec.init(gpa, 3, iv(100.0, 200.0));
     defer pad.deinit();
     try pad.iadd(v);
-    v.set(0, I(-7.0, -6.0));
+    v.set(0, iv(-7.0, -6.0));
 
     // The slice is the box's own memory, so it follows the write.
     try std.testing.expectEqual(@as(f64, -7.0), seen[0].lo);
@@ -539,13 +553,13 @@ test "DynVec: a slice stays valid while its box is alive" {
 }
 
 test "Vec: intersect shares a box when every component overlaps" {
-    const a = interval.Vec(3).init(I(0.0, 2.0));
+    const a = interval.Vec(3).init(iv(0.0, 2.0));
     const b = interval.Vec(3).fromArray(.{
-        I(1.0, 3.0),
-        I(2.0, 4.0),
-        I(0.5, 1.5),
+        iv(1.0, 3.0),
+        iv(2.0, 4.0),
+        iv(0.5, 1.5),
     });
-    const x = a.intersect(b).?;
+    const x = a.intersect(b) orelse return error.ExpectedOverlap;
     try expectOrdered(x.slice());
     try std.testing.expectEqual(@as(f64, 1.0), x.get(0).lo);
     try std.testing.expectEqual(@as(f64, 2.0), x.get(0).hi);
@@ -557,13 +571,13 @@ test "Vec: intersect shares a box when every component overlaps" {
 }
 
 test "Vec: intersect is null when exactly one component is disjoint" {
-    const a = interval.Vec(3).init(I(0.0, 1.0));
+    const a = interval.Vec(3).init(iv(0.0, 1.0));
     // Only the last component misses, so the boxes share a point along
     // axes 0 and 1 and still have no point in common along axis 2.
     const b = interval.Vec(3).fromArray(.{
-        I(0.5, 2.0),
-        I(0.5, 2.0),
-        I(5.0, 6.0),
+        iv(0.5, 2.0),
+        iv(0.5, 2.0),
+        iv(5.0, 6.0),
     });
     try std.testing.expect(a.intersect(b) == null);
     try std.testing.expect(b.intersect(a) == null);
@@ -576,32 +590,32 @@ test "Vec: intersect is null when exactly one component is disjoint" {
 
     // Moving the gap to the first component gives the same answer.
     const c = interval.Vec(3).fromArray(.{
-        I(5.0, 6.0),
-        I(0.5, 2.0),
-        I(0.5, 2.0),
+        iv(5.0, 6.0),
+        iv(0.5, 2.0),
+        iv(0.5, 2.0),
     });
     try std.testing.expect(a.intersect(c) == null);
 }
 
 test "Vec: overlaps needs every component" {
-    const a = interval.Vec(3).init(I(0.0, 1.0));
-    try std.testing.expect(a.overlaps(interval.Vec(3).init(I(0.5, 2.0))));
+    const a = interval.Vec(3).init(iv(0.0, 1.0));
+    try std.testing.expect(a.overlaps(interval.Vec(3).init(iv(0.5, 2.0))));
     // Touching at a single point is an overlap.
-    try std.testing.expect(a.overlaps(interval.Vec(3).init(I(1.0, 2.0))));
+    try std.testing.expect(a.overlaps(interval.Vec(3).init(iv(1.0, 2.0))));
     try std.testing.expect(a.overlaps(a));
 
     var b = a;
-    b.set(1, I(9.0, 10.0));
+    b.set(1, iv(9.0, 10.0));
     try std.testing.expect(!a.overlaps(b));
     try std.testing.expect(!b.overlaps(a));
 }
 
 test "Vec: subsetOf needs every component inside" {
-    const outer = interval.Vec(3).init(I(0.0, 10.0));
+    const outer = interval.Vec(3).init(iv(0.0, 10.0));
     const inner = interval.Vec(3).fromArray(.{
-        I(1.0, 2.0),
-        I(3.0, 4.0),
-        I(5.0, 6.0),
+        iv(1.0, 2.0),
+        iv(3.0, 4.0),
+        iv(5.0, 6.0),
     });
     try std.testing.expect(inner.subsetOf(outer));
     try std.testing.expect(outer.subsetOf(outer));
@@ -609,18 +623,18 @@ test "Vec: subsetOf needs every component inside" {
 
     // One component sticking out is enough to fail.
     var poking = inner;
-    poking.set(2, I(5.0, 11.0));
+    poking.set(2, iv(5.0, 11.0));
     try std.testing.expect(!poking.subsetOf(outer));
     try std.testing.expect(!poking.subsetOf(inner));
 
     // So is one component reaching below the box.
     var low = inner;
-    low.set(0, I(-0.5, 2.0));
+    low.set(0, iv(-0.5, 2.0));
     try std.testing.expect(!low.subsetOf(outer));
 }
 
 test "Vec: contains is endpoint-inclusive and rejects a point outside" {
-    const v = interval.Vec(3).init(I(0.0, 1.0));
+    const v = interval.Vec(3).init(iv(0.0, 1.0));
     try std.testing.expect(v.contains(.{ 0.5, 0.5, 0.5 }));
     // On a face, and on a corner: the faces are part of the box.
     try std.testing.expect(v.contains(.{ 0.0, 0.5, 0.5 }));
@@ -638,7 +652,7 @@ test "Vec: contains is endpoint-inclusive and rejects a point outside" {
 }
 
 test "Vec: distance is zero at the centre of a 1-dimensional box" {
-    const v = interval.Vec(1).init(I(0.0, 1.0));
+    const v = interval.Vec(1).init(iv(0.0, 1.0));
     try std.testing.expectEqual(@as(f64, 0.0), v.distance(.{0.5}));
     // Anywhere in the box is zero distance, faces included. The
     // widening in `distance` must not move a zero: the promise that the
@@ -658,7 +672,7 @@ test "Vec: distance is zero at the centre of a 1-dimensional box" {
 }
 
 test "Vec: distance is the Euclidean norm, not the max metric" {
-    const v = interval.Vec(2).init(I(0.0, 1.0));
+    const v = interval.Vec(2).init(iv(0.0, 1.0));
     // Each component is 3.0 away, so the max metric would say 3.0 and
     // the Euclidean one says the hypotenuse. The components and the
     // ceiling are what is asserted; the exact 3 * sqrt(2) is not,
@@ -679,9 +693,9 @@ test "Vec: distance is the Euclidean norm, not the max metric" {
 
 test "Vec: isEmpty is false for a well-formed box" {
     try std.testing.expect(!sample().isEmpty());
-    try std.testing.expect(!interval.Vec(0).init(I(0.0, 1.0)).isEmpty());
+    try std.testing.expect(!interval.Vec(0).init(iv(0.0, 1.0)).isEmpty());
     // A degenerate box is one point, not no points.
-    try std.testing.expect(!interval.Vec(1).init(I(2.0, 2.0)).isEmpty());
+    try std.testing.expect(!interval.Vec(1).init(iv(2.0, 2.0)).isEmpty());
 }
 
 test "Vec: isEmpty reports the one box fromArray can build" {
@@ -690,11 +704,11 @@ test "Vec: isEmpty reports the one box fromArray can build" {
     // holds no point at all: it is empty. The component is written as
     // a literal rather than through `I` because `Interval.init` traps
     // on an inverted pair, which is the check this constructor skips.
-    const inverted = Interval{ .lo = 2.0, .hi = 1.0 };
+    const inverted: Interval = .{ .lo = 2.0, .hi = 1.0 };
     const empty = interval.Vec(3).fromArray(.{
-        I(1.0, 2.0),
+        iv(1.0, 2.0),
         inverted,
-        I(-1.0, 1.0),
+        iv(-1.0, 1.0),
     });
     try std.testing.expect(empty.isEmpty());
     // An empty box holds no point, so the membership predicates agree
@@ -706,9 +720,9 @@ test "Vec: isEmpty reports the one box fromArray can build" {
     // of the empty state, so this is not a predicate that refuses
     // everything it is handed.
     var whole = interval.Vec(3).fromArray(.{
-        I(1.0, 2.0),
-        I(1.0, 2.0),
-        I(-1.0, 1.0),
+        iv(1.0, 2.0),
+        iv(1.0, 2.0),
+        iv(-1.0, 1.0),
     });
     try std.testing.expect(!whole.isEmpty());
     whole.set(1, inverted);
@@ -717,17 +731,17 @@ test "Vec: isEmpty reports the one box fromArray can build" {
     // A degenerate component is one point, not no points, and a box
     // with no components at all holds the one point of the empty
     // space.
-    try std.testing.expect(!interval.Vec(1).init(I(2.0, 2.0)).isEmpty());
-    try std.testing.expect(!interval.Vec(0).init(I(0.0, 1.0)).isEmpty());
+    try std.testing.expect(!interval.Vec(1).init(iv(2.0, 2.0)).isEmpty());
+    try std.testing.expect(!interval.Vec(0).init(iv(0.0, 1.0)).isEmpty());
 }
 
 test "Vec: a dimension-zero box holds the one point of the empty space" {
-    const v = interval.Vec(0).init(I(0.0, 1.0));
+    const v = interval.Vec(0).init(iv(0.0, 1.0));
     try std.testing.expectEqual(@as(usize, 0), v.dim());
     try std.testing.expect(v.contains(.{}));
     try std.testing.expectEqual(@as(f64, 0.0), v.distance(.{}));
-    try std.testing.expect(v.overlaps(interval.Vec(0).init(I(5.0, 6.0))));
-    try std.testing.expect(v.intersect(interval.Vec(0).init(I(5.0, 6.0))) != null);
+    try std.testing.expect(v.overlaps(interval.Vec(0).init(iv(5.0, 6.0))));
+    try std.testing.expect(v.intersect(interval.Vec(0).init(iv(5.0, 6.0))) != null);
 }
 
 test "Vec: a value-returning operation leaves the operands alone" {
@@ -750,14 +764,14 @@ test "Vec: a value-returning operation leaves the operands alone" {
 
 test "Vec: every probed point pair lands inside the arithmetic result" {
     const lx = interval.Vec(3).fromArray(.{
-        I(1.0, 3.0),
-        I(-2.0, 4.0),
-        I(10.0, 20.0),
+        iv(1.0, 3.0),
+        iv(-2.0, 4.0),
+        iv(10.0, 20.0),
     });
     const ly = interval.Vec(3).fromArray(.{
-        I(30.0, 50.0),
-        I(-40.0, -10.0),
-        I(2.0, 4.0),
+        iv(30.0, 50.0),
+        iv(-40.0, -10.0),
+        iv(2.0, 4.0),
     });
 
     const sum = lx.add(ly);
@@ -792,26 +806,26 @@ test "Vec: every probed point pair lands inside the arithmetic result" {
 
 test "DynVec: init sets the runtime length and deinit releases it" {
     const gpa = std.testing.allocator;
-    var v = try interval.DynVec.init(gpa, 3, I(1.0, 2.0));
+    var v = try interval.DynVec.init(gpa, 3, iv(1.0, 2.0));
     defer v.deinit();
     try std.testing.expectEqual(@as(usize, 3), v.dim());
     for (v.slice()) |c| {
-        try std.testing.expect(c.eql(I(1.0, 2.0)));
+        try std.testing.expect(c.eql(iv(1.0, 2.0)));
     }
 
-    var w = try interval.DynVec.init(gpa, 1, I(0.0, 1.0));
+    var w = try interval.DynVec.init(gpa, 1, iv(0.0, 1.0));
     defer w.deinit();
     try std.testing.expectEqual(@as(usize, 1), w.dim());
     try std.testing.expect(w.dim() != v.dim());
 
-    var e = try interval.DynVec.init(gpa, 0, I(0.0, 1.0));
+    var e = try interval.DynVec.init(gpa, 0, iv(0.0, 1.0));
     defer e.deinit();
     try std.testing.expectEqual(@as(usize, 0), e.dim());
 }
 
 test "DynVec: deinit is safe to call twice on one box" {
     const gpa = std.testing.allocator;
-    var v = try interval.DynVec.init(gpa, 3, I(1.0, 2.0));
+    var v = try interval.DynVec.init(gpa, 3, iv(1.0, 2.0));
     v.deinit();
     // Before, this second call freed the slice the first one had
     // replaced with `undefined`, and the binary died inside
@@ -842,7 +856,7 @@ test "contract: every constructor records the address deinit checks" {
     // both of them.
     const gpa = std.testing.allocator;
 
-    var filled = try interval.DynVec.init(gpa, 3, I(1.0, 2.0));
+    var filled = try interval.DynVec.init(gpa, 3, iv(1.0, 2.0));
     defer filled.deinit();
     try std.testing.expect(filled.own == filled.comps.ptr);
 
@@ -856,7 +870,7 @@ test "contract: every constructor records the address deinit checks" {
     defer sum.deinit();
     try std.testing.expect(sum.own == sum.comps.ptr);
 
-    var twin = try interval.DynVec.init(gpa, 3, I(3.0, 4.0));
+    var twin = try interval.DynVec.init(gpa, 3, iv(3.0, 4.0));
     defer twin.deinit();
     try std.testing.expectEqual(sum.dim(), twin.dim());
     try std.testing.expect(twin.own != sum.own);
@@ -890,28 +904,28 @@ test "DynVec: a returned box belongs to whoever holds it last" {
 
 test "DynVec: fromArray copies, so the caller keeps its own array" {
     const gpa = std.testing.allocator;
-    var src = [_]Interval{ I(1.0, 2.0), I(3.0, 4.0) };
+    var src = [_]Interval{ iv(1.0, 2.0), iv(3.0, 4.0) };
     var v = try interval.DynVec.fromArray(gpa, &src);
     defer v.deinit();
     try std.testing.expectEqual(@as(usize, 2), v.dim());
-    try std.testing.expect(v.get(1).eql(I(3.0, 4.0)));
-    src[0] = I(9.0, 9.0);
-    try std.testing.expect(v.get(0).eql(I(1.0, 2.0)));
+    try std.testing.expect(v.get(1).eql(iv(3.0, 4.0)));
+    src[0] = iv(9.0, 9.0);
+    try std.testing.expect(v.get(0).eql(iv(1.0, 2.0)));
 }
 
 test "DynVec: get, set, and eql behave as on the fixed box" {
     const gpa = std.testing.allocator;
-    var v = try interval.DynVec.init(gpa, 3, I(0.0, 1.0));
+    var v = try interval.DynVec.init(gpa, 3, iv(0.0, 1.0));
     defer v.deinit();
-    v.set(1, I(-1.0, 7.0));
-    try std.testing.expect(v.get(1).eql(I(-1.0, 7.0)));
-    try std.testing.expect(v.get(0).eql(I(0.0, 1.0)));
-    try std.testing.expect(v.get(2).eql(I(0.0, 1.0)));
+    v.set(1, iv(-1.0, 7.0));
+    try std.testing.expect(v.get(1).eql(iv(-1.0, 7.0)));
+    try std.testing.expect(v.get(0).eql(iv(0.0, 1.0)));
+    try std.testing.expect(v.get(2).eql(iv(0.0, 1.0)));
 
     var w = try interval.DynVec.fromArray(gpa, v.slice());
     defer w.deinit();
     try std.testing.expect(v.eql(w));
-    w.set(2, I(0.0, 2.0));
+    w.set(2, iv(0.0, 2.0));
     try std.testing.expect(!v.eql(w));
     try std.testing.expect(!w.eql(v));
 }
@@ -976,9 +990,9 @@ test "DynVec: a value-returning operation leaves the operands alone" {
 
 test "DynVec: mismatched widths are rejected" {
     const gpa = std.testing.allocator;
-    var a = try interval.DynVec.init(gpa, 2, I(0.0, 1.0));
+    var a = try interval.DynVec.init(gpa, 2, iv(0.0, 1.0));
     defer a.deinit();
-    var b = try interval.DynVec.init(gpa, 3, I(0.0, 1.0));
+    var b = try interval.DynVec.init(gpa, 3, iv(0.0, 1.0));
     defer b.deinit();
 
     try std.testing.expectError(error.DimensionMismatch, a.add(b));
@@ -1007,7 +1021,7 @@ test "DynVec: mismatched widths are rejected" {
 
     // Equal widths still fall through to the components, so the check
     // is not just refusing every comparison.
-    var c = try interval.DynVec.init(gpa, 2, I(0.0, 2.0));
+    var c = try interval.DynVec.init(gpa, 2, iv(0.0, 2.0));
     defer c.deinit();
     try std.testing.expect(!a.eql(c));
     try std.testing.expect(!c.eql(a));
@@ -1043,9 +1057,9 @@ test "DynVec: iadd overwrites the receiver, add does not" {
 test "DynVec: neg, abs, sqr, recip are in place" {
     const gpa = std.testing.allocator;
     const src = interval.Vec(3).fromArray(.{
-        I(1.0, 3.0),
-        I(-2.0, 0.5),
-        I(10.0, 20.0),
+        iv(1.0, 3.0),
+        iv(-2.0, 0.5),
+        iv(10.0, 20.0),
     });
     var v = try interval.DynVec.fromArray(gpa, src.slice());
     defer v.deinit();
@@ -1083,11 +1097,11 @@ test "DynVec: neg, abs, sqr, recip are in place" {
 
 test "DynVec: intersect is null when exactly one component is disjoint" {
     const gpa = std.testing.allocator;
-    var a = try interval.DynVec.init(gpa, 3, I(0.0, 1.0));
+    var a = try interval.DynVec.init(gpa, 3, iv(0.0, 1.0));
     defer a.deinit();
-    var b = try interval.DynVec.init(gpa, 3, I(0.5, 2.0));
+    var b = try interval.DynVec.init(gpa, 3, iv(0.5, 2.0));
     defer b.deinit();
-    b.set(2, I(5.0, 6.0));
+    b.set(2, iv(5.0, 6.0));
 
     try std.testing.expect((try a.intersect(b)) == null);
     try std.testing.expect((try b.intersect(a)) == null);
@@ -1097,20 +1111,21 @@ test "DynVec: intersect is null when exactly one component is disjoint" {
     try std.testing.expect(!a.get(2).overlaps(b.get(2)));
     try std.testing.expect(!a.overlaps(b));
 
-    b.set(2, I(0.5, 0.75));
-    var x = (try a.intersect(b)).?;
+    b.set(2, iv(0.5, 0.75));
+    var x = (try a.intersect(b)) orelse return error.ExpectedOverlap;
     defer x.deinit();
     try expectOrdered(x.slice());
     for (0..3) |i| {
-        try std.testing.expect(x.get(i).eql(a.get(i).intersect(b.get(i)).?));
+        const axis = a.get(i).intersect(b.get(i)) orelse return error.ExpectedOverlap;
+        try std.testing.expect(x.get(i).eql(axis));
     }
 }
 
 test "DynVec: hull, overlaps, and subsetOf match the fixed box" {
     const gpa = std.testing.allocator;
-    var outer = try interval.DynVec.init(gpa, 3, I(0.0, 10.0));
+    var outer = try interval.DynVec.init(gpa, 3, iv(0.0, 10.0));
     defer outer.deinit();
-    var inner = try interval.DynVec.fromArray(gpa, &[_]Interval{ I(1.0, 2.0), I(3.0, 4.0), I(5.0, 6.0) });
+    var inner = try interval.DynVec.fromArray(gpa, &[_]Interval{ iv(1.0, 2.0), iv(3.0, 4.0), iv(5.0, 6.0) });
     defer inner.deinit();
 
     var h = try outer.hull(inner);
@@ -1122,12 +1137,12 @@ test "DynVec: hull, overlaps, and subsetOf match the fixed box" {
     try std.testing.expect(inner.subsetOf(outer));
     try std.testing.expect(!outer.subsetOf(inner));
 
-    inner.set(2, I(5.0, 11.0));
+    inner.set(2, iv(5.0, 11.0));
     try std.testing.expect(!inner.subsetOf(outer));
-    inner.set(2, I(5.0, 6.0));
+    inner.set(2, iv(5.0, 6.0));
     try std.testing.expect(inner.overlaps(outer));
 
-    var far = try interval.DynVec.init(gpa, 3, I(20.0, 21.0));
+    var far = try interval.DynVec.init(gpa, 3, iv(20.0, 21.0));
     defer far.deinit();
     try std.testing.expect(!inner.overlaps(far));
     try std.testing.expect((try inner.intersect(far)) == null);
@@ -1135,9 +1150,9 @@ test "DynVec: hull, overlaps, and subsetOf match the fixed box" {
 
 test "DynVec: contains and distance match the fixed box" {
     const gpa = std.testing.allocator;
-    var v = try interval.DynVec.fromArray(gpa, &[_]Interval{ I(0.0, 1.0), I(0.0, 1.0), I(0.0, 1.0) });
+    var v = try interval.DynVec.fromArray(gpa, &[_]Interval{ iv(0.0, 1.0), iv(0.0, 1.0), iv(0.0, 1.0) });
     defer v.deinit();
-    const fv = interval.Vec(3).init(I(0.0, 1.0));
+    const fv = interval.Vec(3).init(iv(0.0, 1.0));
     const p = [_]f64{ 0.5, 0.5, 0.5 };
     // Both representations measure the same box with the same metric.
     try std.testing.expectEqual(fv.distance(p), v.distance(&p));
@@ -1152,22 +1167,22 @@ test "DynVec: contains and distance match the fixed box" {
 
 test "DynVec: isEmpty sees the same components as the fixed box" {
     const gpa = std.testing.allocator;
-    const inverted = Interval{ .lo = 2.0, .hi = 1.0 };
-    var v = try interval.DynVec.fromArray(gpa, &[_]Interval{ I(0.0, 1.0), inverted });
+    const inverted: Interval = .{ .lo = 2.0, .hi = 1.0 };
+    var v = try interval.DynVec.fromArray(gpa, &[_]Interval{ iv(0.0, 1.0), inverted });
     defer v.deinit();
     try std.testing.expect(v.isEmpty());
-    try std.testing.expect(interval.Vec(2).fromArray(.{ I(0.0, 1.0), inverted }).isEmpty());
+    try std.testing.expect(interval.Vec(2).fromArray(.{ iv(0.0, 1.0), inverted }).isEmpty());
 
     // The one component ordered, and the box is no longer empty in
     // either representation.
-    v.set(1, I(0.0, 1.0));
+    v.set(1, iv(0.0, 1.0));
     try std.testing.expect(!v.isEmpty());
-    try std.testing.expect(!interval.Vec(2).init(I(0.0, 1.0)).isEmpty());
+    try std.testing.expect(!interval.Vec(2).init(iv(0.0, 1.0)).isEmpty());
 }
 
 test "DynVec: contains is false for a point of the wrong length" {
     const gpa = std.testing.allocator;
-    var v = try interval.DynVec.fromArray(gpa, &[_]Interval{ I(0.0, 1.0), I(0.0, 1.0), I(0.0, 1.0) });
+    var v = try interval.DynVec.fromArray(gpa, &[_]Interval{ iv(0.0, 1.0), iv(0.0, 1.0), iv(0.0, 1.0) });
     defer v.deinit();
 
     // Every coordinate given below lies inside the matching component,
@@ -1185,7 +1200,7 @@ test "DynVec: contains is false for a point of the wrong length" {
     try std.testing.expect(!v.contains(&.{ 0.5, 0.5, 1.5 }));
 
     // Dimension zero is the one width the empty point matches.
-    var e = try interval.DynVec.init(gpa, 0, I(0.0, 1.0));
+    var e = try interval.DynVec.init(gpa, 0, iv(0.0, 1.0));
     defer e.deinit();
     try std.testing.expect(e.contains(&.{}));
     try std.testing.expect(!e.contains(&.{0.5}));
@@ -1194,7 +1209,7 @@ test "DynVec: contains is false for a point of the wrong length" {
 test "DynVec: distance to a point of the wrong length is +infinity" {
     const gpa = std.testing.allocator;
     const inf: f64 = std.math.inf(f64);
-    var v = try interval.DynVec.fromArray(gpa, &[_]Interval{ I(0.0, 1.0), I(0.0, 1.0), I(0.0, 1.0) });
+    var v = try interval.DynVec.fromArray(gpa, &[_]Interval{ iv(0.0, 1.0), iv(0.0, 1.0), iv(0.0, 1.0) });
     defer v.deinit();
 
     // A point of another dimension is in no box of this width, and
@@ -1223,12 +1238,12 @@ fn double(i: Interval) ?Interval {
 /// depending on which elementary functions the library ships.
 fn nonNegativeSqrt(i: Interval) ?Interval {
     if (i.hi < 0.0) return null;
-    return I(@sqrt(@max(i.lo, 0.0)), @sqrt(i.hi));
+    return iv(@sqrt(@max(i.lo, 0.0)), @sqrt(i.hi));
 }
 
 test "mapResult: applies a function to every component" {
     const v = sample();
-    const d = interval.mapResult(v, double).?;
+    const d = interval.mapResult(v, double) orelse return error.ExpectedMappedBox;
     try expectOrdered(d.slice());
     for (0..3) |i| {
         try expectTight(d.get(i), 2.0 * v.get(i).lo, 2.0 * v.get(i).hi);
@@ -1240,9 +1255,9 @@ test "mapResult: applies a function to every component" {
 
 test "mapResult: a component off the domain makes the whole box null" {
     var v = interval.Vec(3).fromArray(.{
-        I(1.0, 4.0),
-        I(9.0, 16.0),
-        I(-4.0, -1.0),
+        iv(1.0, 4.0),
+        iv(9.0, 16.0),
+        iv(-4.0, -1.0),
     });
     // Only the last component leaves the domain, and it is the last one
     // reached, so the fold has already filled two results.
@@ -1251,8 +1266,8 @@ test "mapResult: a component off the domain makes the whole box null" {
     // The same function over a box whose components are all in domain
     // succeeds, and a component touching zero clamps rather than going
     // NaN.
-    v.set(2, I(-0.25, 4.0));
-    const s = interval.mapResult(v, nonNegativeSqrt).?;
+    v.set(2, iv(-0.25, 4.0));
+    const s = interval.mapResult(v, nonNegativeSqrt) orelse return error.ExpectedMappedBox;
     try expectOrdered(s.slice());
     for (0..3) |i| {
         try std.testing.expect(s.get(i).contains(@sqrt(@max(v.get(i).lo, 0.0))));
@@ -1265,7 +1280,7 @@ test "mapResult: the DynVec case allocates and deinits cleanly" {
     var v = try interval.DynVec.fromArray(gpa, sample().slice());
     defer v.deinit();
 
-    var d = (try interval.mapResult(v, double)).?;
+    var d = (try interval.mapResult(v, double)) orelse return error.ExpectedMappedBox;
     defer d.deinit();
     try std.testing.expectEqual(@as(usize, 3), d.dim());
     try expectOrdered(d.slice());
@@ -1276,7 +1291,7 @@ test "mapResult: the DynVec case allocates and deinits cleanly" {
     // source box intact.
     try std.testing.expect(v.get(0).eql(sample().get(0)));
 
-    var s = (try interval.mapResult(v, nonNegativeSqrt)).?;
+    var s = (try interval.mapResult(v, nonNegativeSqrt)) orelse return error.ExpectedMappedBox;
     defer s.deinit();
     try expectOrdered(s.slice());
     for (0..3) |i| {
@@ -1291,14 +1306,14 @@ test "mapResult: the DynVec case returns null and frees the partial box" {
     // The last component is the one that leaves the domain, so the fold
     // has already written two results before it gives up. The testing
     // allocator would report the leftover as a leak.
-    v.set(2, I(-4.0, -1.0));
+    v.set(2, iv(-4.0, -1.0));
     try std.testing.expect((try interval.mapResult(v, nonNegativeSqrt)) == null);
-    try std.testing.expect(v.get(1).eql(I(-2.0, 4.0)));
+    try std.testing.expect(v.get(1).eql(iv(-2.0, 4.0)));
 }
 
 test "mapResult: a zero-component box maps to itself" {
-    const v = interval.Vec(0).init(I(0.0, 1.0));
-    const d = interval.mapResult(v, double).?;
+    const v = interval.Vec(0).init(iv(0.0, 1.0));
+    const d = interval.mapResult(v, double) orelse return error.ExpectedMappedBox;
     try std.testing.expectEqual(@as(usize, 0), d.dim());
     // No component can leave the domain, so the result cannot be null.
     try std.testing.expect(interval.Vec(0) == @TypeOf(d));
@@ -1311,20 +1326,20 @@ test "mapResult: the receivers are left alone" {
     var before = try interval.DynVec.fromArray(gpa, v.slice());
     defer before.deinit();
 
-    var d = (try interval.mapResult(v, double)).?;
+    var d = (try interval.mapResult(v, double)) orelse return error.ExpectedMappedBox;
     defer d.deinit();
     try std.testing.expect(v.eql(before));
 
     const fv = sample();
-    const fd = interval.mapResult(fv, double).?;
+    const fd = interval.mapResult(fv, double) orelse return error.ExpectedMappedBox;
     try std.testing.expect(fv.eql(sample()));
     try expectOrdered(fd.slice());
 }
 
 test "mapResult: a fixed box returns a plain optional, not an error union" {
     const v = interval.Vec(2).fromArray(.{
-        I(1.0, 3.0),
-        I(-2.0, 4.0),
+        iv(1.0, 3.0),
+        iv(-2.0, 4.0),
     });
     // The annotation is the assertion. Before the split this arm was
     // `error{OutOfMemory}!?Vec(2)`, because the error set of a `!?V`
@@ -1335,7 +1350,7 @@ test "mapResult: a fixed box returns a plain optional, not an error union" {
     // and every caller had to wrap the call in a `try` for an error
     // the operation cannot produce.
     const d: ?interval.Vec(2) = interval.mapResult(v, double);
-    const got = d.?;
+    const got = d orelse return error.ExpectedMappedBox;
     try std.testing.expectEqual(@as(usize, 2), got.dim());
     try expectTight(got.get(0), 2.0, 6.0);
     try expectTight(got.get(1), -4.0, 8.0);
@@ -1343,8 +1358,8 @@ test "mapResult: a fixed box returns a plain optional, not an error union" {
     // The optional is the DOMAIN report, not the failure report, so it
     // is still reachable, and one component below zero is enough.
     const straddling = interval.Vec(2).fromArray(.{
-        I(-4.0, -1.0),
-        I(1.0, 4.0),
+        iv(-4.0, -1.0),
+        iv(1.0, 4.0),
     });
     try std.testing.expect(interval.mapResult(straddling, nonNegativeSqrt) == null);
     try std.testing.expect(interval.mapResult(v, nonNegativeSqrt) != null);
@@ -1355,7 +1370,7 @@ test "mapResult: the owned box still reports the failure it can have" {
     var v = try interval.DynVec.fromArray(gpa, sample().slice());
     defer v.deinit();
 
-    var d = (try interval.mapResult(v, double)).?;
+    var d = (try interval.mapResult(v, double)) orelse return error.ExpectedMappedBox;
     defer d.deinit();
     for (0..3) |i| {
         try std.testing.expect(d.get(i).eql(v.get(i).add(v.get(i))));
@@ -1368,10 +1383,10 @@ test "mapResult: the owned box still reports the failure it can have" {
     // The first allocation succeeds and is the box above; the second
     // is the one `mapResult` makes.
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 1 });
-    var tight = try interval.DynVec.init(failing.allocator(), 3, I(1.0, 2.0));
+    var tight = try interval.DynVec.init(failing.allocator(), 3, iv(1.0, 2.0));
     defer tight.deinit();
     try std.testing.expectError(error.OutOfMemory, interval.mapResult(tight, double));
-    try std.testing.expect(tight.get(1).eql(I(1.0, 2.0)));
+    try std.testing.expect(tight.get(1).eql(iv(1.0, 2.0)));
 }
 
 test "mapResult: the receiver is a box by value, and a pointer is a compile error" {
@@ -1390,8 +1405,8 @@ test "mapResult: the receiver is a box by value, and a pointer is a compile erro
     // ReleaseFast alike, before any assertion could have said
     // anything about it.
     var v = interval.Vec(2).fromArray(.{
-        I(1.0, 3.0),
-        I(-2.0, 4.0),
+        iv(1.0, 3.0),
+        iv(-2.0, 4.0),
     });
     const doubled: ?interval.Vec(2) = interval.mapResult(v, double);
     for (0..2) |i| {
@@ -1401,25 +1416,25 @@ test "mapResult: the receiver is a box by value, and a pointer is a compile erro
     // The fold reads the receiver and writes only its own box, so
     // what a caller reaching for a pointer wanted is already what the
     // by-value call gives.
-    try std.testing.expect(v.get(0).eql(I(1.0, 3.0)));
-    try std.testing.expect(v.get(1).eql(I(-2.0, 4.0)));
+    try std.testing.expect(v.get(0).eql(iv(1.0, 3.0)));
+    try std.testing.expect(v.get(1).eql(iv(-2.0, 4.0)));
 }
 
 test "invariant: every component of every arithmetic result obeys lo <= hi" {
     const boxes = [_]interval.Vec(3){
         sample(),
-        interval.Vec(3).init(I(-1.0, 1.0)),
+        interval.Vec(3).init(iv(-1.0, 1.0)),
         interval.Vec(3).fromArray(.{
-            I(-std.math.floatMax(f64), std.math.floatMax(f64)),
-            I(0.0, 0.0),
-            I(1e300, 1e300),
+            iv(-std.math.floatMax(f64), std.math.floatMax(f64)),
+            iv(0.0, 0.0),
+            iv(1e300, 1e300),
         }),
-        interval.Vec(3).init(I(-std.math.inf(f64), std.math.inf(f64))),
+        interval.Vec(3).init(iv(-std.math.inf(f64), std.math.inf(f64))),
     };
     // Every component of every divisor stays clear of zero.
     const divisors = [_]interval.Vec(3){
         other(),
-        interval.Vec(3).init(I(-4.0, -1.0)),
+        interval.Vec(3).init(iv(-4.0, -1.0)),
     };
 
     for (boxes) |a| {
@@ -1441,9 +1456,9 @@ test "invariant: every component of every arithmetic result obeys lo <= hi" {
     const inv = invertible();
     try expectOrdered(inv.recip().slice());
     const extremes = [_]interval.Vec(3){
-        interval.Vec(3).init(I(-std.math.floatMax(f64), -1.0)),
-        interval.Vec(3).init(I(1.0, std.math.floatMax(f64))),
-        interval.Vec(3).init(I(1e-300, 1e300)),
+        interval.Vec(3).init(iv(-std.math.floatMax(f64), -1.0)),
+        interval.Vec(3).init(iv(1.0, std.math.floatMax(f64))),
+        interval.Vec(3).init(iv(1e-300, 1e300)),
     };
     for (boxes) |a| {
         try expectOrdered(inv.recip().add(a).slice());
@@ -1457,17 +1472,17 @@ test "invariant: the owned representation holds the same order" {
     const gpa = std.testing.allocator;
     const boxes = [_]interval.Vec(3){
         sample(),
-        interval.Vec(3).init(I(-1.0, 1.0)),
+        interval.Vec(3).init(iv(-1.0, 1.0)),
         interval.Vec(3).fromArray(.{
-            I(-std.math.floatMax(f64), std.math.floatMax(f64)),
-            I(0.0, 0.0),
-            I(1e300, 1e300),
+            iv(-std.math.floatMax(f64), std.math.floatMax(f64)),
+            iv(0.0, 0.0),
+            iv(1e300, 1e300),
         }),
-        interval.Vec(3).init(I(-std.math.inf(f64), std.math.inf(f64))),
+        interval.Vec(3).init(iv(-std.math.inf(f64), std.math.inf(f64))),
     };
     const divisors = [_]interval.Vec(3){
         other(),
-        interval.Vec(3).init(I(-4.0, -1.0)),
+        interval.Vec(3).init(iv(-4.0, -1.0)),
     };
 
     for (boxes) |a| {
@@ -1628,13 +1643,13 @@ fn drawNormComponent(m: NormClass, r: std.Random) Interval {
     const y = if (r.intRangeAtMost(u8, 0, 7) == 0) x else m.draw(r);
     const lo = @min(x, y);
     const hi = @max(x, y);
-    if (r.intRangeAtMost(u8, 0, 15) != 0) return I(lo, hi);
+    if (r.intRangeAtMost(u8, 0, 15) != 0) return iv(lo, hi);
     // Substituting the infinities and sorting after, so one cannot land
     // on the wrong end of the range and trip the constructor's ordering
     // assertion, which aborts the binary rather than failing this case.
     const a = if (r.boolean()) neg_inf64 else lo;
     const b = if (r.boolean()) inf64 else hi;
-    return I(@min(a, b), @max(a, b));
+    return iv(@min(a, b), @max(a, b));
 }
 
 /// One point coordinate. A fraction of them sit outside the end of the

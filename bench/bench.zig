@@ -535,23 +535,23 @@ fn benchGe(ctx: *timing.Ctx, i: usize) void {
 }
 
 fn runAlgebra(runner: *timing.Runner) !void {
-    try timing.measure(runner, "interval.add", algebra_iters, benchAdd);
-    try timing.measure(runner, "interval.sub", algebra_iters, benchSub);
-    try timing.measure(runner, "interval.neg", algebra_iters, benchNeg);
-    try timing.measure(runner, "interval.mul", algebra_iters, benchMul);
-    try timing.measure(runner, "interval.div", algebra_iters, benchDiv);
-    try timing.measure(runner, "interval.recip", algebra_iters, benchRecip);
-    try timing.measure(runner, "interval.abs", algebra_iters, benchAbs);
-    try timing.measure(runner, "interval.sqr", algebra_iters, benchSqr);
-    try timing.measure(runner, "interval.translate", algebra_iters, benchTranslate);
-    try timing.measure(runner, "interval.scale", algebra_iters, benchScale);
-    try timing.measure(runner, "interval.expand", algebra_iters, benchExpand);
-    try timing.measure(runner, "interval.eql", algebra_iters, benchEql);
-    try timing.measure(runner, "interval.ne", algebra_iters, benchNe);
-    try timing.measure(runner, "interval.lt", algebra_iters, benchLt);
-    try timing.measure(runner, "interval.le", algebra_iters, benchLe);
-    try timing.measure(runner, "interval.gt", algebra_iters, benchGt);
-    try timing.measure(runner, "interval.ge", algebra_iters, benchGe);
+    try timing.measure("interval.add", benchAdd, runner, algebra_iters);
+    try timing.measure("interval.sub", benchSub, runner, algebra_iters);
+    try timing.measure("interval.neg", benchNeg, runner, algebra_iters);
+    try timing.measure("interval.mul", benchMul, runner, algebra_iters);
+    try timing.measure("interval.div", benchDiv, runner, algebra_iters);
+    try timing.measure("interval.recip", benchRecip, runner, algebra_iters);
+    try timing.measure("interval.abs", benchAbs, runner, algebra_iters);
+    try timing.measure("interval.sqr", benchSqr, runner, algebra_iters);
+    try timing.measure("interval.translate", benchTranslate, runner, algebra_iters);
+    try timing.measure("interval.scale", benchScale, runner, algebra_iters);
+    try timing.measure("interval.expand", benchExpand, runner, algebra_iters);
+    try timing.measure("interval.eql", benchEql, runner, algebra_iters);
+    try timing.measure("interval.ne", benchNe, runner, algebra_iters);
+    try timing.measure("interval.lt", benchLt, runner, algebra_iters);
+    try timing.measure("interval.le", benchLe, runner, algebra_iters);
+    try timing.measure("interval.gt", benchGt, runner, algebra_iters);
+    try timing.measure("interval.ge", benchGe, runner, algebra_iters);
 }
 
 // =========================================================================
@@ -751,49 +751,49 @@ fn runExt(runner: *timing.Runner) !void {
     // root, and the base of a real power. Their magnitudes run from
     // 2^-300 to 2^300, so the square root of the table spans 2^-150 to
     // 2^150 and none of it is the same argument twice.
-    try timing.measure(runner, "ext.sqrt", ext_iters, benchSqrt);
-    try timing.measure(runner, "ext.sqrt [out of domain]", ext_iters, benchSqrtOut);
-    try timing.measure(runner, "ext.cbrt", ext_iters, benchCbrt);
-    try timing.measure(runner, "ext.pow", ext_iters, benchPow);
-    try timing.measure(runner, "ext.powf", powf_iters, benchPowf);
-    try timing.measure(runner, "ext.powf [out of domain]", powf_iters, benchPowfOut);
-    try timing.measure(runner, "ext.exp", ext_iters, benchExp);
-    try timing.measure(runner, "ext.exp2", ext_iters, benchExp2);
-    try timing.measure(runner, "ext.expm1", ext_iters, benchExpm1);
-    try timing.measure(runner, "ext.log", ext_iters, benchLog);
-    try timing.measure(runner, "ext.log [out of domain]", ext_iters, benchLogOut);
-    try timing.measure(runner, "ext.log [straddling zero]", ext_iters, benchLogStraddle);
-    try timing.measure(runner, "ext.log2", ext_iters, benchLog2);
-    try timing.measure(runner, "ext.log2 [out of domain]", ext_iters, benchLog2Out);
-    try timing.measure(runner, "ext.log2 [straddling zero]", ext_iters, benchLog2Straddle);
-    try timing.measure(runner, "ext.log10", ext_iters, benchLog10);
-    try timing.measure(runner, "ext.log10 [out of domain]", ext_iters, benchLog10Out);
-    try timing.measure(runner, "ext.log10 [straddling zero]", ext_iters, benchLog10Straddle);
-    try timing.measure(runner, "ext.log1p", ext_iters, benchLog1p);
-    try timing.measure(runner, "ext.log1p [out of domain]", ext_iters, benchLog1pOut);
-    try timing.measure(runner, "ext.log1p [straddling zero]", ext_iters, benchLog1pStraddle);
-    try timing.measure(runner, "ext.sin", ext_iters, benchSin);
-    try timing.measure(runner, "ext.cos", ext_iters, benchCos);
-    try timing.measure(runner, "ext.tan", ext_iters, benchTan);
-    try timing.measure(runner, "ext.tan [across a pole]", ext_iters, benchTanPole);
-    try timing.measure(runner, "ext.asin", ext_iters, benchAsin);
-    try timing.measure(runner, "ext.asin [out of domain]", ext_iters, benchAsinOut);
-    try timing.measure(runner, "ext.acos", ext_iters, benchAcos);
-    try timing.measure(runner, "ext.acos [out of domain]", ext_iters, benchAcosOut);
-    try timing.measure(runner, "ext.atan", ext_iters, benchAtan);
-    try timing.measure(runner, "ext.atan2", ext_iters, benchAtan2);
-    try timing.measure(runner, "ext.sinh", ext_iters, benchSinh);
-    try timing.measure(runner, "ext.cosh", ext_iters, benchCosh);
-    try timing.measure(runner, "ext.tanh", ext_iters, benchTanh);
-    try timing.measure(runner, "ext.asinh", ext_iters, benchAsinh);
-    try timing.measure(runner, "ext.acosh", ext_iters, benchAcosh);
-    try timing.measure(runner, "ext.acosh [out of domain]", ext_iters, benchAcoshOut);
-    try timing.measure(runner, "ext.atanh", ext_iters, benchAtanh);
-    try timing.measure(runner, "ext.atanh [out of domain]", ext_iters, benchAtanhOut);
-    try timing.measure(runner, "ext.floor", ext_iters, benchFloor);
-    try timing.measure(runner, "ext.ceil", ext_iters, benchCeil);
-    try timing.measure(runner, "ext.trunc", ext_iters, benchTrunc);
-    try timing.measure(runner, "ext.round", ext_iters, benchRound);
+    try timing.measure("ext.sqrt", benchSqrt, runner, ext_iters);
+    try timing.measure("ext.sqrt [out of domain]", benchSqrtOut, runner, ext_iters);
+    try timing.measure("ext.cbrt", benchCbrt, runner, ext_iters);
+    try timing.measure("ext.pow", benchPow, runner, ext_iters);
+    try timing.measure("ext.powf", benchPowf, runner, powf_iters);
+    try timing.measure("ext.powf [out of domain]", benchPowfOut, runner, powf_iters);
+    try timing.measure("ext.exp", benchExp, runner, ext_iters);
+    try timing.measure("ext.exp2", benchExp2, runner, ext_iters);
+    try timing.measure("ext.expm1", benchExpm1, runner, ext_iters);
+    try timing.measure("ext.log", benchLog, runner, ext_iters);
+    try timing.measure("ext.log [out of domain]", benchLogOut, runner, ext_iters);
+    try timing.measure("ext.log [straddling zero]", benchLogStraddle, runner, ext_iters);
+    try timing.measure("ext.log2", benchLog2, runner, ext_iters);
+    try timing.measure("ext.log2 [out of domain]", benchLog2Out, runner, ext_iters);
+    try timing.measure("ext.log2 [straddling zero]", benchLog2Straddle, runner, ext_iters);
+    try timing.measure("ext.log10", benchLog10, runner, ext_iters);
+    try timing.measure("ext.log10 [out of domain]", benchLog10Out, runner, ext_iters);
+    try timing.measure("ext.log10 [straddling zero]", benchLog10Straddle, runner, ext_iters);
+    try timing.measure("ext.log1p", benchLog1p, runner, ext_iters);
+    try timing.measure("ext.log1p [out of domain]", benchLog1pOut, runner, ext_iters);
+    try timing.measure("ext.log1p [straddling zero]", benchLog1pStraddle, runner, ext_iters);
+    try timing.measure("ext.sin", benchSin, runner, ext_iters);
+    try timing.measure("ext.cos", benchCos, runner, ext_iters);
+    try timing.measure("ext.tan", benchTan, runner, ext_iters);
+    try timing.measure("ext.tan [across a pole]", benchTanPole, runner, ext_iters);
+    try timing.measure("ext.asin", benchAsin, runner, ext_iters);
+    try timing.measure("ext.asin [out of domain]", benchAsinOut, runner, ext_iters);
+    try timing.measure("ext.acos", benchAcos, runner, ext_iters);
+    try timing.measure("ext.acos [out of domain]", benchAcosOut, runner, ext_iters);
+    try timing.measure("ext.atan", benchAtan, runner, ext_iters);
+    try timing.measure("ext.atan2", benchAtan2, runner, ext_iters);
+    try timing.measure("ext.sinh", benchSinh, runner, ext_iters);
+    try timing.measure("ext.cosh", benchCosh, runner, ext_iters);
+    try timing.measure("ext.tanh", benchTanh, runner, ext_iters);
+    try timing.measure("ext.asinh", benchAsinh, runner, ext_iters);
+    try timing.measure("ext.acosh", benchAcosh, runner, ext_iters);
+    try timing.measure("ext.acosh [out of domain]", benchAcoshOut, runner, ext_iters);
+    try timing.measure("ext.atanh", benchAtanh, runner, ext_iters);
+    try timing.measure("ext.atanh [out of domain]", benchAtanhOut, runner, ext_iters);
+    try timing.measure("ext.floor", benchFloor, runner, ext_iters);
+    try timing.measure("ext.ceil", benchCeil, runner, ext_iters);
+    try timing.measure("ext.trunc", benchTrunc, runner, ext_iters);
+    try timing.measure("ext.round", benchRound, runner, ext_iters);
 }
 
 // =========================================================================
@@ -812,13 +812,14 @@ pub fn main() !void {
     // files measure against exactly the same one.
     var algebra_runner = try timing.Runner.init(gpa.allocator());
     defer algebra_runner.deinit();
-    std.debug.print("\n== group: Interval algebraic operations ==\n", .{});
+    var out = timing.Out.init(algebra_runner.io);
+    try out.print("\n== group: Interval algebraic operations ==\n", .{});
     try runAlgebra(&algebra_runner);
-    algebra_runner.report.print();
+    try algebra_runner.report.print();
 
     var ext_runner = try timing.Runner.init(gpa.allocator());
     defer ext_runner.deinit();
-    std.debug.print("\n== group: elementary functions ==\n", .{});
+    try out.print("\n== group: elementary functions ==\n", .{});
     try runExt(&ext_runner);
-    ext_runner.report.print();
+    try ext_runner.report.print();
 }

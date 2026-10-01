@@ -156,7 +156,11 @@ test "a column one row does not mention takes that row's branch" {
     // stops holding: the next round would read it as a bound from both sides
     // and pair rows that share no variable.
     try std.testing.expectEqual(exact.zero, exact.combinedColumn(lower_absent, upper_absent, 1));
-    try std.testing.expectEqual(exact.zero, exact.combinedColumn(side(pt(-3.0), &mentions_x_only, pt(0.0)), upper_absent, 1));
+    try std.testing.expectEqual(exact.zero, exact.combinedColumn(
+        side(pt(-3.0), &mentions_x_only, pt(0.0)),
+        upper_absent,
+        1,
+    ));
 }
 
 test "cancellation is an equality, not a closeness" {
@@ -333,7 +337,7 @@ test "the combined bound contains the combination" {
 }
 
 test "the divisor is the piece whole, or the far endpoint where an ENDPOINT is zero" {
-    const no_columns = [_]Interval{};
+    const no_columns: [0]Interval = .{};
     const inf = std.math.inf(f64);
 
     // THE GUARD, SPELLED OUT. `boundDivisor` asks whether NEITHER ENDPOINT is

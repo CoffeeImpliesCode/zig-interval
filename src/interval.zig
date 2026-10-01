@@ -750,7 +750,7 @@ pub const Interval = struct {
     /// zero is the truth there and not a loss, exactly as it already is for
     /// the corner of an exact zero that loBound and hiBound leave alone.
     pub fn mul(self: Interval, other: Interval) Interval {
-        const corners = Corners{
+        const corners: Corners = .{
             .a = .{ self.lo, self.hi },
             .b = .{ other.lo, other.hi },
             .v = .{
@@ -918,7 +918,7 @@ pub const Interval = struct {
         if (q0.lo < q0.hi or q1.lo < q1.hi or q2.lo < q2.hi or q3.lo < q3.hi) {
             return Interval.init(rounding.neg_inf, rounding.pos_inf);
         }
-        const corners = Corners{
+        const corners: Corners = .{
             .a = .{ self.lo, self.hi },
             .b = .{ other.lo, other.hi },
             .v = .{ q0.lo, q1.lo, q2.lo, q3.lo },

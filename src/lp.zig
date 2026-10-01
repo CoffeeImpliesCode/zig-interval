@@ -219,6 +219,14 @@ fn candidate(coeff: Interval, row: Lin, flat: bool) Cand {
 /// question whose answer is two integers must not cost three allocations
 /// to ask, and a projection must not pay to store rows it reads one at a
 /// time.
+/// The caller's two output tables, when a round appends its carried rows
+/// through instead of collecting them. Borrowed for the life of the round;
+/// the memory stays the caller's, as `Buckets` never owns it.
+const Passthrough = struct {
+    coeffs: *std.ArrayList(Interval),
+    rhs: *std.ArrayList(Interval),
+};
+
 const Buckets = struct {
     gpa: std.mem.Allocator,
     /// Rows that do not mention the variable. Stays empty when the
@@ -228,8 +236,10 @@ const Buckets = struct {
     lower: std.ArrayList(Part) = .empty,
     upper: std.ArrayList(Part) = .empty,
     /// Where a carried row goes instead of into `carried`. Null collects.
-    coeffs: ?*std.ArrayList(Interval) = null,
-    rhs: ?*std.ArrayList(Interval) = null,
+    /// Both halves or neither: a round that has nowhere to write the right
+    /// side of a row has nowhere to write the left side either, so the two
+    /// are one field and not two optionals that could disagree.
+    passthrough: ?Passthrough = null,
     /// How many rows were carried, whether they were stored or written
     /// through. `carried.items.len` cannot answer it once the passthrough
     /// is set, and the reservation a round makes needs it either way.
@@ -239,7 +249,7 @@ const Buckets = struct {
     /// reserving is what keeps a round from paying O(log rows)
     /// reallocations that each copy everything built so far.
     fn init(gpa: std.mem.Allocator, n: usize) !Buckets {
-        var self = Buckets{ .gpa = gpa };
+        var self: Buckets = .{ .gpa = gpa };
         try self.carried.ensureTotalCapacity(gpa, n);
         errdefer self.deinit();
         try self.lower.ensureTotalCapacity(gpa, n);
@@ -256,23 +266,33 @@ const Buckets = struct {
         rhs: *std.ArrayList(Interval),
         n: usize,
     ) !Buckets {
-        var self = Buckets{ .gpa = gpa, .coeffs = coeffs, .rhs = rhs };
+        var self: Buckets = .{ .gpa = gpa, .passthrough = .{ .coeffs = coeffs, .rhs = rhs } };
         errdefer self.deinit();
         try self.lower.ensureTotalCapacity(gpa, n);
         try self.upper.ensureTotalCapacity(gpa, n);
         return self;
     }
 
+    /// Release the three lists and leave the receiver unusable.
+    ///
+    /// The `undefined` is an invalidation, not a check: a second `deinit`
+    /// through it reads memory this call wrote over, which is undefined
+    /// behaviour and may or may not trap. What it removes is the state a
+    /// `Buckets` whose three `ArrayList`s were `.empty` would read as a live
+    /// one, so reaching this twice is a bug rather than a shape the code is
+    /// willing to carry. The same idiom `System.deinit` below uses, for the
+    /// same reason.
     fn deinit(self: *Buckets) void {
         self.carried.deinit(self.gpa);
         self.lower.deinit(self.gpa);
         self.upper.deinit(self.gpa);
+        self.* = undefined;
     }
 
     fn addCarried(self: *Buckets, row: Lin) !void {
-        if (self.coeffs) |out| {
-            try out.appendSlice(self.gpa, row.coeffs);
-            try self.rhs.?.append(self.gpa, row.rhs);
+        if (self.passthrough) |out| {
+            try out.coeffs.appendSlice(self.gpa, row.coeffs);
+            try out.rhs.append(self.gpa, row.rhs);
         } else {
             try self.carried.append(self.gpa, row);
         }
@@ -390,7 +410,11 @@ const CandWriter = struct {
     }
 
     fn addUpper(self: *CandWriter, part: Part) !void {
-        self.cands[self.n + self.upper_len] = candidate(part.coeff, part.row, exact.isFlatApartFrom(part.row.coeffs, self.k));
+        self.cands[self.n + self.upper_len] = candidate(
+            part.coeff,
+            part.row,
+            exact.isFlatApartFrom(part.row.coeffs, self.k),
+        );
         self.upper_len += 1;
     }
 };
@@ -624,7 +648,7 @@ pub const System = struct {
     /// copy of the rows; the rule it reads is that same rule either way,
     /// which is the only part the gate was ever for.
     pub fn rowsAfterEliminating(self: System, k: usize) !usize {
-        var tally = Tally{};
+        var tally: Tally = .{};
         try self.partitionInto(k, &tally);
         return tally.rows();
     }
@@ -811,7 +835,7 @@ pub const System = struct {
         // holds every row that can be read from below, `upper` every row
         // that can be read from above, and a coefficient that reaches zero
         // sits in both, carrying the piece that belongs to each side.
-        var reader = BoundReader{};
+        var reader: BoundReader = .{};
         try self.partitionInto(k, &reader);
 
         const lo = reader.lower orelse return null;
@@ -935,7 +959,7 @@ pub const System = struct {
         const cands = try gpa.alloc(Cand, 2 * n);
         defer gpa.free(cands);
 
-        var writer = CandWriter{ .cands = cands, .n = n, .k = k };
+        var writer: CandWriter = .{ .cands = cands, .n = n, .k = k };
         try self.partitionInto(k, &writer);
         const lower_len = writer.lower_len;
         const upper_len = writer.upper_len;
@@ -950,8 +974,8 @@ pub const System = struct {
                 // the three values it reads and names nothing else, so it
                 // takes no ownership and cannot be reached only through a
                 // system.
-                const lower = exact.Side{ .coeff = l.coeff, .coeffs = l.row.coeffs, .rhs = l.row.rhs };
-                const upper = exact.Side{ .coeff = u.coeff, .coeffs = u.row.coeffs, .rhs = u.row.rhs };
+                const lower: exact.Side = .{ .coeff = l.coeff, .coeffs = l.row.coeffs, .rhs = l.row.rhs };
+                const upper: exact.Side = .{ .coeff = u.coeff, .coeffs = u.row.coeffs, .rhs = u.row.rhs };
                 const proved_all_zero = (l.exact and u.exact) or
                     (l.exact and l.flat) or
                     (u.exact and u.flat) or
@@ -1203,7 +1227,7 @@ pub const System = struct {
     /// every round of every sweep, so it is the last place in the file that
     /// could afford to materialise a list to measure its length.
     fn pairCount(self: System, k: usize) !usize {
-        var tally = Tally{};
+        var tally: Tally = .{};
         try self.partitionInto(k, &tally);
         return tally.pairs();
     }

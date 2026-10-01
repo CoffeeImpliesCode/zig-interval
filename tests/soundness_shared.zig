@@ -328,7 +328,7 @@ pub const neg_inf64 = -inf64;
 /// Exact widening of an `f64` to `f128`. Every `f64` is a `f128`, so this
 /// loses nothing.
 pub inline fn ex(x: f64) f128 {
-    return @as(f128, x);
+    return x;
 }
 
 /// The exact image of an operation over a box of `f64` endpoints, held in
@@ -450,9 +450,9 @@ pub fn compareToSum(g: f64, a: f64, b: f64) SumOrder {
     if (g == inf64) return .above;
     if (g == neg_inf64) return .below;
     const t = twoSum(a, b);
-    const G = ex(g);
-    if (G < t.s) return .below;
-    if (G > t.s) return .above;
+    const g_ex = ex(g);
+    if (g_ex < t.s) return .below;
+    if (g_ex > t.s) return .above;
     if (t.err > 0.0) return .below;
     if (t.err < 0.0) return .above;
     return .equal;
@@ -512,18 +512,17 @@ pub fn sumGeq(g: f64, a: f64, b: f64) bool {
 /// sixth slot, and the largest index ever written is four. Zero elimination
 /// is what keeps it there, and a zero residual is dropped by `!= 0.0` and
 /// never by `> 0.0` — the latter would let a `-0.0` through and put a zero
-/// in the leading position. Every read is of `e[0..n]`: the array is
-/// `undefined` past the length, and a slot that was never written is not
-/// merely pointless to read but undefined.
+/// in the leading position. Every read is of `e[0..n]`, and `n` is the
+/// authority on which slots are terms. Callers start with `n = 0`; `add`
+/// writes each component before extending the length, so unused slots do
+/// not need initialization.
 pub const Expansion = struct {
     /// Five terms, five slots. A sixth would only ever be a slot nothing in
     /// this file fills.
     const cap: usize = 5;
 
-    /// The components, smallest first. Only the first `n` are meaningful,
-    /// and `n` is the authority on which those are: an unwritten slot is
-    /// `undefined` and never zero, so no stale value can be read as a term.
-    e: [cap]f128 = undefined,
+    /// The components, smallest first. Only `e[0..n]` may be read.
+    e: [cap]f128,
     n: usize = 0,
 
     /// The exact sum of this expansion and one more exact term, folded in
@@ -788,7 +787,8 @@ pub fn marginAdmissible(lo: f64, hi: f64, margin: f64) bool {
     if (std.math.isNan(margin)) return false;
     if (margin == inf64) return true;
     if (margin == neg_inf64) return false;
-    var total = Expansion{};
+    // SAFETY: `n` starts at zero; `add` writes each slot before `n` exposes it.
+    var total: Expansion = .{ .e = undefined };
     total.add(ex(hi));
     total.add(-ex(lo));
     total.add(2.0 * ex(margin));
@@ -892,7 +892,8 @@ pub const ScaleBound = struct {
     /// `ScaleBound`'s comment names, folded in as the formula writes them —
     /// the expansion asks nothing of their order.
     pub fn expandLower(s: ScaleBound, glo: f64) bool {
-        var total = Expansion{};
+        // SAFETY: `n` starts at zero; `add` writes each slot before `n` exposes it.
+        var total: Expansion = .{ .e = undefined };
         total.add(ex(s.lo));
         total.add(ex(s.hi));
         total.add(ex(s.mag) * ex(s.lo));
@@ -904,7 +905,8 @@ pub const ScaleBound = struct {
     /// The mirror of `expandLower` for the high end, where the sign has to be
     /// non-positive.
     pub fn expandUpper(s: ScaleBound, ghi: f64) bool {
-        var total = Expansion{};
+        // SAFETY: `n` starts at zero; `add` writes each slot before `n` exposes it.
+        var total: Expansion = .{ .e = undefined };
         total.add(ex(s.lo));
         total.add(ex(s.hi));
         total.add(-(ex(s.mag) * ex(s.lo)));
@@ -1197,6 +1199,20 @@ pub fn expRefSmall(t: f128) f128 {
 /// of that are cheap: 2^k is a power of two built by doubling, so it is
 /// exact, and r is under a third of a unit, where `expRefSmall`'s series
 /// converges in thirty terms.
+///
+/// THAT RANGE IS A PRECONDITION, and it is what makes the reduction below
+/// safe rather than merely accurate. There is one caller: `expm1Ref`, on
+/// its `|t| > 1` arm. There is one caller of that: `tanhRefMag`, which
+/// passes twice an `f64` magnitude already capped at `tanh_saturation`, so
+/// what arrives here satisfies 1 < t <= 40 and nothing else ever does.
+/// Dividing by ln2 gives [1.4427, 57.7080], `@round` of that is [1, 58],
+/// and 58 is the largest `k` this function can hold — against an `i32` that
+/// runs to 2^31 - 1, so the `@intFromFloat` below converts a value with
+/// seven orders of magnitude of room and cannot overflow, and the doubling
+/// loop that reads `k` runs at most fifty-eight times. An argument outside
+/// the range would not merely be less accurate: `expRefSmall` would be
+/// handed a remainder outside the half-unit band its series is bounded on,
+/// which is the condition that bound was stated for.
 pub fn expRef(t: f128) f128 {
     const k: i32 = @intFromFloat(@round(t / ln2_ref));
     var scale: f128 = 1.0;
@@ -1341,20 +1357,20 @@ pub fn exactClamp(a: Interval, x: f64) f128 {
 /// always enough; an infinite bound on the far side is a miss, because the
 /// quotient of two finite operands is finite.
 pub fn quotientHolds(a: f64, b: f64, got: Interval) bool {
-    const A = ex(a);
-    const B = ex(b);
-    if (B == 0.0) return true; // a divisor of zero is screened out earlier
+    const a_ex = ex(a);
+    const b_ex = ex(b);
+    if (b_ex == 0.0) return true; // a divisor of zero is screened out earlier
     const lower = blk: {
         if (std.math.isNan(got.lo)) break :blk false;
         if (got.lo == neg_inf64) break :blk true;
-        const L = ex(got.lo) * B;
-        break :blk if (B > 0.0) L <= A else L >= A;
+        const lo_product = ex(got.lo) * b_ex;
+        break :blk if (b_ex > 0.0) lo_product <= a_ex else lo_product >= a_ex;
     };
     const upper = blk: {
         if (std.math.isNan(got.hi)) break :blk false;
         if (got.hi == inf64) break :blk true;
-        const H = ex(got.hi) * B;
-        break :blk if (B > 0.0) H >= A else H <= A;
+        const hi_product = ex(got.hi) * b_ex;
+        break :blk if (b_ex > 0.0) hi_product >= a_ex else hi_product <= a_ex;
     };
     return lower and upper;
 }
@@ -1508,7 +1524,23 @@ pub const Op = enum {
     /// True for the operations that take a second interval operand.
     pub fn usesSecond(op: Op) bool {
         return switch (op) {
-            .add, .sub, .mul, .div, .hull, .intersect, .hull_of, .intersection_of, .overlaps, .subset_of, .eql, .ne, .lt, .le, .gt, .ge => true,
+            .add,
+            .sub,
+            .mul,
+            .div,
+            .hull,
+            .intersect,
+            .hull_of,
+            .intersection_of,
+            .overlaps,
+            .subset_of,
+            .eql,
+            .ne,
+            .lt,
+            .le,
+            .gt,
+            .ge,
+            => true,
             else => false,
         };
     }
@@ -1529,27 +1561,41 @@ pub const Op = enum {
     /// without the reader having to go and look it up.
     pub fn oracle(op: Op) []const u8 {
         return switch (op) {
-            .add => "the two same-signed corner sums, judged against the two f64 operands of each through the TwoSum residual and never against an f128 of the sum",
-            .sub => "the two crossed corner differences, judged against the two f64 operands of each through the TwoSum residual and never against an f128 of the sum",
+            .add => "the two same-signed corner sums, judged against the two f64 operands of each through the TwoSum" ++
+                "residual and never against an f128 of the sum",
+            .sub => "the two crossed corner differences, judged against the two f64 operands of each through the" ++
+                "TwoSum residual and never against an f128 of the sum",
             .mul => "the min and max over the four corner products, exact in f128",
-            .div, .recip => "exact cross-multiplication of each corner, and for a divisor reaching zero the sign of the two one-sided limits",
-            .translate => "the two endpoint sums, judged against the two f64 operands of each through the TwoSum residual and never against an f128 of the sum",
-            .scale => "the exact affine extrema (A + B + G*A - G*B) / 2 and (A + B - G*A + G*B) / 2 for the original f64 endpoints A, B and the magnitude G, compared term by term through the five-term f128 expansion of A, B, G*A, -G*B and -2*g - no midpoint, no half-width, no f128 rounding anywhere in the reference, and the whole line at an infinite factor on a box with width",
-            .expand => "the two endpoint differences, judged against the two f64 operands of each through the TwoSum residual and never against an f128 of the sum",
+            .div, .recip => "exact cross-multiplication of each corner, and for a divisor reaching zero the sign of" ++
+                "the two one-sided limits",
+            .translate => "the two endpoint sums, judged against the two f64 operands of each through the TwoSum" ++
+                "residual and never against an f128 of the sum",
+            .scale => "the exact affine extrema (A + B + G*A - G*B) / 2 and (A + B - G*A + G*B) / 2 for the original" ++
+                "f64 endpoints A, B and the magnitude G, compared term by term through the five-term f128 expansion" ++
+                "of A, B, G*A, -G*B and -2*g - no midpoint, no half-width, no f128 rounding anywhere in the" ++
+                "reference, and the whole line at an infinite factor on a box with width",
+            .expand => "the two endpoint differences, judged against the two f64 operands of each through the TwoSum" ++
+                "residual and never against an f128 of the sum",
             .abs => "the min and max of the two endpoint magnitudes, exact",
             .sqr => "the two endpoint squares, exact in f128, with a zero floor on an interval straddling zero",
             .neg => "the endpoints swapped, exact",
             .hull, .hull_of => "the min of the lower ends and the max of the upper ends, exact",
-            .intersect, .intersection_of => "the max of the lower ends and the min of the upper ends, exact, and null when they cross",
+            .intersect, .intersection_of => "the max of the lower ends and the min of the upper ends, exact, and" ++
+                "null when they cross",
             .midpoint => "the exact centre (lo + hi) / 2 in f128, to within one ULP",
             .clamp => "the nearer endpoint, or x itself, selected in f128",
             .width, .distance_to => "the exact difference of the f64 endpoints in f128, as a value to within one ULP",
             .contains, .overlaps, .subset_of => "agreement with intersect and hull, which have exact references",
-            .eql, .ne, .lt, .le, .gt, .ge => "the endpoint relation stated in f128, together with the certain-comparison laws",
-            .floor, .ceil, .trunc, .round => "the primitive at each endpoint, exact because the map snaps to a value of the interval",
-            .sqrt => "each endpoint bracketed by half an ULP, the whole margin IEEE 754 allows a correctly rounded square root",
+            .eql, .ne, .lt, .le, .gt, .ge => "the endpoint relation stated in f128, together with the" ++
+                "certain-comparison laws",
+            .floor, .ceil, .trunc, .round => "the primitive at each endpoint, exact because the map snaps to a value" ++
+                "of the interval",
+            .sqrt => "each endpoint bracketed by half an ULP, the whole margin IEEE 754 allows a correctly rounded" ++
+                "square root",
             .cbrt => "the bracket the sign of y^3 - x gives, which assumes no accuracy of any primitive",
-            .tanh => "the true tanh of each endpoint in f128 to 3.1e-34 relative, from the exponential identity with the cancellation near zero controlled, bracketed to [tanh 20, 1] past 20 where the value is indistinguishable from 1 at thirty-four digits",
+            .tanh => "the true tanh of each endpoint in f128 to 3.1e-34 relative, from the exponential identity with" ++
+                "the cancellation near zero controlled, bracketed to [tanh 20, 1] past 20 where the value is" ++
+                "indistinguishable from 1 at thirty-four digits",
         };
     }
 };
@@ -1680,7 +1726,27 @@ pub fn exact(c: Case) ?Range {
         .sqrt => exactSqrt(c.a),
         .cbrt => exactCbrt(c.a),
         .tanh => exactTanh(c.a),
-        .add, .sub, .translate, .expand, .scale, .div, .recip, .midpoint, .clamp, .width, .distance_to, .contains, .overlaps, .subset_of, .eql, .ne, .lt, .le, .gt, .ge => null,
+        .add,
+        .sub,
+        .translate,
+        .expand,
+        .scale,
+        .div,
+        .recip,
+        .midpoint,
+        .clamp,
+        .width,
+        .distance_to,
+        .contains,
+        .overlaps,
+        .subset_of,
+        .eql,
+        .ne,
+        .lt,
+        .le,
+        .gt,
+        .ge,
+        => null,
     };
 }
 
@@ -1975,7 +2041,14 @@ pub fn holds(c: Case, got: Value) bool {
             // bound sitting exactly on the operand.
             const g = got.intervalOrNull() orelse return false;
             if (g.lo > g.hi) return false;
-            return sumBound(c).?.holds(g);
+            // `sumBound` answers for exactly these four operations and
+            // null for every other, so this arm is the one place the null
+            // cannot arrive. It is captured rather than forced anyway: a
+            // null here would mean the switch above had admitted an
+            // operation `sumBound` does not cover, and an enclosing
+            // verdict is not what should be said about that.
+            const s = sumBound(c) orelse return false;
+            return s.holds(g);
         },
         .scale => {
             // The affine extrema are five-term sums of the ORIGINAL f64
@@ -2007,8 +2080,35 @@ pub const Tally = struct {
     skipped_precondition: usize = 0,
 };
 
+/// One line of the suite's report, written RAW to the process's stderr.
+///
+/// This is the suite's own output and not debug logging: the bytes are what
+/// a reader reads a failure out of, and `std.log` would put a level and a
+/// timestamp in front of every one of them. So the line goes straight to the
+/// file, on the same primitive the standard library's stderr print is built
+/// on — the same lock, the same raw file write, the same interleaving with a
+/// panic — and the one thing that changes is that the write error is not
+/// thrown away. A report that cannot be written is a run nobody can read
+/// the answer out of: `0 FAILED` is a claim about printed lines, and a green
+/// run that printed nothing is indistinguishable from a tier that checked
+/// nothing. So the failure is reported rather than dropped, on the channel
+/// that owns the exit status.
+pub fn reportErr(comptime fmt: []const u8, args: anytype) void {
+    var buf: [512]u8 = undefined;
+    const failed = blk: {
+        const stderr = std.debug.lockStderr(&buf);
+        defer std.debug.unlockStderr();
+        stderr.file_writer.interface.print(fmt, args) catch break :blk true;
+        stderr.file_writer.interface.flush() catch break :blk true;
+        break :blk false;
+    };
+    if (failed) {
+        std.debug.panic("the soundness report could not be written to stderr", .{});
+    }
+}
+
 pub fn showInterval(i: Interval) void {
-    std.debug.print("      [{e: <26} , {e: <26} ]  bits 0x{X:0>16} 0x{X:0>16}\n", .{
+    reportErr("      [{e: <26} , {e: <26} ]  bits 0x{X:0>16} 0x{X:0>16}\n", .{
         i.lo, i.hi, @as(u64, @bitCast(i.lo)), @as(u64, @bitCast(i.hi)),
     });
 }
@@ -2020,35 +2120,35 @@ pub fn showValue(v: Value) void {
             if (m) |i| {
                 showInterval(i);
             } else {
-                std.debug.print("      null, which claims the result is empty in the reals\n", .{});
+                reportErr("      null, which claims the result is empty in the reals\n", .{});
             }
         },
-        .scalar => |x| std.debug.print("      {e}  (bits 0x{X:0>16})\n", .{ x, @as(u64, @bitCast(x)) }),
-        .flag => |b| std.debug.print("      {s}\n", .{if (b) "true" else "false"}),
+        .scalar => |x| reportErr("      {e}  (bits 0x{X:0>16})\n", .{ x, @as(u64, @bitCast(x)) }),
+        .flag => |b| reportErr("      {s}\n", .{if (b) "true" else "false"}),
     }
 }
 
 pub fn showCase(c: Case, got: Value) void {
-    std.debug.print("    case: {s}\n", .{c.op.label()});
-    std.debug.print("      a =\n", .{});
+    reportErr("    case: {s}\n", .{c.op.label()});
+    reportErr("      a =\n", .{});
     showInterval(c.a);
     if (c.op.usesSecond()) {
-        std.debug.print("      b =\n", .{});
+        reportErr("      b =\n", .{});
         showInterval(c.b);
     }
     if (c.op.usesScalar()) {
-        std.debug.print("      s = {e}  (bits 0x{X:0>16})\n", .{ c.s, @as(u64, @bitCast(c.s)) });
+        reportErr("      s = {e}  (bits 0x{X:0>16})\n", .{ c.s, @as(u64, @bitCast(c.s)) });
     }
-    std.debug.print("      returned =\n", .{});
+    reportErr("      returned =\n", .{});
     showValue(got);
 }
 
 pub fn summary(t: Tally, tag: []const u8) void {
-    std.debug.print("  {s}{s}: {d} checked, {d} FAILED, {d} skipped non-finite, {d} skipped precondition\n", .{
+    reportErr("  {s}{s}: {d} checked, {d} FAILED, {d} skipped non-finite, {d} skipped precondition\n", .{
         tag, t.op.label(), t.checked, t.failures, t.skipped_nonfinite, t.skipped_precondition,
     });
     if (t.failures > t.shown) {
-        std.debug.print("  {s}: {d} further failures not printed individually\n", .{ t.op.label(), t.failures - t.shown });
+        reportErr("  {s}: {d} further failures not printed individually\n", .{ t.op.label(), t.failures - t.shown });
     }
 }
 
@@ -2122,15 +2222,15 @@ pub fn expectEnclosure(name: []const u8, got: Interval, r: Range, check_width: b
     const hi_ok = upperOk(r.hi, got.hi);
     const wide_ok = !check_width or widthOk(got, r);
     if (lo_ok and hi_ok and wide_ok) return;
-    std.debug.print("\n  UNSOUND: {s}\n", .{name});
-    std.debug.print("    returned =\n", .{});
+    reportErr("\n  UNSOUND: {s}\n", .{name});
+    reportErr("    returned =\n", .{});
     showInterval(got);
-    std.debug.print("    exact lo = {e}\n", .{r.lo});
-    std.debug.print("    exact hi = {e}\n", .{r.hi});
-    if (!lo_ok) std.debug.print("    returned lo is ABOVE the true minimum and excludes it\n", .{});
-    if (!hi_ok) std.debug.print("    returned hi is BELOW the true maximum and excludes it\n", .{});
-    if (!wide_ok) std.debug.print("    returned interval is far wider than the true image\n", .{});
-    std.debug.print("\n", .{});
+    reportErr("    exact lo = {e}\n", .{r.lo});
+    reportErr("    exact hi = {e}\n", .{r.hi});
+    if (!lo_ok) reportErr("    returned lo is ABOVE the true minimum and excludes it\n", .{});
+    if (!hi_ok) reportErr("    returned hi is BELOW the true maximum and excludes it\n", .{});
+    if (!wide_ok) reportErr("    returned interval is far wider than the true image\n", .{});
+    reportErr("\n", .{});
     return error.NotAnEnclosure;
 }
 
@@ -2156,14 +2256,14 @@ pub fn expectSumEnclosure(name: []const u8, got: Interval, s: SumBound, check_wi
     else
         true;
     if (lo_ok and hi_ok and width_ok) return;
-    std.debug.print("\n  UNSOUND: {s}\n", .{name});
-    std.debug.print("    returned =\n", .{});
+    reportErr("\n  UNSOUND: {s}\n", .{name});
+    reportErr("    returned =\n", .{});
     showInterval(got);
-    std.debug.print("    true lo = {e} + {e} = {e} + {e} exactly\n", .{ s.alo, s.blo, tlo.s, tlo.err });
-    std.debug.print("    true hi = {e} + {e} = {e} + {e} exactly\n", .{ s.ahi, s.bhi, thi.s, thi.err });
-    if (!lo_ok) std.debug.print("    returned lo is ABOVE the true minimum and excludes it\n", .{});
-    if (!hi_ok) std.debug.print("    returned hi is BELOW the true maximum and excludes it\n", .{});
-    if (!width_ok) std.debug.print("    returned interval is far wider than the true image\n", .{});
-    std.debug.print("\n", .{});
+    reportErr("    true lo = {e} + {e} = {e} + {e} exactly\n", .{ s.alo, s.blo, tlo.s, tlo.err });
+    reportErr("    true hi = {e} + {e} = {e} + {e} exactly\n", .{ s.ahi, s.bhi, thi.s, thi.err });
+    if (!lo_ok) reportErr("    returned lo is ABOVE the true minimum and excludes it\n", .{});
+    if (!hi_ok) reportErr("    returned hi is BELOW the true maximum and excludes it\n", .{});
+    if (!width_ok) reportErr("    returned interval is far wider than the true image\n", .{});
+    reportErr("\n", .{});
     return error.NotAnEnclosure;
 }

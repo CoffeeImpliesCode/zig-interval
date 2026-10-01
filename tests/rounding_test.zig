@@ -20,7 +20,7 @@ const min_finite: f64 = -std.math.floatMax(f64);
 /// Bit pattern of x, for asserting an exact neighbour rather than a value
 /// that merely compares equal to it.
 fn bits(x: f64) u64 {
-    return @as(u64, @bitCast(x));
+    return @bitCast(x);
 }
 
 /// The top bit of the f64 layout, set on every negative value including

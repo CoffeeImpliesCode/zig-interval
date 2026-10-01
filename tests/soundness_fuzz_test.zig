@@ -26,7 +26,6 @@ const Tally = shared.Tally;
 const Value = shared.Value;
 
 const apply = shared.apply;
-const boundedScaleHolds = shared.boundedScaleHolds;
 const exact = shared.exact;
 const ex = shared.ex;
 const holds = shared.holds;
@@ -36,9 +35,8 @@ const marginAdmissible = shared.marginAdmissible;
 const max_detail = shared.max_detail;
 const min_subnormal = shared.min_subnormal;
 const neg_inf64 = shared.neg_inf64;
+const reportErr = shared.reportErr;
 const showCase = shared.showCase;
-const showInterval = shared.showInterval;
-const showValue = shared.showValue;
 const streamSeed = shared.streamSeed;
 const sumBound = shared.sumBound;
 const summary = shared.summary;
@@ -290,14 +288,14 @@ fn reportSum(s: SumBound, got: Value) void {
     const g = got.intervalOrNull();
     const lo = twoSum(s.alo, s.blo);
     const hi = twoSum(s.ahi, s.bhi);
-    std.debug.print("      true lo = {e} + {e} = {e} + {e} exactly\n", .{ s.alo, s.blo, lo.s, lo.err });
-    std.debug.print("      true hi = {e} + {e} = {e} + {e} exactly\n", .{ s.ahi, s.bhi, hi.s, hi.err });
+    reportErr("      true lo = {e} + {e} = {e} + {e} exactly\n", .{ s.alo, s.blo, lo.s, lo.err });
+    reportErr("      true hi = {e} + {e} = {e} + {e} exactly\n", .{ s.ahi, s.bhi, hi.s, hi.err });
     if (g) |x| {
         if (!s.lowerOk(x.lo)) {
-            std.debug.print("      lower bound is ABOVE the true minimum and excludes it\n", .{});
+            reportErr("      lower bound is ABOVE the true minimum and excludes it\n", .{});
         }
         if (!s.upperOk(x.hi)) {
-            std.debug.print("      upper bound is BELOW the true maximum and excludes it\n", .{});
+            reportErr("      upper bound is BELOW the true maximum and excludes it\n", .{});
         }
     }
 }
@@ -311,15 +309,21 @@ fn reportSum(s: SumBound, got: Value) void {
 /// operands, and the verdict of the exact comparison.
 fn reportScale(s: ScaleBound, got: Value) void {
     const g = got.intervalOrNull();
-    std.debug.print("      A = {e}, B = {e}, G = |factor| = {e}\n", .{ s.lo, s.hi, s.mag });
-    std.debug.print("      true lo = (A + B + G*A - G*B) / 2, compared as the sign of that minus 2*lo and never formed\n", .{});
-    std.debug.print("      true hi = (A + B - G*A + G*B) / 2, compared as the sign of that minus 2*hi and never formed\n", .{});
+    reportErr("      A = {e}, B = {e}, G = |factor| = {e}\n", .{ s.lo, s.hi, s.mag });
+    reportErr(
+        "      true lo = (A + B + G*A - G*B) / 2, compared as the sign of that minus 2*lo and never formed\n",
+        .{},
+    );
+    reportErr(
+        "      true hi = (A + B - G*A + G*B) / 2, compared as the sign of that minus 2*hi and never formed\n",
+        .{},
+    );
     if (g) |x| {
         if (!s.lowerOk(x.lo)) {
-            std.debug.print("      lower bound is ABOVE the true minimum and excludes it\n", .{});
+            reportErr("      lower bound is ABOVE the true minimum and excludes it\n", .{});
         }
         if (!s.upperOk(x.hi)) {
-            std.debug.print("      upper bound is BELOW the true maximum and excludes it\n", .{});
+            reportErr("      upper bound is BELOW the true maximum and excludes it\n", .{});
         }
     }
 }
@@ -328,7 +332,7 @@ fn report(c: Case, got: Value, t: *Tally) void {
     t.failures += 1;
     if (t.shown >= max_detail) return;
     t.shown += 1;
-    std.debug.print("    FAIL {s}: the answer is not what the oracle requires\n", .{c.op.label()});
+    reportErr("    FAIL {s}: the answer is not what the oracle requires\n", .{c.op.label()});
     showCase(c, got);
     if (got.intervalOrNull()) |g| {
         if (std.math.isNan(g.lo) or std.math.isNan(g.hi)) {
@@ -336,10 +340,10 @@ fn report(c: Case, got: Value, t: *Tally) void {
             // past both order tests and then be quoted with a gap of zero,
             // which reads as "the bound sits exactly on the extremum". It
             // is named out instead, because a NaN bound is not a bound.
-            std.debug.print("      a returned bound is NaN, which encloses nothing\n", .{});
+            reportErr("      a returned bound is NaN, which encloses nothing\n", .{});
         }
         if (g.lo > g.hi) {
-            std.debug.print("      the returned interval is inverted: lo > hi\n", .{});
+            reportErr("      the returned interval is inverted: lo > hi\n", .{});
         }
     }
     if (c.op == .scale) {
@@ -347,31 +351,39 @@ fn report(c: Case, got: Value, t: *Tally) void {
     } else if (sumBound(c)) |s| {
         reportSum(s, got);
     } else if (exact(c)) |r| {
-        std.debug.print("      exact lo = {e}\n", .{r.lo});
-        std.debug.print("      exact hi = {e}\n", .{r.hi});
+        reportErr("      exact lo = {e}\n", .{r.lo});
+        reportErr("      exact hi = {e}\n", .{r.hi});
         const g = got.intervalOrNull();
         if (r.lo_beyond) {
-            std.debug.print("      the true minimum is a real past the end of the f64 range, so a returned lo of +inf excludes it\n", .{});
+            reportErr(
+                "      the true minimum is a real past the end of the f64 range, so a" ++
+                    "returned lo of +inf excludes it\n",
+                .{},
+            );
         } else if (g != null and !lowerOk(r.lo, g.?.lo)) {
             var buf: [64]u8 = undefined;
             const gap = if (std.math.isNan(g.?.lo))
                 ""
             else
                 std.fmt.bufPrint(&buf, " : {e} ULP", .{gapUlp(g.?.lo, r.lo)}) catch " : ?";
-            std.debug.print("      lower bound is ABOVE the true minimum and excludes it{s}\n", .{gap});
+            reportErr("      lower bound is ABOVE the true minimum and excludes it{s}\n", .{gap});
         }
         if (r.hi_beyond) {
-            std.debug.print("      the true maximum is a real past the end of the f64 range, so a returned hi of -inf excludes it\n", .{});
+            reportErr(
+                "      the true maximum is a real past the end of the f64 range, so a" ++
+                    "returned hi of -inf excludes it\n",
+                .{},
+            );
         } else if (g != null and !upperOk(r.hi, g.?.hi)) {
             var buf: [64]u8 = undefined;
             const gap = if (std.math.isNan(g.?.hi))
                 ""
             else
                 std.fmt.bufPrint(&buf, " : {e} ULP", .{gapUlp(g.?.hi, r.hi)}) catch " : ?";
-            std.debug.print("      upper bound is BELOW the true maximum and excludes it{s}\n", .{gap});
+            reportErr("      upper bound is BELOW the true maximum and excludes it{s}\n", .{gap});
         }
     } else {
-        std.debug.print("      the oracle for this operation is {s}\n", .{c.op.oracle()});
+        reportErr("      the oracle for this operation is {s}\n", .{c.op.oracle()});
     }
 }
 

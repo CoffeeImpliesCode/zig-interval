@@ -13,8 +13,13 @@
 # at the top of gen_corpus.c, all three of which were got wrong before the
 # header was available to check them against.
 #
-# Usage:  ./scripts/build_mpfr.sh && /tmp/gen_corpus > tests/corpus/elementary.txt
-
+# Usage:  ./scripts/build_mpfr.sh && "$SCRATCH_ROOT/mpfr/gen_corpus" > tests/corpus/elementary.txt
+#
+# Scratch space (MPFR source, install prefix, the generator binary; a few hundred
+# MB) goes under a sanctioned large volume, never local /tmp. See scripts/scratch.sh
+# for which locations qualify: /vol/tmp and /vol/tmp2 exist on every buildhost but are
+# NFS, and this project cannot build on NFS (renameat2 EINVAL), so the local volumes
+# /home/tmp2 and /home/tmp are the sanctioned ones that also work.
 set -euo pipefail
 
 # Resolve the script's own directory up front, before anything moves the shell.
@@ -26,9 +31,16 @@ set -euo pipefail
 # own sources is a reproducibility claim with nothing behind it.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Resolved before anything is downloaded, so a host with no sanctioned volume fails
+# in a second rather than after a curl of the MPFR tarball.
+# shellcheck source=scripts/scratch.sh
+source "$SCRIPT_DIR/scratch.sh"
+scratch_init mpfr || exit 1
+echo "scratch: $SCRATCH_DIR"
+
 MPFR_VERSION="${MPFR_VERSION:-4.2.1}"
-PREFIX="${MPFR_PREFIX:-/tmp/mpfr-install}"
-SRC="${MPFR_SRC:-/tmp/mpfr-$MPFR_VERSION}"
+PREFIX="${MPFR_PREFIX:-$SCRATCH_DIR/install}"
+SRC="${MPFR_SRC:-$SCRATCH_DIR/mpfr-$MPFR_VERSION}"
 
 if [ ! -f "$PREFIX/include/mpfr.h" ]; then
     echo "building MPFR $MPFR_VERSION into $PREFIX"
@@ -64,7 +76,7 @@ done
 
 echo "compiling gen_corpus against $LIBDIR"
 gcc -O2 -I"$PREFIX/include" "$SCRIPT_DIR/gen_corpus.c" \
-    -o /tmp/gen_corpus \
+    -o "$SCRATCH_DIR/gen_corpus" \
     -L"$LIBDIR" -lmpfr -lgmp -lm -Wl,-rpath,"$LIBDIR"
 
-echo "built /tmp/gen_corpus; run it and redirect to tests/corpus/elementary.txt"
+echo "built $SCRATCH_DIR/gen_corpus; run it and redirect to tests/corpus/elementary.txt"

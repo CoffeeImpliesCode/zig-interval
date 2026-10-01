@@ -280,18 +280,21 @@ const std = @import("std");
 const interval = @import("interval");
 const Interval = interval.Interval;
 
-pub fn main() void {
+pub fn main(init: std.process.Init) !void {
+    var stderr = std.Io.File.stderr().writer(init.io, &.{});
+    const out = &stderr.interface;
     const a = Interval.init(1.0, 3.0);
     const b = Interval.init(2.0, 5.0);
 
-    const shared = a.intersect(b).?;          // [2, 3]
+    const shared = a.intersect(b) orelse return error.NoRealAnswer; // [2, 3]
     const span = a.hull(b);                   // [1, 5]
     const total = a.add(b);                   // an enclosure of [3, 8]
 
     // Elementary functions are free functions, and may be null.
-    const rooted = interval.sqrt(Interval.init(4.0, 9.0)).?; // brackets [2, 3]
+    const rooted = interval.sqrt(Interval.init(4.0, 9.0)) orelse
+        return error.NoRealAnswer; // brackets [2, 3]
 
-    std.debug.print("{d} {d} {d} {d}\n", .{
+    try out.print("{d} {d} {d} {d}\n", .{
         shared.width(), span.midpoint(), total.hi, rooted.hi,
     });
 }
@@ -887,12 +890,15 @@ exists to catch.
   ```zig
   // Interval.init asserts lo <= hi and traps, so an inverted component has
   // to be written as a literal.
-  const inverted = Interval{ .lo = 4.0, .hi = -2.0 };
+  const inverted: Interval = .{ .lo = 4.0, .hi = -2.0 };
   const empty = interval.Vec(2).fromArray(.{ Interval.init(0, 1), inverted });
 
-  empty.isEmpty();           // true: no point satisfies both components
-  empty.contains(.{ 0.5, 2.0 }); // false, and not merely because isEmpty said so
-  empty.overlaps(empty);     // false: it holds no point to share
+  // true: no point satisfies both components
+  empty.isEmpty();
+  // false, and not merely because isEmpty said so
+  empty.contains(.{ 0.5, 2.0 });
+  // false: it holds no point to share
+  empty.overlaps(empty);
   ```
 
   Writing a component through `set` has the same effect as building it that
@@ -956,7 +962,8 @@ const roots = interval.mapResult(box, interval.sqrt);
 // DynVec: the result is an error union over the same optional, and the
 // non-null arm is a box you must deinit — hence `var`, because deinit
 // takes the box by pointer.
-var dyn_roots = (try interval.mapResult(dyn, interval.sqrt)).?;
+var dyn_roots = (try interval.mapResult(dyn, interval.sqrt)) orelse
+    return error.NoRealAnswer;
 defer dyn_roots.deinit();
 ```
 
@@ -1109,7 +1116,9 @@ const std = @import("std");
 const interval = @import("interval");
 const lp = interval.lp;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    var stderr = std.Io.File.stderr().writer(init.io, &.{});
+    const out = &stderr.interface;
     var sys = try lp.System.init(std.heap.page_allocator, 2);
     defer sys.deinit();
 
@@ -1126,18 +1135,18 @@ pub fn main() !void {
     // mutate the system, so the same system can still be reduced afterwards.
     if (try sys.box()) |derived| {
         defer std.heap.page_allocator.free(derived);
-        std.debug.print("x in [{d}, {d}], y in [{d}, {d}]\n", .{
+        try out.print("x in [{d}, {d}], y in [{d}, {d}]\n", .{
             derived[0].lo, derived[0].hi, derived[1].lo, derived[1].hi,
         });
         // x in [-5, 6], y in [-4, 7] — the exact corners, each printed a hair
         // outside, because a derived bound is an enclosure and not the corner.
     } else {
-        std.debug.print("no finite box\n", .{});
+        try out.print("no finite box\n", .{});
     }
 
     // To keep the reduced system rather than just read a bound, eliminate.
     if (!try sys.eliminateInOrderOfChoice()) {
-        std.debug.print("unsatisfiable\n", .{});
+        try out.print("unsatisfiable\n", .{});
         return;
     }
 }
@@ -1160,7 +1169,9 @@ const std = @import("std");
 const interval = @import("interval");
 const lp = interval.lp;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    var stderr = std.Io.File.stderr().writer(init.io, &.{});
+    const out = &stderr.interface;
     var sys = try lp.System.init(std.heap.page_allocator, 1);
     defer sys.deinit();
 
@@ -1169,11 +1180,11 @@ pub fn main() !void {
     // x >= 2, stored normalised as -x <= -2
     try sys.add(&.{interval.Interval.init(1, 1)}, .ge, interval.Interval.init(2, 2));
 
-    std.debug.print("before: {}\n", .{sys.isUnsat()}); // false
+    try out.print("before: {}\n", .{sys.isUnsat()}); // false
 
     try sys.eliminate(0);
 
-    std.debug.print("after: {}\n", .{sys.isUnsat()});  // true
+    try out.print("after: {}\n", .{sys.isUnsat()});  // true
 }
 ```
 
@@ -1217,9 +1228,27 @@ gate.
 
 ## Development
 
-Run the test suite with:
+The required acceptance gate is:
 
+```sh
+zig-gate
 ```
+
+Install `zig-gate`, `ziglint`, `zlint`, `zbc`, `zwanzig` and `cross-test` before
+running it. The gate runs formatting, build, tests, AST checks, both linters,
+`zbc`, `zwanzig` and the cross-target profile. Missing required tools fail the
+gate. `.vf/gates.yml` uses this command for the full suite; its focused target
+command remains `zig 0.16.0 build test`.
+
+`ziglint`, `zlint` and `zwanzig` findings fail acceptance without rule
+suppression. `zbc` errors fail; its three float-to-integer warnings require
+the range proofs documented at `criticalRange` and the soundness oracle's
+`expRef`. They remain advisory rather than changing interval arithmetic to
+satisfy a caller-insensitive analysis.
+
+For a focused native test run:
+
+```sh
 zig build test
 ```
 

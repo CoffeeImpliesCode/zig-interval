@@ -5,75 +5,138 @@ const Interval = interval.Interval;
 const Vec = interval.Vec;
 const DynVec = interval.DynVec;
 
-/// Raised when the library produces a value it does not promise. Returning it
-/// from main makes the process exit non-zero, failing the parent `consumer`
-/// step.
-pub const CheckError = error{UnexpectedIntervalValue};
+/// Raised when the library produces a value it does not promise, and when a
+/// line reporting one cannot be written. Returning either from main makes
+/// the process exit non-zero, failing the parent `consumer` step.
+pub const CheckError = error{ UnexpectedIntervalValue, WriteFailed };
 
 /// Number of behavioural checks; the summary line reports this.
 const total_checks = 29;
 
+/// The program's own output: one line per claim, on stderr, with nothing in
+/// front of the bytes.
+///
+/// `std.debug.print` is the debugging logger rather than a program's report,
+/// and it is also the wrong tool here for a second reason beyond that: it
+/// flushes every line before returning. These fixtures exist to be READ when
+/// the library misbehaves, and a library that PANICS rather than returns
+/// takes the process with it, so a line still sitting in a buffer is a line
+/// nobody reads. Every line is therefore flushed as it is written, which is
+/// what the debugging logger was doing anyway and costs one syscall per
+/// claim.
+///
+/// A write that fails is reported as `CheckError.WriteFailed` rather than
+/// swallowed: a report that could not be written is a report that cannot be
+/// trusted, and every run in which that matters is already failing.
+const Report = struct {
+    stderr: std.Io.File.Writer,
+
+    /// Write one line and flush it, so the line is readable even if whatever
+    /// comes next does not return.
+    fn line(self: *Report, comptime fmt: []const u8, args: anytype) CheckError!void {
+        try self.stderr.interface.print(fmt, args);
+        try self.stderr.interface.flush();
+    }
+};
+
 /// Compare a produced interval against the expected one, loudly on mismatch.
 /// Exact endpoints are the right assertion for the set and geometry
 /// operations, which do no arithmetic and therefore need no widening.
-fn expectInterval(what: []const u8, got: Interval, want: Interval) CheckError!void {
+fn expectInterval(
+    report: *Report,
+    what: []const u8,
+    got: Interval,
+    want: Interval,
+) CheckError!void {
     if (got.lo != want.lo or got.hi != want.hi) {
-        std.debug.print(
+        try report.line(
             "FAIL {s}: got [{d}, {d}], want [{d}, {d}]\n",
             .{ what, got.lo, got.hi, want.lo, want.hi },
         );
         return CheckError.UnexpectedIntervalValue;
     }
-    std.debug.print("ok {s}: [{d}, {d}]\n", .{ what, got.lo, got.hi });
+    try report.line("ok {s}: [{d}, {d}]\n", .{ what, got.lo, got.hi });
 }
 
 /// Compare a produced scalar against the expected one, loudly on mismatch.
-fn expectFloat(what: []const u8, got: f64, want: f64) CheckError!void {
+fn expectFloat(
+    report: *Report,
+    what: []const u8,
+    got: f64,
+    want: f64,
+) CheckError!void {
     if (got != want) {
-        std.debug.print("FAIL {s}: got {d}, want {d}\n", .{ what, got, want });
+        try report.line("FAIL {s}: got {d}, want {d}\n", .{ what, got, want });
         return CheckError.UnexpectedIntervalValue;
     }
-    std.debug.print("ok {s}: {d}\n", .{ what, got });
+    try report.line("ok {s}: {d}\n", .{ what, got });
 }
 
-fn expectBool(what: []const u8, got: bool, want: bool) CheckError!void {
+fn expectBool(
+    report: *Report,
+    what: []const u8,
+    got: bool,
+    want: bool,
+) CheckError!void {
     if (got != want) {
-        std.debug.print("FAIL {s}: got {}, want {}\n", .{ what, got, want });
+        try report.line("FAIL {s}: got {}, want {}\n", .{ what, got, want });
         return CheckError.UnexpectedIntervalValue;
     }
-    std.debug.print("ok {s}: {}\n", .{ what, got });
+    try report.line("ok {s}: {}\n", .{ what, got });
 }
 
 /// Assert a `null` result, the library's signal for an answer that is empty
 /// in the reals.
-fn expectNullInterval(what: []const u8, got: ?Interval) CheckError!void {
+fn expectNullInterval(
+    report: *Report,
+    what: []const u8,
+    got: ?Interval,
+) CheckError!void {
     if (got) |g| {
-        std.debug.print(
+        try report.line(
             "FAIL {s}: got [{d}, {d}], want null\n",
             .{ what, g.lo, g.hi },
         );
         return CheckError.UnexpectedIntervalValue;
     }
-    std.debug.print("ok {s}: null\n", .{what});
+    try report.line("ok {s}: null\n", .{what});
+}
+
+/// The other half of `expectNullInterval`: assert that an answer IS there.
+///
+/// `null` is a real answer the library can give, so forcing it open with `?`
+/// would turn "the library disagreed with this check" into a panic that
+/// names neither. A check that wants an interval says so here instead, and
+/// the check fails with a line that says which check failed.
+fn expectPresent(
+    report: *Report,
+    what: []const u8,
+    got: ?Interval,
+) CheckError!Interval {
+    return got orelse {
+        try report.line("FAIL {s}: got null, want an interval\n", .{what});
+        return CheckError.UnexpectedIntervalValue;
+    };
 }
 
 /// Assert the library's central promise: `got` CONTAINS the exact real
 /// interval [exact_lo, exact_hi]. Equality is neither expected nor wanted
 /// here, because every arithmetic endpoint is widened by one ULP outward.
 fn expectEncloses(
+    report: *Report,
     what: []const u8,
     got: Interval,
     exact_lo: f64,
     exact_hi: f64,
 ) CheckError!void {
     if (got.lo > exact_lo or got.hi < exact_hi) {
-        std.debug.print(
+        try report.line(
             "FAIL {s}: [{d}, {d}] does not enclose [{d}, {d}]\n",
             .{ what, got.lo, got.hi, exact_lo, exact_hi },
         );
         return CheckError.UnexpectedIntervalValue;
     }
-    std.debug.print(
+    try report.line(
         "ok {s}: [{d}, {d}] encloses [{d}, {d}]\n",
         .{ what, got.lo, got.hi, exact_lo, exact_hi },
     );
@@ -88,6 +151,7 @@ fn expectEncloses(
 /// operands would be passed through as if it were exact, and the caller would
 /// have no way to tell.
 fn expectWidenedEnclosure(
+    report: *Report,
     what: []const u8,
     got: Interval,
     rn: Interval,
@@ -95,20 +159,20 @@ fn expectWidenedEnclosure(
     true_hi: f64,
 ) CheckError!void {
     if (got.lo >= rn.lo or got.hi <= rn.hi) {
-        std.debug.print(
+        try report.line(
             "FAIL {s}: [{d}, {d}] is not wider than [{d}, {d}]\n",
             .{ what, got.lo, got.hi, rn.lo, rn.hi },
         );
         return CheckError.UnexpectedIntervalValue;
     }
     if (got.lo > true_lo or got.hi < true_hi) {
-        std.debug.print(
+        try report.line(
             "FAIL {s}: [{d}, {d}] does not enclose [{d}, {d}]\n",
             .{ what, got.lo, got.hi, true_lo, true_hi },
         );
         return CheckError.UnexpectedIntervalValue;
     }
-    std.debug.print(
+    try report.line(
         "ok {s}: [{d}, {d}] encloses [{d}, {d}], wider than [{d}, {d}]\n",
         .{ what, got.lo, got.hi, true_lo, true_hi, rn.lo, rn.hi },
     );
@@ -135,32 +199,33 @@ const width_slack: f64 = 1e-9;
 /// ends; the width bound keeps a result that merely overshoots from
 /// passing.
 fn expectEnclosesFromZero(
+    report: *Report,
     what: []const u8,
     got: Interval,
     exact_hi: f64,
 ) CheckError!void {
     if (got.lo > 0.0 or got.hi < exact_hi) {
-        std.debug.print(
+        try report.line(
             "FAIL {s}: [{d}, {d}] does not enclose [0, {d}]\n",
             .{ what, got.lo, got.hi, exact_hi },
         );
         return CheckError.UnexpectedIntervalValue;
     }
     if (got.hi <= exact_hi) {
-        std.debug.print(
+        try report.line(
             "FAIL {s}: upper bound {d} is not widened past {d}\n",
             .{ what, got.hi, exact_hi },
         );
         return CheckError.UnexpectedIntervalValue;
     }
     if (got.hi - got.lo - exact_hi > width_slack * (exact_hi + 1.0)) {
-        std.debug.print(
+        try report.line(
             "FAIL {s}: [{d}, {d}] is far wider than [0, {d}]\n",
             .{ what, got.lo, got.hi, exact_hi },
         );
         return CheckError.UnexpectedIntervalValue;
     }
-    std.debug.print(
+    try report.line(
         "ok {s}: [{d}, {d}] encloses [0, {d}] and is widened at the top\n",
         .{ what, got.lo, got.hi, exact_hi },
     );
@@ -168,9 +233,14 @@ fn expectEnclosesFromZero(
 
 /// Check a whole vector in one shot: the dimension, then every component.
 /// One vector is one behavioural check, so it reports on one line.
-fn expectVecExact(what: []const u8, got: anytype, want: []const Interval) CheckError!void {
+fn expectVecExact(
+    report: *Report,
+    what: []const u8,
+    got: anytype,
+    want: []const Interval,
+) CheckError!void {
     if (got.dim() != want.len) {
-        std.debug.print(
+        try report.line(
             "FAIL {s}: dim {d}, want {d}\n",
             .{ what, got.dim(), want.len },
         );
@@ -179,21 +249,26 @@ fn expectVecExact(what: []const u8, got: anytype, want: []const Interval) CheckE
     for (want, 0..) |w, i| {
         const g = got.get(i);
         if (g.lo != w.lo or g.hi != w.hi) {
-            std.debug.print(
+            try report.line(
                 "FAIL {s}: component {d} is [{d}, {d}], want [{d}, {d}]\n",
                 .{ what, i, g.lo, g.hi, w.lo, w.hi },
             );
             return CheckError.UnexpectedIntervalValue;
         }
     }
-    std.debug.print("ok {s}: {d} components exact\n", .{ what, want.len });
+    try report.line("ok {s}: {d} components exact\n", .{ what, want.len });
 }
 
 /// Same, but each component only has to CONTAIN the exact real interval,
 /// which is the right assertion for a widened arithmetic result.
-fn expectVecEncloses(what: []const u8, got: anytype, want: []const Interval) CheckError!void {
+fn expectVecEncloses(
+    report: *Report,
+    what: []const u8,
+    got: anytype,
+    want: []const Interval,
+) CheckError!void {
     if (got.dim() != want.len) {
-        std.debug.print(
+        try report.line(
             "FAIL {s}: dim {d}, want {d}\n",
             .{ what, got.dim(), want.len },
         );
@@ -202,40 +277,51 @@ fn expectVecEncloses(what: []const u8, got: anytype, want: []const Interval) Che
     for (want, 0..) |w, i| {
         const g = got.get(i);
         if (g.lo > w.lo or g.hi < w.hi) {
-            std.debug.print(
+            try report.line(
                 "FAIL {s}: component {d} is [{d}, {d}], does not enclose [{d}, {d}]\n",
                 .{ what, i, g.lo, g.hi, w.lo, w.hi },
             );
             return CheckError.UnexpectedIntervalValue;
         }
     }
-    std.debug.print("ok {s}: {d} components enclose\n", .{ what, want.len });
+    try report.line("ok {s}: {d} components enclose\n", .{ what, want.len });
 }
 
-pub fn main() !void {
+/// Every check, once each, in the order the sections below appear.
+///
+/// The report is passed in rather than reached for, so that every line these
+/// checks write goes through one buffer and one stream: the parent's log is
+/// then exactly what this program decided, in the order it decided it.
+fn run(report: *Report) !void {
     // --- Set and geometry operations: exact endpoints, no widening. ---
 
     try expectInterval(
+        report,
         "hull",
         Interval.init(1.0, 3.0).hull(Interval.init(2.0, 5.0)),
         Interval.init(1.0, 5.0),
     );
 
     try expectInterval(
+        report,
         "intersect",
-        Interval.init(1.0, 3.0).intersect(Interval.init(2.0, 5.0)).?,
+        try expectPresent(
+            report,
+            "intersect",
+            Interval.init(1.0, 3.0).intersect(Interval.init(2.0, 5.0)),
+        ),
         Interval.init(2.0, 3.0),
     );
 
     const disjoint = Interval.init(0.0, 1.0).intersect(Interval.init(2.0, 3.0));
-    if (disjoint != null) {
-        std.debug.print(
+    if (disjoint) |d| {
+        try report.line(
             "FAIL intersect-disjoint: got [{d}, {d}], want null\n",
-            .{ disjoint.?.lo, disjoint.?.hi },
+            .{ d.lo, d.hi },
         );
         return CheckError.UnexpectedIntervalValue;
     }
-    std.debug.print("ok intersect-disjoint: null\n", .{});
+    try report.line("ok intersect-disjoint: null\n", .{});
 
     const spread = [_]Interval{
         Interval.init(4.0, 7.0),
@@ -243,8 +329,9 @@ pub fn main() !void {
         Interval.init(2.0, 9.0),
     };
     try expectInterval(
+        report,
         "hullOf",
-        Interval.hullOf(&spread).?,
+        try expectPresent(report, "hullOf", Interval.hullOf(&spread)),
         Interval.init(1.0, 9.0),
     );
 
@@ -254,14 +341,15 @@ pub fn main() !void {
         Interval.init(3.0, 4.0),
     };
     try expectInterval(
+        report,
         "intersectionOf",
-        Interval.intersectionOf(&common).?,
+        try expectPresent(report, "intersectionOf", Interval.intersectionOf(&common)),
         Interval.init(3.0, 4.0),
     );
 
-    try expectFloat("distanceTo", Interval.init(1.0, 3.0).distanceTo(0.0), 1.0);
+    try expectFloat(report, "distanceTo", Interval.init(1.0, 3.0).distanceTo(0.0), 1.0);
 
-    try expectFloat("clamp", Interval.init(1.0, 3.0).clamp(5.0), 3.0);
+    try expectFloat(report, "clamp", Interval.init(1.0, 3.0).clamp(5.0), 3.0);
 
     // --- Algebraic operations: every result is an enclosure, so the
     // assertion is containment, never equality. All the operands below are
@@ -269,6 +357,7 @@ pub fn main() !void {
 
     // 1 + 2 = 3, 3 + 5 = 8.
     try expectEncloses(
+        report,
         "add",
         Interval.init(1.0, 3.0).add(Interval.init(2.0, 5.0)),
         3.0,
@@ -277,6 +366,7 @@ pub fn main() !void {
 
     // 5 - 2 = 3, 7 - 1 = 6.
     try expectEncloses(
+        report,
         "sub",
         Interval.init(5.0, 7.0).sub(Interval.init(1.0, 2.0)),
         3.0,
@@ -286,10 +376,11 @@ pub fn main() !void {
     // IEEE negation is exact and only the endpoints swap, so neg is the one
     // algebraic operation that returns its endpoints unwidened. [-3, -1] is
     // therefore an exact result, not merely an enclosure.
-    try expectInterval("neg", Interval.init(1.0, 3.0).neg(), Interval.init(-3.0, -1.0));
+    try expectInterval(report, "neg", Interval.init(1.0, 3.0).neg(), Interval.init(-3.0, -1.0));
 
     // Smallest product 2*2 = 4, largest 3*3 = 9.
     try expectEncloses(
+        report,
         "mul-positive",
         Interval.init(2.0, 3.0).mul(Interval.init(2.0, 3.0)),
         4.0,
@@ -301,6 +392,7 @@ pub fn main() !void {
     // gives -4, and a check written against -4 would accept exactly that
     // mistake, so the lower corner is stated where a wrong one fails.
     try expectEncloses(
+        report,
         "mul-mixed-sign",
         Interval.init(2.0, 3.0).mul(Interval.init(-2.0, 3.0)),
         -6.0,
@@ -310,6 +402,7 @@ pub fn main() !void {
     // Divisor stays strictly positive, so the quotient stays bounded:
     // smallest 4/4 = 1, largest 8/2 = 4.
     try expectEncloses(
+        report,
         "div-positive",
         Interval.init(4.0, 8.0).div(Interval.init(2.0, 4.0)),
         1.0,
@@ -323,12 +416,12 @@ pub fn main() !void {
     // Zero is attained exactly and is its own bound, so no step is asked
     // for at the bottom; 4 is a real value the arithmetic could have
     // missed, so a step at the top is required and is checked.
-    try expectEnclosesFromZero("scale", Interval.init(1.0, 3.0).scale(2.0), 4.0);
-    try expectEnclosesFromZero("expand", Interval.init(1.0, 3.0).expand(1.0), 4.0);
+    try expectEnclosesFromZero(report, "scale", Interval.init(1.0, 3.0).scale(2.0), 4.0);
+    try expectEnclosesFromZero(report, "expand", Interval.init(1.0, 3.0).expand(1.0), 4.0);
 
     // The image of |x| over [-3, 5] is [0, 5], not [3, 5]: the minimum of
     // |x| is 0, reached at x = 0 inside the interval.
-    try expectEncloses("abs", Interval.init(-3.0, 5.0).abs(), 0.0, 5.0);
+    try expectEncloses(report, "abs", Interval.init(-3.0, 5.0).abs(), 0.0, 5.0);
 
     // --- The enclosure guarantee itself. ---
 
@@ -341,6 +434,7 @@ pub fn main() !void {
     // happen to be sound here, but only by luck: the library must not depend
     // on luck, so it must come back strictly wider.
     try expectWidenedEnclosure(
+        report,
         "enclosure-widening",
         Interval.init(1.0, 2.0).add(Interval.init(4.0, 8.0)),
         Interval.init(5.0, 10.0), // what round-to-nearest would return
@@ -363,6 +457,7 @@ pub fn main() !void {
     // that value and the true sum, "at most" here means strictly less. For
     // the same reason a sound upper bound has to be at least 0.8.
     try expectWidenedEnclosure(
+        report,
         "enclosure-rounding-error",
         Interval.init(0.1, 0.1).add(Interval.init(0.7, 0.7)),
         Interval.init(0.7999999999999999, 0.7999999999999999), // round-to-nearest
@@ -374,6 +469,7 @@ pub fn main() !void {
 
     // lt is true only when every point of self is below every point of other.
     try expectBool(
+        report,
         "lt-separated",
         Interval.init(1.0, 2.0).lt(Interval.init(3.0, 4.0)),
         true,
@@ -382,6 +478,7 @@ pub fn main() !void {
     // [1, 3] and [3, 5] share the point 3, so it is NOT certain that self is
     // less than other. `lt` is self.hi < other.lo, never self.lo < other.hi.
     try expectBool(
+        report,
         "lt-touching",
         Interval.init(1.0, 3.0).lt(Interval.init(3.0, 5.0)),
         false,
@@ -390,6 +487,7 @@ pub fn main() !void {
     // Overlapping: some points of self are above some points of other, so the
     // certain answer is false even though the intervals do overlap.
     try expectBool(
+        report,
         "lt-overlapping",
         Interval.init(1.0, 3.0).lt(Interval.init(2.0, 5.0)),
         false,
@@ -401,8 +499,9 @@ pub fn main() !void {
     // 2 and 3 are exact, but the result is still widened, so assert that it
     // BRACKETS [2, 3] rather than equalling it.
     try expectEncloses(
+        report,
         "sqrt-brackets",
-        interval.sqrt(Interval.init(4.0, 9.0)).?,
+        try expectPresent(report, "sqrt-brackets", interval.sqrt(Interval.init(4.0, 9.0))),
         2.0,
         3.0,
     );
@@ -411,12 +510,14 @@ pub fn main() !void {
     // is empty in the reals. Empty is signalled by null, which is a
     // different condition from unbounded.
     try expectNullInterval(
+        report,
         "log-non-positive",
         interval.log(Interval.init(-1.0, 0.0)),
     );
 
     // Same distinction on the other branch: no real square root below zero.
     try expectNullInterval(
+        report,
         "sqrt-negative",
         interval.sqrt(Interval.init(-4.0, -1.0)),
     );
@@ -438,7 +539,7 @@ pub fn main() !void {
         Interval.init(1.0, 1.0),
     });
     // One check covers the whole vector: dimension plus all three components.
-    try expectVecExact("vec3-add", va.add(vb), &.{
+    try expectVecExact(report, "vec3-add", va.add(vb), &.{
         Interval.init(1.9999999999999998, 3.0000000000000004),
         Interval.init(3.9999999999999996, 5.000000000000001),
         Interval.init(5.999999999999999, 7.000000000000001),
@@ -458,10 +559,10 @@ pub fn main() !void {
         Interval.init(0.0, 10.0),
     });
     if (vleft.intersect(vright) != null) {
-        std.debug.print("FAIL vec3-intersect-disjoint: got a box, want null\n", .{});
+        try report.line("FAIL vec3-intersect-disjoint: got a box, want null\n", .{});
         return CheckError.UnexpectedIntervalValue;
     }
-    std.debug.print("ok vec3-intersect-disjoint: null\n", .{});
+    try report.line("ok vec3-intersect-disjoint: null\n", .{});
 
     // DynVec carries its dimension at runtime and its own allocator. The
     // constructor only copies, so the components are exact. `neg` mutates in
@@ -472,13 +573,13 @@ pub fn main() !void {
         Interval.init(3.0, 4.0),
     });
     defer dv.deinit();
-    try expectVecExact("dynvec-init", dv, &.{
+    try expectVecExact(report, "dynvec-init", dv, &.{
         Interval.init(1.0, 2.0),
         Interval.init(3.0, 4.0),
     });
 
     dv.neg();
-    try expectVecEncloses("dynvec-neg", dv, &.{
+    try expectVecEncloses(report, "dynvec-neg", dv, &.{
         Interval.init(-2.0, -1.0),
         Interval.init(-4.0, -3.0),
     });
@@ -491,13 +592,28 @@ pub fn main() !void {
     // exists", as in the log and sqrt checks above.
     const unbounded = Interval.init(1.0, 2.0).div(Interval.init(-1.0, 1.0));
     if (unbounded.lo != -std.math.inf(f64) or unbounded.hi != std.math.inf(f64)) {
-        std.debug.print(
+        try report.line(
             "FAIL div-straddling-zero: got [{d}, {d}], want [-inf, inf]\n",
             .{ unbounded.lo, unbounded.hi },
         );
         return CheckError.UnexpectedIntervalValue;
     }
-    std.debug.print("ok div-straddling-zero: [-inf, inf]\n", .{});
+    try report.line("ok div-straddling-zero: [-inf, inf]\n", .{});
 
-    std.debug.print("consumer ok: {d} checks\n", .{total_checks});
+    try report.line("consumer ok: {d} checks\n", .{total_checks});
+}
+
+pub fn main(init: std.process.Init) !void {
+    // SAFETY: the writer fills the buffer before reading any of it back, and
+    // nothing outside this scope can observe it: `Report.line` flushes on
+    // every call, so no byte is left buffered when this function returns.
+    var buffer: [4096]u8 = undefined;
+    const stderr = std.Io.File.stderr().writerStreaming(init.io, &buffer);
+    var report: Report = .{ .stderr = stderr };
+
+    // No `defer` and no flush here: every line was flushed as it was written,
+    // so a run that stops at a check has already published the line that
+    // says which one, and a run that panics has published the lines before
+    // it. Propagating the error is all that is left to do.
+    try run(&report);
 }

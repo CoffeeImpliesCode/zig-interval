@@ -32,6 +32,73 @@ step 1 gives the routine to rebuild them. Nothing here is a guess.
 
 ---
 
+## 0. House rules for scratch space and cleanup
+
+**Two rules from the cluster operators and the project owner, both dated
+2026-10-01, that constrain how any work here may be run.** They are not
+preferences, and they are recorded here because this file is what a cold session
+reads first.
+
+**Do not fill local `/tmp` or `/var/tmp`.** On a buildhost host both are small
+local ext4 volumes — `/tmp` is 10 GB — and Rechnerbetriebsgruppe asked that
+processes stop writing large data to them. The sanctioned locations are
+`/vol/tmp` and `/vol/tmp2` (every buildhost) and `/home/tmp` and `/home/tmp2`
+(some); find them with `lsblk` and `df -hT`. The machine-wide policy is
+`~/.local/lib/host-scratch.sh`: it runs only on `buildhost*`, requires a real
+mountpoint with at least 100 GiB free, refuses symlinked or foreign-owned
+directories, and exports `HOST_SCRATCH_ROOT`, `buildhost_CACHE_ROOT`, `TMPDIR`,
+`XDG_CACHE_HOME` and `ZIG_GLOBAL_CACHE_DIR`. Source it and use what it names.
+
+**But prefer a LOCAL volume for a Zig build cache.** `/vol/tmp` and
+`/vol/tmp2` are sanctioned and available everywhere, and they are **NFS**;
+this repository is also on an NFS mount, and a build that keeps its cache
+there dies before it compiles anything — the mount rejects `renameat2` with
+`EINVAL` and Zig reports `programmer bug caused syscall error: INVAL`. That is
+why the capture commands below name a local cache explicitly: the benchmark
+capture, the instruction-count probe and the throwaway build each pass
+`--cache-dir` and `--global-cache-dir` under the policy's local `TMPDIR`, and
+`cross-test` rejects `--cache-dir` because it manages its own. The short
+commands quoted in passing elsewhere in this file — `zig build test`,
+`zig build bench-lp`, `zig build docs`, `zig-gate` — pass no cache flag: they
+are the abbreviated form, and they assume the local cache the surrounding
+shell or runner already provides. That is a statement about those commands,
+not a promise that any snippet here is portable as pasted. So `/home/tmp2`
+and `/home/tmp` are the sanctioned volumes that also work, and **two resolvers
+find one, and they are not the same resolver**. `scripts/scratch.sh` asks the
+machine-wide policy first and takes a LOCAL root from it — an empty root is
+skipped, not accepted — then falls back to the per-user directories
+`/home/tmp2/$USER` and `/home/tmp/$USER`, and if none of those exists it prints
+what it checked and fails rather than choosing a
+volume on your behalf.
+`build.zig`'s `consumerCacheRoot` names the root for the nested fixture build
+and cannot ask that shell policy at all, so it carries three candidates of its
+own: `ZIG_INTERVAL_CONSUMER_CACHE`, resolved absolute because the nested
+build's working directory is `fixture/`; then `/home/tmp2/$USER/zig-interval`
+and `/home/tmp/$USER/zig-interval`, the first whose per-user directory exists
+and can hold a cache; and then **the cache directory this build was itself
+given**, also absolute. There is no `XDG_CACHE_HOME`, no `HOME` and no `/tmp`
+in that list, and each was removed on purpose — an environment variable is not
+a decision, `$HOME` may be an NFS mount, and `/tmp` is the volume the rule above
+exists to protect. **So "`scratch.sh` does the same" was a false sentence about
+this project; read the function.** The one difference worth naming, because it
+looks like a bug and is not: that last candidate can point inside the
+repository — `.zig-cache` on a runner that passes no `--cache-dir` — and nothing
+here promises otherwise. That is what keeps CI working, and it is still a
+directory this build chose rather than one invented at the last moment.
+
+**Clean up after yourself, periodically.** Remove your own caches, throwaway
+probes, scratch files and background jobs once the work that needed them is
+done. `/tmp` is shared on this cluster and holds other people's data, so delete
+only your own artifacts — never blanket-clear it.
+
+**One trap worth naming, because it was nearly deleted.** `probe/` at the
+repository root looks like leftover scratch and is not: all four files are
+tracked, and `docs/tests-and-architecture-plan.md` and this file cite three of
+them **by name** as the proof for claims they make. Before deleting anything
+that looks like clutter, grep the docs for its name.
+
+---
+
 ## 1. What this project is
 
 `~/zig-interval` — a Zig 0.16.0 library package
@@ -85,13 +152,13 @@ was measured away, and what was tried and thrown out.
 | The MPFR corpus tier reports **1886 rows checked, 0 FAILED**, in each of the four modes. It is the only reference in the tree that was not written in the tree: `scripts/gen_corpus.c` calls MPFR at 256 bits twice per row, once `RNDD` and once `RNDU`, and the output is committed as `tests/corpus/elementary.txt`. 1813 of the rows carry the 21 operations the in-tree oracle does not judge, and 73 more carry `sqrt`, `cbrt` and `tanh`, which it does — external corroboration, not new coverage | run; the row count and that split read out of `tests/corpus/elementary.txt` |
 | `8 of 8` operations named by the NaN contract trap on a NaN scalar, and every well-formed control comes back clean | run, each in a child process |
 | The oracle is four sibling test binaries over one shared module, `tests/soundness_shared.zig`, and the LP exact block is its own module, `src/lp_exact.zig`, tested by `tests/lp_exact_test.zig`. The four are siblings over one vocabulary rather than a chain because `zig test` collects the tests of every file a binary reaches, imported or not, so a chain would run the shared file's tests a second time | counted from `build.zig` and the `tests/` tree; the extraction is proved by `probe/lp_exact.zig` failing to compile |
-| `zig build bench` completes; `bench-lp` is bounded by the 20,000-row budget and its run reports 18.5 s. Both numbers are the 2026-09-30 capture and **neither has been re-measured since**; what has been re-run is the step, one benchmark at a time, and each exits 0 | run |
+| `zig build bench` completes; `bench-lp` is bounded by the 20,000-row budget and its run reports 18.5 s. Both numbers are the 2026-09-30 capture and **neither has been re-measured since**; what has been re-run is the step, one benchmark at a time, and each exits 0 — and all three to completion again on 2026-10-02, which refreshed no figure in this document | run |
 | `zig fmt --check` clean | run |
 | `zig build docs` green | run |
 | `aarch64-linux`, `riscv64-linux` and `s390x-linux` build **and run** the whole test step — corpus tier included, 0 FAILED — under QEMU user-mode, **348/348 on each**, the same 348 the native run reports and not a subset. `s390x-linux` is big-endian and is the **only byte-order coverage this project has**: the oracle's `u64` bit-pattern stepping in `src/rounding.zig` and the NaN contract trap's pattern reads are exactly the code a little-endian host cannot get wrong, so a green run on the other targets is not evidence about s390x | run, `cross-test`, 2026-10-01 — `aarch64-linux` and `s390x-linux` at `--timeout 900`, the rest at the default; per-target counts, the byte-order point and the timeout trap are in the cross-target section below |
 | `x86_64-windows` builds and is **not run**: there is no wine on this host, so the test step's binaries cannot execute there, and `cross-test` records the target `build_only`, `runtime_unavailable`. "Builds" is the whole of the claim. The suite is **not** evidenced on Windows and this row must not be read as "the tests pass there" | run, `cross-test` |
 | `bench-lp`'s geometry report is byte-identical to the capture from before the optimisations, and predicted == achieved on every branch | run |
-| Everything this document records is committed, not uncommitted: `main` and `main@origin` are both `083d7471`, HEAD is detached on it, and `85f8592` was the tip when the `ns/op` figures below were taken. **Do not quote that id from this document** — it goes stale at the next commit, this document included — and read a `jj status` that shows a working-copy commit above `083d7471` as work in flight, not as lost work | `jj log -r 'ancestors(@, 25)'` |
+| Everything this document records is committed, not left uncommitted — and the tip is a query rather than an id written here, because an id in this file goes stale at the next commit and this file is in the next commit. `jj status` names the working-copy commit and anything uncommitted in front of it, `jj log -r main` and `jj log -r main@origin` say whether the bookmark and its remote agree, and `jj diff --stat` says what is in that commit. A working-copy commit sitting above `main` is work in flight, not lost work. The `ns/op` figures below carry the 2026-09-30 capture date this file dates them with, not a commit id | `jj status`, `jj log -r main` |
 
 Two of those lines want a reader's attention. The geometry report being
 byte-identical is what makes every LP number in this document trustworthy: it
@@ -110,17 +177,23 @@ eliminations — and it raised peak memory, because the walk holds a chain and
 one copy alive together where the old form held one. The geometry report row
 above is unaffected, and the reason is what that report prints: bounded or
 unbounded, and nothing else. **No `ns/op` figure anywhere in this document has
-been re-measured since 2026-09-30, and none is claimed to have been.** O2 is
-the one landed change that could move them, so `zig build bench` has to be
-re-run before any figure here is quoted as current.
+been re-measured since 2026-09-30, and none is claimed to have been.** All three
+benchmarks ran to completion again on 2026-10-02, and the gate receipt below
+records that completion while saying plainly that the numbers that run printed
+are not adopted: so every table here stays the 2026-09-30 capture and no
+figure in this file may be quoted as current.
 
 **The four-mode run is no longer outstanding.** It was re-run after every
 commit since the measurement, one mode at a time, at the tip named in the last
 row: `zig build test` exit 0 in all four, the oracle at `0 FAILED` on all 35
 operations, the corpus tier at 1886 rows and 0 FAILED, and `zig build docs` and
-`zig fmt --check` both green. The benchmark is the one gate that has not been
-re-run, and that is deliberate — a figure that moves because nobody re-measured
-it is worse than a figure carrying its date.
+`zig fmt --check` both green. The whole suite, all four modes and the cross
+matrix, then ran once more on the stable tree on 2026-10-02 and is written down
+in the gate section below. That is a completion record: the numbers the
+benchmark run printed were measured while the rest of the verification was
+running alongside them, so they are not a trustworthy refreshed performance
+baseline and are not adopted as the baseline here — a figure that moves
+because nobody re-measured it is worse than a figure carrying its date.
 
 **And the other cost question since, the priority 1 infinity contract.** The
 constructor now compares and selects on two endpoints, `scale` has one extra
@@ -139,6 +212,155 @@ brings the bound back to the correctly rounded `f64` and stops. It is D17 in
 has to avoid — the nearest `f64` to the true value IS the bound the old code
 returned, so a reference rounded to `f64` reports the defect as sound — are in
 §2 of `docs/tests-and-architecture-plan.md`.
+
+### The gate — `.vf/gates.yml`, and the harness that is not in this tree
+
+**The policy is a file; the command behind it is not in this repository.**
+`.vf/gates.yml` is six lines and says:
+
+```yaml
+suite-cmd: zig-gate
+suite-timeout: 3600
+enforce: true
+```
+
+`suite-cmd` is what a cold session runs. `suite-timeout` is 3600 s because the
+cross section of that command builds the suite for all five of
+`cross-test.profile.sh`'s targets and runs four of them — one natively, three
+under QEMU — which takes tens of minutes on its own. `enforce: true` makes
+a non-zero exit a red gate rather than a report. The other three keys —
+`suite-install:`, `target-cmd: zig 0.16.0 build test`, `test-paths` — are
+harness plumbing and state no policy of this project's. README's Development
+section is the consumer-facing statement of the same gate; this is the
+session-facing one.
+
+**`zig-gate` is `~/.local/bin/zig-gate`, outside this repository**, exactly as
+`cross-test` is and for the reasons the cross-target section below gives: no
+upstream, no tag, no release, `zig-gate --help` is its documentation, and
+nothing in this tree vendors it. So a change to gate policy is a change to one
+developer's home directory rather than to a commit. Everything below was read
+out of that script on 2026-10-01 and is dated like the rest of this file —
+**re-read the script before quoting any of it at someone.**
+
+**The sections, in order:** `zig fmt --check`, `zig build`, `zig build test`,
+`zig ast-check` over the project file list, then `ziglint`, `zlint -S`, `zbc`,
+`zwanzig`, then `cross-test`. A coverage section is opt-in and off unless
+`--cov` is passed. The order matters less than these four rules.
+
+- **Every analyser is required, and a missing one FAILS.** `ziglint`, `zlint`,
+  `zbc`, `zwanzig` and `cross-test` resolve in `~/.local/bin` first and on
+  `PATH` second; absent, the section fails — it does not skip — and the cross
+  section additionally fails when the project's `./cross-test.profile.sh` (or
+  `./test/cross-test.profile.sh`) is missing. A quieter gate is not a gate.
+- **ziglint, zlint and zwanzig assert every finding, with nothing excluded.**
+  This project configures no `ZIGLINT_ARGS`, no `ZLINT_ARGS` and no
+  `ZWANZIG_ARGS`, so there is no suppression and no `--ignore` anywhere in the
+  policy. In particular the two zwanzig families that would be easiest
+  to quiet — optional unwrapping and identifier style — are answered in `src/`,
+  not filtered out of the report. **A new finding gets a fix in the source. Do
+  not add an exclusion to make it go away.**
+- **zbc splits by severity and only by severity.** Any `error(...)` fails. The
+  tree's standing zbc output is three float-to-integer **warnings**, and they
+  are advisory because they have been read and answered rather than waved
+  through: README's Development section names the range proofs each one rests
+  on — `criticalRange` in `src/interval_ext.zig` and `expRef` in
+  `tests/soundness_shared.zig`. `ZBC_STRICT=1` makes warnings fail as well, and
+  that is the knob to reach for when a new warning is not meant to be waved
+  through. Changing interval arithmetic to satisfy a caller-insensitive
+  analysis is not the alternative.
+- **One explicit file list feeds every source section, and it drops cache and
+  output trees at ANY depth.** `zig-gate` builds it with `find . -name '*.zig'`
+  minus `vk.zig`, `zig-pkg/` and four top-level trees, then removes
+  `GATE_EXCLUDE` — default `/[.]zig-cache/ /zig-out/ /zig-cache/
+  /zig-global-cache/` — one `grep -v` pattern each. Depth is the whole point:
+  the nested consumer build used to write `fixture/.zig-cache` INSIDE this
+  repository, top-level-only exclusions never matched it, and the fmt and lint
+  sections duly reported Zig's own generated `builtin.zig` and
+  `dependencies.zig` as defects. Those counts were a function of build state,
+  not source state. zwanzig is handed the same explicit list for the same
+  reason: it reads no ignore file and skips only four directory names of its
+  own, none of them `.zig-cache`, so a bare `.` would make its findings depend
+  on what the last build left behind.
+
+**cross-test fails closed, and `partial` is not `pass`.** A non-zero exit, a
+missing `fail=` count on the `status=` line, and any status word the gate does
+not recognise each fail the section. `status=partial` or `status=build_only`
+with `fail=0` passes, and this host's normal clean result is exactly that,
+because `x86_64-windows` has no runner here. So **`build_only` on Windows means
+the library compiles and nothing else**: it is not "the tests pass on Windows",
+and no row of this document may be read that way. On `status=fail` the gate
+opens that run's own per-target build logs and says which it found — `timed
+out` is a budget, anything else is a real failing assertion — instead of
+reporting a run that lost one test as a broken suite.
+
+**One external correction, and it is not in this repository's history.**
+`ziglint`'s Z030 rule did not recognise a typed slice range written `[0..0]`, so
+the idiomatic empty-slice form in `src/vector.zig` was reported as something it
+is not. The correction went into the tool's own source at `~/tools/ziglint`,
+and the corrected binary was installed from there. It recognises the typed-slice
+form and leaves `DynVec`'s existing idempotent `deinit` exactly as it was: no
+value was poisoned to silence a rule, no public symbol was renamed, no rule was
+disabled. What that work observed was the tool's own suite and not this
+project's: the focused regression red at 41 of 42 and then green at 42 of 42,
+the tool's full test run 314 of 314, and then a clean run of the corrected
+`ziglint` over this project. **That patch is in nobody's commit here and is not
+published upstream.** A fresh clone gets whatever `ziglint` its install produced;
+the fix is real and it is not this tree's.
+
+**The gate was run on the stable tree on 2026-10-02 and it passed.** One
+`zig-gate` invocation: **GATE PASSED** with **32** Zig sources in the file list,
+`zig fmt --check`, `zig build`, `zig build test` and the `zig ast-check` section
+green, **ziglint 0, zlint 0, zwanzig 0** findings, and **zbc 0 errors** with the
+**3** standing float-to-integer warnings still present and still answered by the
+range proofs the zbc bullet above names. Its cross section reported
+`status=partial` with **pass 4, fail 0, build_only 1**: the four runnable
+targets each ran the whole test step at **348** tests, and `x86_64-windows` is
+`build_only`, `runtime_unavailable` — compiled and never executed, because this
+host has no wine. Beside that run, natively: **348 tests in each of Debug,
+ReleaseSafe, ReleaseFast and ReleaseSmall**, the corpus tier at **1886 rows,
+0 FAILED** in each, **29** consumer checks and then **31** README examples,
+`zig build bench` **7 of 7 steps** (all three benchmarks to completion),
+`zig build docs` **3 of 3**, and the **three complete programs** the README
+prints — §Usage, the worked LP example and the unsatisfiable-system example —
+compiled and run, exit 0 each, each printing what its prose says it prints.
+Consumer cache selection was exercised in three configurations — the gate's own
+default, an explicit relative override, and the parent-cache fallback — and each
+reported 348 tests with 29 then 31 checks; and the scratch policy resolver was
+probed with an empty, a relative and an NFS (`/vol/tmp`) provider root, each of
+which resolves to the local volume, plus one isolated case that fails closed: a
+throwaway `HOME` whose policy script does nothing, together with a `USER` that
+does not exist, so neither `/home/tmp2/$USER` nor `/home/tmp/$USER` is there and
+the resolver exits 1 rather than reaching for `/tmp`. No mount on this host was
+removed or made absent to produce that case.
+
+**The logs, and the three claims this receipt does not make.** The run is
+recorded in `/tmp/zig-interval/verification/summary.json`; the
+three README programs' build and run logs sit beside it in `…/verification/`.
+The cross run is cited from its own completed run directory, run_id
+`20261001-224527-62533-11358`:
+
+`/tmp/zig-interval/cross/runs/20261001-224527-62533-11358/summary.json`
+
+cross-test writes one run directory per run, so a run's own `summary.json` is
+the durable record of that run, and the per-target counts above were read back
+from it: `pass 4, fail 0, build_only 1, partial 0`, `status=partial`, **348**
+tests on each of the four targets that executed. Its own `generated_at` is
+`2026-10-01T22:45:27Z`, in UTC, which is why the file's clock reads 2026-10-01
+while this receipt is dated 2026-10-02 locally. The rolling
+`/tmp/zig-interval/cross/cross-test-summary.json` is a different
+file: cross-test rewrites it as a run progresses and completes, so it can
+describe an in-flight run and otherwise reports whatever ran **latest**. It is
+not immutable, and it is not the receipt for an earlier one. The gate ran with
+its **default consumer cache selection**; the native Release run and the
+benchmark run passed **explicit** `--cache-dir` and `--global-cache-dir`.
+Then, explicitly: **no `ns/op` figure in this document
+was refreshed**, so every table below is still the 2026-09-30 capture. The
+benchmarks did emit fresh `ns/op` while the rest of the verification was
+running alongside them, so those contended outputs are not a baseline and none
+of them is adopted here; the
+**ziglint Z030 fix is not in this project's commit** and this green run says
+nothing about a clone that gets an unfixed `ziglint`; and a green gate reports
+what it ran, so it does not turn the Windows `build_only` into a tested target.
 
 ### Cross-target verification — 2026-10-01, and the 300-second timeout that reads like a defect
 
@@ -177,7 +399,7 @@ rest of the row.
 **The trap: the default execution timeout is 300 seconds and this project's
 heaviest test takes 108 seconds NATIVELY.** The test
 `test.Vec: distance is never below the true Euclidean distance` sweeps
-**4,000,000** cases — `norm_cases` at `tests/vector_test.zig:1673` — and
+**4,000,000** cases — the `norm_cases` constant in `tests/vector_test.zig` —
 measured **108 s** on its own on this host, on 2026-10-01. The whole 55-test
 vector binary also reports 108 s, so essentially all of that is the one loop.
 Natively that fits inside the default budget with room to spare. Under
@@ -222,17 +444,45 @@ show you. It behaves in four ways that matter here:
   with `EINVAL`, so a Zig build on the network mount cannot use a cache there;
   cross-test solves that for its own cache, and `--output` solves it for the
   run.
+- **It refuses to write a run to `/tmp`.** On a buildhost host an `--output`
+  (or `CROSS_PREFIX`) that resolves to `/tmp`, `/var/tmp` or `/dev/shm` is
+  rejected with exit 2 before any output, lock or run directory is created,
+  symlinks resolved first, so a link that lands in `/tmp` is judged by where it
+  lands. `$HOST_SCRATCH_ROOT`, exported by the shared
+  `~/.local/lib/host-scratch.sh` policy that cross-test sources for itself, is
+  the approved root. Nothing else is restricted: the default
+  `zig-out/cross-test`, the approved scratch volumes and hosts that policy does
+  not manage all behave as before.
 
-The invocation behind the table, on this host:
+The invocation behind the table, on this host, with `--output` moved off the
+`/tmp` it used to name. The measurements above came from that invocation and are
+unchanged.
+
+**Every snippet in this file that builds a scratch path is subshelled and fails
+closed.** All four of them — this cross-test invocation, the benchmark capture
+in step 2, the instruction-count probe in step 4 and the throwaway build in
+section 5 — source the host policy with `|| exit 1` and then run
+`: "${TMPDIR:?host policy did not set TMPDIR}"` before the first command that
+builds a path, all of it inside `( … )`. So a policy that is missing, that
+fails to source, or that leaves `TMPDIR` empty ends that snippet with a message
+instead of letting it create `cross-out`, `bl` or `probe` where no policy
+approved — and the `exit` leaves the subshell, not the shell a reader pasted it
+into. Each is the recipe as its capture was taken; a snippet that stops is
+reporting a missing policy, not a defect in the command.
 
 ```sh
-export PATH=/tmp/zigbin:$PATH              # the real 0.16.0; PATH `zig` is a shim
-ZIG=/tmp/zigbin/zig ~/.local/bin/cross-test \
-  --targets x86_64-linux aarch64-linux riscv64-linux s390x-linux \
-  --output /tmp/cross-out --jobs 2 --build-jobs 2            # default 300 s
-ZIG=/tmp/zigbin/zig ~/.local/bin/cross-test \
-  --targets aarch64-linux s390x-linux \
-  --output /tmp/cross-out3 --jobs 2 --build-jobs 2 --timeout 900
+(
+  . ~/.local/lib/host-scratch.sh || exit 1  # exports HOST_SCRATCH_ROOT, TMPDIR
+  : "${TMPDIR:?host policy did not set TMPDIR}"
+  ZIG="$(zig 0.16.0 env | awk -F '"' '/\.zig_exe =/ {print $2; exit}')"
+  export PATH="${ZIG%/*}:$PATH"             # real cached 0.16.0, not the shim
+  ZIG="$ZIG" ~/.local/bin/cross-test \
+    --targets x86_64-linux aarch64-linux riscv64-linux s390x-linux \
+    --output "$TMPDIR/cross-out" --jobs 2 --build-jobs 2         # default 300 s
+  ZIG="$ZIG" ~/.local/bin/cross-test \
+    --targets aarch64-linux s390x-linux \
+    --output "$TMPDIR/cross-out3" --jobs 2 --build-jobs 2 --timeout 900
+)
 ```
 
 Each run prints a `cross-test: target=…` line per target, a `status=` line, and
@@ -471,10 +721,15 @@ alongside the combined `bench` step, which is unchanged. Nothing about what is
 built differs; they are aliases, so one benchmark can be run alone.
 
 ```sh
-cd ~/zig-interval
-zig build bench-scalar --cache-dir /tmp/bl/cache --global-cache-dir /tmp/bl/gcache
-zig build bench-vec    --cache-dir /tmp/bl/cache --global-cache-dir /tmp/bl/gcache
-zig build bench-lp     --cache-dir /tmp/bl/cache --global-cache-dir /tmp/bl/gcache
+(
+  cd ~/zig-interval || exit 1
+  . ~/.local/lib/host-scratch.sh || exit 1   # keeps the caches off /tmp and /var/tmp
+  : "${TMPDIR:?host policy did not set TMPDIR}"
+  BL="$TMPDIR/bl"                            # private cache, under the policy's TMPDIR
+  zig build bench-scalar --cache-dir "$BL/cache" --global-cache-dir "$BL/gcache"
+  zig build bench-vec    --cache-dir "$BL/cache" --global-cache-dir "$BL/gcache"
+  zig build bench-lp     --cache-dir "$BL/cache" --global-cache-dir "$BL/gcache"
+)
 ```
 
 The benchmarks pin their own mode to `ReleaseFast` in `build.zig`, so
@@ -595,10 +850,14 @@ fn` wrappers calling one operation each, `f64` in and an out-pointer for the
 then each wrapper's assembler body counted line by line:
 
 ```sh
-zig 0.16.0 build-obj -OReleaseFast --dep interval \
-  -Mroot=/tmp/icount/probe.zig -Minterval=src/root.zig \
-  -femit-asm=/tmp/icount/probe.s \
-  --cache-dir /tmp/icount/cache --global-cache-dir /tmp/icount/gcache
+(
+  . ~/.local/lib/host-scratch.sh || exit 1   # keeps the probe tree off /tmp and /var/tmp
+  : "${TMPDIR:?host policy did not set TMPDIR}"
+  zig 0.16.0 build-obj -OReleaseFast --dep interval \
+    -Mroot="$TMPDIR/icount/probe.zig" -Minterval=src/root.zig \
+    -femit-asm="$TMPDIR/icount/probe.s" \
+    --cache-dir "$TMPDIR/icount/cache" --global-cache-dir "$TMPDIR/icount/gcache"
+)
 ```
 
 `Interval` cannot cross the C ABI, so the wrapper takes and returns `f64`s.
@@ -988,10 +1247,14 @@ All verified empirically on this machine.
   per compilation, so this never collides with the build graph:
 
   ```sh
-  zig 0.16.0 build-exe -OReleaseFast --dep interval \
-    -Mroot=/tmp/probe.zig -Minterval=src/root.zig \
-    -femit-bin=/tmp/probe \
-    --cache-dir /tmp/probe/cache --global-cache-dir /tmp/probe/gcache
+  (
+    . ~/.local/lib/host-scratch.sh || exit 1   # keeps the probe tree off /tmp and /var/tmp
+    : "${TMPDIR:?host policy did not set TMPDIR}"
+    zig 0.16.0 build-exe -OReleaseFast --dep interval \
+      -Mroot="$TMPDIR/probe.zig" -Minterval=src/root.zig \
+      -femit-bin="$TMPDIR/probe" \
+      --cache-dir "$TMPDIR/probe-cache" --global-cache-dir "$TMPDIR/probe-global-cache"
+  )
   ```
 
   Give a throwaway its own cache directories, and not to keep it off the shared
@@ -1015,15 +1278,23 @@ All verified empirically on this machine.
   want_shared_lock` defaulting to a shared lock, so a parent and a nested build
   can share one global cache; dropping both flags was measured and the step
   finishes in the same ~43 s with the same `consumer ok: 29 checks`. They are
-  kept for containment: both paths are relative to the working directory the
-  step sets, so the nested build's cache output lands in `fixture/.zig-cache`
-  (163 MB when this was measured) and goes away with the fixture instead of
-  joining the machine-wide cache this build shares with every other project.
-  One consequence: `fixture` is one of the six entries in `build.zig.zon`'s
-  `.paths` and that entry is recursive, so hashing or fetching the package
-  walks that cache; `.gitignore` excludes it, and it should be cleaned first.
-  The first `zig build test` is slow (~3m20s) because that cache is cold; later
-  runs are fast. That is not a problem to fix.
+  kept for containment: both paths are ABSOLUTE and are named by
+  `consumerCacheRoot`, so the nested build's cache output never joins the
+  machine-wide global cache this build shares with every other project.
+  Containment used to be RELATIVE paths, resolved against the working directory
+  the step sets, which put that output in `fixture/.zig-cache` — 163 MB when it
+  was measured, 1014 MB at its worst, and inside the working tree on a shared
+  host. The consequences that bit were two: `fixture` is a recursive `.paths`
+  entry in `build.zig.zon`, so hashing or fetching the package walked all of
+  it; and the fmt and lint sections walked
+  it too, reporting the compiler's own generated `builtin.zig` and
+  `dependencies.zig` as defects. **Where the root lands is
+  `consumerCacheRoot`'s decision, and read it rather than assume it:** on this
+  host it is a per-user directory on a local volume, and on a host with no
+  sanctioned local volume it follows the parent build's own cache directory,
+  which can be inside the repository. The first `zig build test` is still slow
+  on a cold cache (~3m20s when that was measured); later runs are fast. That is
+  not a problem to fix.
 - A struct with automatic layout cannot cross the C ABI, so a throwaway that
   wants to export an `Interval` has to take and return `f64`s instead, and an
   array is not an allowed return type either — use an out-pointer. This bites
@@ -1038,13 +1309,21 @@ zig build test        # exits 0, ends with "readme examples ok: 31 checks"
 zig build bench-lp    # safe: the row budget bounds it. The run reports 18.5 s,
                       # on top of compile time. The scalar and vector halves
                       # dominate the combined `zig build bench`, not this one.
+zig-gate                 # the required acceptance gate, and the command
+                         # .vf/gates.yml runs. Budget tens of minutes: its last
+                         # section BUILDS AND RUNS the suite for four foreign
+                         # targets. `--no-cross` skips that one. See the gate
+                         # section in section 2 for what it enforces.
 jj status
 jj log -r main --no-graph -T 'commit_id.short() ++ "  " ++ description.first_line() ++ "\n"'
 ```
 
-The working copy is not expected to be dirty. What the table at the top of
-section 2 records is committed and pushed; a working-copy commit sitting above
-`083d7471` is work in flight, and `jj diff --stat` says what is in it.
+The working copy is not expected to be dirty, and what the table at the top of
+section 2 records is committed and pushed — but read that from the version
+control rather than from this file, which goes stale at the next commit and is
+in it. `jj status` names the working-copy commit and anything uncommitted in
+front of it, `jj log -r main` and `jj log -r main@origin` say whether the
+bookmark and its remote agree, and `jj diff --stat` says what is in that commit.
 
 ## 7. Orientation for a first look
 
@@ -1069,8 +1348,9 @@ revision of this document had already drifted by the time it was superseded.
 
 - Do not optimise before the baseline exists. It does now: see step 2.
 - Do not reintroduce a row budget below 20,000 rows, or raise any benchmark
-  size past what the budget allows without re-checking `predictedRows`. The
-  budget is what stops this benchmark from taking 329 GB of a shared host again.
+  size past what the budget allows without re-measuring the sweep that
+  `requireRowBudget` guards in `bench/bench_lp.zig`. The budget is what stops
+  this benchmark from taking 329 GB of a shared host again.
 - Do not wrap `zig build` in `ulimit -v`. The compiler inherits the limit and
   dies with OutOfMemory before any benchmark row runs.
 - Do not touch the soundness oracle to make an optimisation pass.
@@ -1082,8 +1362,9 @@ revision of this document had already drifted by the time it was superseded.
   will fail the build and the reason is not obvious from the error.
 - Do not remove the consumer step's private cache directories — not because
   removing them deadlocks anything, which it does not, but because they keep
-  163 MB of nested build output inside `fixture/.zig-cache` instead of in the
-  machine-wide cache every other project on this host shares.
+  the nested build's output out of the machine-wide global cache every other
+  project on this host shares, and on this host out of the repository as well,
+  which is where the relative form of those paths used to put 163 MB of it.
 - Do not trust a number you did not re-run yourself. Benchmark agents reported
   results that were never independently confirmed.
 

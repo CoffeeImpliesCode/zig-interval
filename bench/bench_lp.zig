@@ -143,11 +143,6 @@ const System = interval.lp.System;
 /// different statement and the solver treats it as one.
 const zero = Interval.init(0.0, 0.0);
 
-/// The allocator the benchmark bodies use. A body is a plain function of
-/// `(ctx, i)` with nowhere to put an allocator, so the runner's is published
-/// here for the duration of `run`. The file is single threaded.
-var gpa: std.mem.Allocator = undefined;
-
 /// The machine-safety limit on a single elimination, in rows.
 ///
 /// This bounds what a mistake in this file can cost, and nothing else. It is
@@ -216,7 +211,7 @@ fn mixedRhs(seed: u32, r: usize) Interval {
 }
 
 /// `rows` rows over `var_count` variables with the mixed distribution above.
-fn buildMixed(seed: u32, var_count: usize, rows: usize) !System {
+fn buildMixed(gpa: std.mem.Allocator, seed: u32, var_count: usize, rows: usize) !System {
     var sys = try System.init(gpa, var_count);
     errdefer sys.deinit();
     const scratch = try gpa.alloc(Interval, var_count);
@@ -244,7 +239,7 @@ fn straddling(seed: u32, r: usize, j: usize) Interval {
     };
 }
 
-fn buildStraddling(seed: u32, var_count: usize, rows: usize) !System {
+fn buildStraddling(gpa: std.mem.Allocator, seed: u32, var_count: usize, rows: usize) !System {
     var sys = try System.init(gpa, var_count);
     errdefer sys.deinit();
     const scratch = try gpa.alloc(Interval, var_count);
@@ -271,7 +266,7 @@ fn buildStraddling(seed: u32, var_count: usize, rows: usize) !System {
 /// symmetric pattern makes every derived coefficient cancel to a structural
 /// zero, which silently caps the row count and hides the very blowup this
 /// benchmark exists to show.
-fn buildHeuristic(var_count: usize, pairs: usize) !System {
+fn buildHeuristic(gpa: std.mem.Allocator, var_count: usize, pairs: usize) !System {
     var sys = try System.init(gpa, var_count);
     errdefer sys.deinit();
     const cheap = var_count - 1;
@@ -302,21 +297,23 @@ fn buildHeuristic(var_count: usize, pairs: usize) !System {
 /// through the gate individually. The ascending order is the dangerous one -
 /// it takes the most expensive variable while all of its rows are still in
 /// play - which is exactly why it is checked per round and not once up front.
-fn eliminateNaive(comptime what: []const u8, sys: *System) !void {
+fn eliminateNaive(comptime what: []const u8, io: std.Io, sys: *System) !void {
     for (0..sys.varCount()) |k| {
         if (!sys.alive[k]) continue;
-        requireRowBudget(what, sys.*, k);
+        requireRowBudget(what, io, sys.*, k);
         try sys.eliminate(k);
     }
 }
 
 /// The one place a benchmark body can fail. The systems here are small and
-/// well formed, so an error means the benchmark itself is wrong; panicking
-/// beats dropping the measurement and reporting a number for work that never
-/// ran.
-fn trap(comptime what: []const u8, err: anyerror) noreturn {
-    std.debug.print("bench_lp: {s} failed: {s}\n", .{ what, @errorName(err) });
-    std.process.exit(1);
+/// well formed, so an error means the benchmark itself is wrong; naming it
+/// and leaving through a non-zero exit beats dropping the measurement and
+/// reporting a number for work that never ran.
+///
+/// The wording and the exit status are `timing.fail`'s, so a benchmark in
+/// this project fails one way: a plain line on stderr, then out.
+fn trap(comptime what: []const u8, io: std.Io, err: anyerror) noreturn {
+    timing.fail("bench_lp: " ++ what, io, err);
 }
 
 /// The single gate every elimination in this file passes through.
@@ -349,14 +346,31 @@ fn trap(comptime what: []const u8, err: anyerror) noreturn {
 /// most expensive live variable rather than the one the sweep will pick -
 /// the most informative of the candidates, and never a name this file
 /// invented from a rule of its own.
-fn requireRowBudget(comptime what: []const u8, sys: System, k: usize) void {
-    const predicted = sys.rowsAfterEliminating(k) catch |e| trap(what, e);
+fn requireRowBudget(comptime what: []const u8, io: std.Io, sys: System, k: usize) void {
+    const predicted = sys.rowsAfterEliminating(k) catch |e| trap(what, io, e);
     if (predicted <= row_budget) return;
-    std.debug.print(
-        "bench_lp: {s}: eliminating x_{d} of a {d}-variable, {d}-row system predicts {d} rows, over the {d}-row budget\n",
+    tripReport(what, io, sys, k, predicted);
+}
+
+/// The line a trip prints, and the end of the run.
+///
+/// It is a function of its own so that the gate above, which runs inside the
+/// timed region of every measured elimination, carries no report buffer on
+/// its stack for a line it will almost certainly never print.
+fn tripReport(
+    comptime what: []const u8,
+    io: std.Io,
+    sys: System,
+    k: usize,
+    predicted: usize,
+) noreturn {
+    var out = timing.Out.init(io);
+    out.print(
+        "bench_lp: {s}: eliminating x_{d} of a {d}-variable, {d}-row system " ++
+            "predicts {d} rows, over the {d}-row budget\n",
         .{ what, k, sys.varCount(), sys.rowCount(), predicted, row_budget },
-    );
-    trap(what, error.RowBudgetExceeded);
+    ) catch |e| trap(what, io, e);
+    trap(what, io, error.RowBudgetExceeded);
 }
 
 /// The live variable whose elimination would cost the MOST rows, or null
@@ -445,9 +459,9 @@ fn costliest(sys: System) !?usize {
 /// over thousands of seeds rather than by asking what this function says.
 /// The one sweep this file drives itself, `eliminateNaive`, is guarded on
 /// every round and does not have this gap.
-fn requireGreedyFirst(comptime what: []const u8, sys: System) void {
-    const worst = costliest(sys) catch |e| trap(what, e) orelse return;
-    requireRowBudget(what, sys, worst);
+fn requireGreedyFirst(comptime what: []const u8, io: std.Io, sys: System) void {
+    const worst = costliest(sys) catch |e| trap(what, io, e) orelse return;
+    requireRowBudget(what, io, sys, worst);
 }
 
 /// The first variable `System.bounds(k)` eliminates: the lowest live index
@@ -478,20 +492,20 @@ fn firstSweptVar(sys: System, k: usize) ?usize {
 /// `firstSweptVar` and the count checked below IS that round. Measuring
 /// the worst live variable instead would be pure conservatism here, buying
 /// no soundness against a cost model that does not exist.
-fn requireProjectionFirst(comptime what: []const u8, sys: System, k: usize) void {
-    requireRowBudget(what, sys, firstSweptVar(sys, k) orelse k);
+fn requireProjectionFirst(comptime what: []const u8, io: std.Io, sys: System, k: usize) void {
+    requireRowBudget(what, io, sys, firstSweptVar(sys, k) orelse k);
 }
 
 // -- benchmark bodies ----------------------------------------------------
 
 fn add8x4(ctx: *timing.Ctx, i: usize) void {
-    var sys = buildMixed(@intCast(i), 4, 8) catch |e| trap("add 8x4", e);
+    var sys = buildMixed(ctx.gpa, @intCast(i), 4, 8) catch |e| trap("add 8x4", ctx.io, e);
     defer sys.deinit();
     ctx.keep(@floatFromInt(sys.rowCount()));
 }
 
 fn add64x8(ctx: *timing.Ctx, i: usize) void {
-    var sys = buildMixed(@intCast(i), 8, 64) catch |e| trap("add 64x8", e);
+    var sys = buildMixed(ctx.gpa, @intCast(i), 8, 64) catch |e| trap("add 64x8", ctx.io, e);
     defer sys.deinit();
     ctx.keep(@floatFromInt(sys.rowCount()));
 }
@@ -500,7 +514,7 @@ fn add64x8(ctx: *timing.Ctx, i: usize) void {
 /// not eliminated. Measured separately so the elimination row can be read as
 /// a difference rather than as a sum.
 fn build6x4(ctx: *timing.Ctx, i: usize) void {
-    var sys = buildMixed(@intCast(i), 4, 6) catch |e| trap("build 6x4", e);
+    var sys = buildMixed(ctx.gpa, @intCast(i), 4, 6) catch |e| trap("build 6x4", ctx.io, e);
     defer sys.deinit();
     ctx.keep(@floatFromInt(sys.rowCount()));
 }
@@ -511,11 +525,12 @@ fn build6x4(ctx: *timing.Ctx, i: usize) void {
 /// 36 rows across 4,096 seeds, far under the budget, and the size is
 /// unchanged from before the guard existed.
 fn eliminateOne(ctx: *timing.Ctx, i: usize) void {
-    var sys = buildMixed(@intCast(i), 4, 6) catch |e| trap("eliminate k=0, 6x4", e);
+    const what = "eliminate k=0, 6x4";
+    var sys = buildMixed(ctx.gpa, @intCast(i), 4, 6) catch |e| trap(what, ctx.io, e);
     defer sys.deinit();
-    requireRowBudget("eliminate k=0, 6x4", sys, 0);
+    requireRowBudget(what, ctx.io, sys, 0);
     const before = sys.rowCount();
-    sys.eliminate(0) catch |e| trap("eliminate k=0, 6x4", e);
+    sys.eliminate(0) catch |e| trap(what, ctx.io, e);
     ctx.keep(@floatFromInt(before + sys.rowCount()));
 }
 
@@ -528,11 +543,13 @@ fn eliminateOne(ctx: *timing.Ctx, i: usize) void {
 /// rows is not usable: at that shape the sweep crosses the budget on 28
 /// seeds in 64.
 fn orderOnly(ctx: *timing.Ctx, i: usize) void {
-    var sys = buildMixed(@intCast(i), mixed_sweep.vars, mixed_sweep.rows) catch |e| trap("eliminationOrder", e);
+    const what = "eliminationOrder";
+    var sys = buildMixed(ctx.gpa, @intCast(i), mixed_sweep.vars, mixed_sweep.rows) catch |e|
+        trap(what, ctx.io, e);
     defer sys.deinit();
-    requireGreedyFirst("eliminationOrder", sys);
-    const order = sys.eliminationOrder() catch |e| trap("eliminationOrder", e);
-    defer gpa.free(order);
+    requireGreedyFirst(what, ctx.io, sys);
+    const order = sys.eliminationOrder() catch |e| trap(what, ctx.io, e);
+    defer ctx.gpa.free(order);
     ctx.keep(@as(f64, @floatFromInt(order.len)) + @as(f64, @floatFromInt(order[0])));
 }
 
@@ -540,10 +557,12 @@ fn orderOnly(ctx: *timing.Ctx, i: usize) void {
 /// reported. Guarded and sized exactly as `orderOnly` is, because it runs the
 /// same sweep on the same system.
 fn inOrderOfChoice(ctx: *timing.Ctx, i: usize) void {
-    var sys = buildMixed(@intCast(i), mixed_sweep.vars, mixed_sweep.rows) catch |e| trap("eliminateInOrderOfChoice", e);
+    const what = "eliminateInOrderOfChoice";
+    var sys = buildMixed(ctx.gpa, @intCast(i), mixed_sweep.vars, mixed_sweep.rows) catch |e|
+        trap(what, ctx.io, e);
     defer sys.deinit();
-    requireGreedyFirst("eliminateInOrderOfChoice", sys);
-    const sat = sys.eliminateInOrderOfChoice() catch |e| trap("eliminateInOrderOfChoice", e);
+    requireGreedyFirst(what, ctx.io, sys);
+    const sat = sys.eliminateInOrderOfChoice() catch |e| trap(what, ctx.io, e);
     ctx.keep(@as(f64, @floatFromInt(sys.rowCount())) + @as(f64, if (sat) 1.0 else 0.0));
 }
 
@@ -556,10 +575,12 @@ fn inOrderOfChoice(ctx: *timing.Ctx, i: usize) void {
 /// on `k=1` over 4,096 seeds. The old 4 vars x 6 rows reached 223,269 rows
 /// and crossed the budget on 55 seeds in 64 with a 196,927,221 prediction.
 fn boundsOne(ctx: *timing.Ctx, i: usize) void {
-    var sys = buildMixed(@intCast(i), mixed_sweep.vars, mixed_sweep.rows) catch |e| trap("bounds k=0", e);
+    const what = "bounds k=0";
+    var sys = buildMixed(ctx.gpa, @intCast(i), mixed_sweep.vars, mixed_sweep.rows) catch |e|
+        trap(what, ctx.io, e);
     defer sys.deinit();
-    requireProjectionFirst("bounds k=0", sys, 0);
-    const b = sys.bounds(0) catch |e| trap("bounds k=0", e);
+    requireProjectionFirst(what, ctx.io, sys, 0);
+    const b = sys.bounds(0) catch |e| trap(what, ctx.io, e);
     ctx.keep(if (b) |v| v.lo + v.hi else -1.0);
 }
 
@@ -570,14 +591,16 @@ fn boundsOne(ctx: *timing.Ctx, i: usize) void {
 /// the one `boundsOne` uses, and the peak it reaches is the same 17,034 rows
 /// because `k=0` is the more expensive of the two.
 fn boxAll(ctx: *timing.Ctx, i: usize) void {
-    var sys = buildMixed(@intCast(i), mixed_sweep.vars, mixed_sweep.rows) catch |e| trap("box, mixed", e);
+    const what = "box, mixed";
+    var sys = buildMixed(ctx.gpa, @intCast(i), mixed_sweep.vars, mixed_sweep.rows) catch |e|
+        trap(what, ctx.io, e);
     defer sys.deinit();
-    requireProjectionFirst("box, mixed", sys, 0);
-    const b = (sys.box() catch |e| trap("box, mixed", e)) orelse {
+    requireProjectionFirst(what, ctx.io, sys, 0);
+    const b = (sys.box() catch |e| trap(what, ctx.io, e)) orelse {
         ctx.keep(-1.0);
         return;
     };
-    defer gpa.free(b);
+    defer ctx.gpa.free(b);
     var acc: f64 = 0;
     for (b) |v| acc += v.lo + v.hi;
     ctx.keep(acc);
@@ -595,10 +618,12 @@ fn boxAll(ctx: *timing.Ctx, i: usize) void {
 /// exercised in full. The elimination is inside `System`, so only the first
 /// round is predicted and the size carries the rest of the guarantee.
 fn boundsStraddle(ctx: *timing.Ctx, i: usize) void {
-    var sys = buildStraddling(@intCast(i), straddle_sweep.vars, straddle_sweep.rows) catch |e| trap("bounds k=1, straddling", e);
+    const what = "bounds k=1, straddling";
+    var sys = buildStraddling(ctx.gpa, @intCast(i), straddle_sweep.vars, straddle_sweep.rows) catch |e|
+        trap(what, ctx.io, e);
     defer sys.deinit();
-    requireProjectionFirst("bounds k=1, straddling", sys, 1);
-    const b = sys.bounds(1) catch |e| trap("bounds k=1, straddling", e);
+    requireProjectionFirst(what, ctx.io, sys, 1);
+    const b = sys.bounds(1) catch |e| trap(what, ctx.io, e);
     ctx.keep(if (b) |v| v.lo + v.hi else -1.0);
 }
 
@@ -606,14 +631,16 @@ fn boundsStraddle(ctx: *timing.Ctx, i: usize) void {
 /// reasoning as `boundsStraddle`; `System.box` projects each variable in
 /// turn and both projections peak at the same 14,641 rows here.
 fn boxStraddle(ctx: *timing.Ctx, i: usize) void {
-    var sys = buildStraddling(@intCast(i), straddle_sweep.vars, straddle_sweep.rows) catch |e| trap("box, straddling", e);
+    const what = "box, straddling";
+    var sys = buildStraddling(ctx.gpa, @intCast(i), straddle_sweep.vars, straddle_sweep.rows) catch |e|
+        trap(what, ctx.io, e);
     defer sys.deinit();
-    requireProjectionFirst("box, straddling", sys, 0);
-    const b = (sys.box() catch |e| trap("box, straddling", e)) orelse {
+    requireProjectionFirst(what, ctx.io, sys, 0);
+    const b = (sys.box() catch |e| trap(what, ctx.io, e)) orelse {
         ctx.keep(-1.0);
         return;
     };
-    defer gpa.free(b);
+    defer ctx.gpa.free(b);
     var acc: f64 = 0;
     for (b) |v| acc += v.lo + v.hi;
     ctx.keep(acc);
@@ -626,11 +653,13 @@ fn boxStraddle(ctx: *timing.Ctx, i: usize) void {
 /// row for its first round and peaks at 4 rows over the whole sweep.
 fn eliminateAllHeuristic(ctx: *timing.Ctx, i: usize) void {
     _ = i;
-    var sys = buildHeuristic(heuristic.vars, heuristic.pairs) catch |e| trap("eliminateAll chosen, heuristic", e);
+    const what = "eliminateAll chosen, heuristic";
+    var sys = buildHeuristic(ctx.gpa, heuristic.vars, heuristic.pairs) catch |e|
+        trap(what, ctx.io, e);
     defer sys.deinit();
-    requireGreedyFirst("eliminateAll chosen, heuristic", sys);
+    requireGreedyFirst(what, ctx.io, sys);
     const before = sys.rowCount();
-    const sat = sys.eliminateInOrderOfChoice() catch |e| trap("eliminateAll chosen, heuristic", e);
+    const sat = sys.eliminateInOrderOfChoice() catch |e| trap(what, ctx.io, e);
     ctx.keep(@as(f64, @floatFromInt(before + sys.rowCount())) + @as(f64, if (sat) 1.0 else 0.0));
 }
 
@@ -643,10 +672,12 @@ fn eliminateAllHeuristic(ctx: *timing.Ctx, i: usize) void {
 /// would cross the budget and not merely on the first one.
 fn eliminateAllNaive(ctx: *timing.Ctx, i: usize) void {
     _ = i;
-    var sys = buildHeuristic(heuristic.vars, heuristic.pairs) catch |e| trap("eliminateAll ascending, heuristic", e);
+    const what = "eliminateAll ascending, heuristic";
+    var sys = buildHeuristic(ctx.gpa, heuristic.vars, heuristic.pairs) catch |e|
+        trap(what, ctx.io, e);
     defer sys.deinit();
     const before = sys.rowCount();
-    eliminateNaive("eliminateAll ascending, heuristic", &sys) catch |e| trap("eliminateAll ascending, heuristic", e);
+    eliminateNaive(what, ctx.io, &sys) catch |e| trap(what, ctx.io, e);
     ctx.keep(@floatFromInt(before + sys.rowCount()));
 }
 
@@ -658,11 +689,13 @@ fn eliminateAllNaive(ctx: *timing.Ctx, i: usize) void {
 /// greedy sweep peaks at 7,994 rows; it runs inside `System`, so
 /// the guard covers the first elimination and the size covers the rest.
 fn eliminateAllMixed(ctx: *timing.Ctx, i: usize) void {
-    var sys = buildMixed(@intCast(i), mixed_sweep.vars, mixed_sweep.rows) catch |e| trap("eliminateAll chosen, mixed", e);
+    const what = "eliminateAll chosen, mixed";
+    var sys = buildMixed(ctx.gpa, @intCast(i), mixed_sweep.vars, mixed_sweep.rows) catch |e|
+        trap(what, ctx.io, e);
     defer sys.deinit();
-    requireGreedyFirst("eliminateAll chosen, mixed", sys);
+    requireGreedyFirst(what, ctx.io, sys);
     const before = sys.rowCount();
-    const sat = sys.eliminateInOrderOfChoice() catch |e| trap("eliminateAll chosen, mixed", e);
+    const sat = sys.eliminateInOrderOfChoice() catch |e| trap(what, ctx.io, e);
     ctx.keep(@as(f64, @floatFromInt(before + sys.rowCount())) + @as(f64, if (sat) 1.0 else 0.0));
 }
 
@@ -698,21 +731,22 @@ const straddle_sweep = .{ .vars = 2, .rows = 11 };
 /// smaller figure; without the prediction, the only symptom would be a run
 /// that takes longer to blow up.
 fn printOrder(
+    out: *timing.Out,
     label: []const u8,
     order: []const usize,
     before: usize,
     predicted: usize,
     achieved: usize,
     after: usize,
-) void {
-    std.debug.print(
+) !void {
+    try out.print(
         "    {s: <22} {d:>7} -> {d:>8} rows   round 1 predicted {d:>6}, achieved {d:>6}   order:",
         .{ label, before, after, predicted, achieved },
     );
     for (order, 0..) |k, n| {
-        std.debug.print(" {s}{d}", .{ if (n == 0) "" else " ", k });
+        try out.print(" {s}{d}", .{ if (n == 0) "" else " ", k });
     }
-    std.debug.print("\n", .{});
+    try out.print("\n", .{});
 }
 
 /// Row counts, which no timing figure can be read without. Two systems
@@ -731,11 +765,12 @@ fn printOrder(
 /// reason every benchmark body does: `reportGeometry` runs before any
 /// measurement, so a size mistake here would take the process down before
 /// the table exists.
-fn reportGeometry() !void {
+fn reportGeometry(gpa: std.mem.Allocator, io: std.Io) !void {
+    var out = timing.Out.init(io);
     {
-        var sys = try buildMixed(1, 4, 6);
+        var sys = try buildMixed(gpa, 1, 4, 6);
         defer sys.deinit();
-        requireRowBudget("mixed 6x4, eliminate k=0", sys, 0);
+        requireRowBudget("mixed 6x4, eliminate k=0", io, sys, 0);
         const before = sys.rowCount();
         // The partition borrows the rows and `eliminate` invalidates them, so
         // only the count is read back; the three lists are its own.
@@ -743,86 +778,122 @@ fn reportGeometry() !void {
         defer parts.deinit();
         const predicted = parts.rowsProduced();
         try sys.eliminate(0);
-        printOrder("mixed 6x4, eliminate k=0", &.{0}, before, predicted, sys.rowCount(), sys.rowCount());
+        try printOrder(
+            &out,
+            "mixed 6x4, eliminate k=0",
+            &.{0},
+            before,
+            predicted,
+            sys.rowCount(),
+            sys.rowCount(),
+        );
     }
     {
         const before = 2 * heuristic.pairs;
         const n = heuristic.vars;
 
-        var probe = try buildHeuristic(n, heuristic.pairs);
+        var probe = try buildHeuristic(gpa, n, heuristic.pairs);
         defer probe.deinit();
-        requireGreedyFirst("heuristic, chosen order", probe);
+        requireGreedyFirst("heuristic, chosen order", io, probe);
         const order = try probe.eliminationOrder();
         defer gpa.free(order);
         const first = order[0];
 
-        var round1 = try buildHeuristic(n, heuristic.pairs);
+        var round1 = try buildHeuristic(gpa, n, heuristic.pairs);
         defer round1.deinit();
-        requireRowBudget("heuristic, chosen order", round1, first);
+        requireRowBudget("heuristic, chosen order", io, round1, first);
         const chosen_parts = try round1.partition(first);
         defer chosen_parts.deinit();
         const chosen_predicted = chosen_parts.rowsProduced();
         try round1.eliminate(first);
 
-        var chosen = try buildHeuristic(n, heuristic.pairs);
+        var chosen = try buildHeuristic(gpa, n, heuristic.pairs);
         defer chosen.deinit();
-        requireGreedyFirst("heuristic, chosen order", chosen);
+        requireGreedyFirst("heuristic, chosen order", io, chosen);
         const sat = try chosen.eliminateInOrderOfChoice();
-        printOrder("heuristic, chosen order", order, before, chosen_predicted, round1.rowCount(), chosen.rowCount());
+        try printOrder(
+            &out,
+            "heuristic, chosen order",
+            order,
+            before,
+            chosen_predicted,
+            round1.rowCount(),
+            chosen.rowCount(),
+        );
 
         var ascending: [16]usize = undefined;
         for (0..n) |k| ascending[k] = k;
-        var ascending_round1 = try buildHeuristic(n, heuristic.pairs);
+        var ascending_round1 = try buildHeuristic(gpa, n, heuristic.pairs);
         defer ascending_round1.deinit();
-        requireRowBudget("heuristic, ascending order", ascending_round1, 0);
+        requireRowBudget("heuristic, ascending order", io, ascending_round1, 0);
         const ascending_parts = try ascending_round1.partition(0);
         defer ascending_parts.deinit();
         const ascending_predicted = ascending_parts.rowsProduced();
         try ascending_round1.eliminate(0);
 
-        var naive = try buildHeuristic(n, heuristic.pairs);
+        var naive = try buildHeuristic(gpa, n, heuristic.pairs);
         defer naive.deinit();
-        try eliminateNaive("heuristic, ascending order", &naive);
-        printOrder("heuristic, ascending order", ascending[0..n], before, ascending_predicted, ascending_round1.rowCount(), naive.rowCount());
-        std.debug.print("    (reported solvable: {s})\n", .{if (sat) "yes" else "no"});
+        try eliminateNaive("heuristic, ascending order", io, &naive);
+        try printOrder(
+            &out,
+            "heuristic, ascending order",
+            ascending[0..n],
+            before,
+            ascending_predicted,
+            ascending_round1.rowCount(),
+            naive.rowCount(),
+        );
+        try out.print("    (reported solvable: {s})\n", .{if (sat) "yes" else "no"});
     }
     {
         const before = mixed_sweep.rows;
 
-        var probe = try buildMixed(1, mixed_sweep.vars, mixed_sweep.rows);
+        var probe = try buildMixed(gpa, 1, mixed_sweep.vars, mixed_sweep.rows);
         defer probe.deinit();
-        requireGreedyFirst("mixed, chosen order", probe);
+        requireGreedyFirst("mixed, chosen order", io, probe);
         const order = try probe.eliminationOrder();
         defer gpa.free(order);
         const first = order[0];
 
-        var round1 = try buildMixed(1, mixed_sweep.vars, mixed_sweep.rows);
+        var round1 = try buildMixed(gpa, 1, mixed_sweep.vars, mixed_sweep.rows);
         defer round1.deinit();
-        requireRowBudget("mixed, chosen order", round1, first);
+        requireRowBudget("mixed, chosen order", io, round1, first);
         const parts = try round1.partition(first);
         defer parts.deinit();
         const predicted = parts.rowsProduced();
         try round1.eliminate(first);
 
-        var chosen = try buildMixed(1, mixed_sweep.vars, mixed_sweep.rows);
+        var chosen = try buildMixed(gpa, 1, mixed_sweep.vars, mixed_sweep.rows);
         defer chosen.deinit();
-        requireGreedyFirst("mixed, chosen order", chosen);
+        requireGreedyFirst("mixed, chosen order", io, chosen);
         const sat = try chosen.eliminateInOrderOfChoice();
-        printOrder("mixed 14x2, chosen order", order, before, predicted, round1.rowCount(), chosen.rowCount());
-        std.debug.print("    (reported solvable: {s})\n", .{if (sat) "yes" else "no"});
+        try printOrder(
+            &out,
+            "mixed 14x2, chosen order",
+            order,
+            before,
+            predicted,
+            round1.rowCount(),
+            chosen.rowCount(),
+        );
+        try out.print("    (reported solvable: {s})\n", .{if (sat) "yes" else "no"});
     }
     {
-        var sys = try buildStraddling(1, straddle_sweep.vars, straddle_sweep.rows);
+        var sys = try buildStraddling(gpa, 1, straddle_sweep.vars, straddle_sweep.rows);
         defer sys.deinit();
-        requireProjectionFirst("straddling 11x2, bounds(1)", sys, 1);
-        const first = firstSweptVar(sys, 1).?;
+        requireProjectionFirst("straddling 11x2, bounds(1)", io, sys, 1);
+        // A system with no live variable besides `k` eliminates nothing, so
+        // there is no first round to predict and none to report. The
+        // straddling generator always builds two live variables, so a null
+        // here is a change of shape and not a run that may carry on.
+        const first = firstSweptVar(sys, 1) orelse return error.NoVariableToSweep;
         const parts = try sys.partition(first);
         defer parts.deinit();
         const predicted = parts.rowsProduced();
 
-        var round1 = try buildStraddling(1, straddle_sweep.vars, straddle_sweep.rows);
+        var round1 = try buildStraddling(gpa, 1, straddle_sweep.vars, straddle_sweep.rows);
         defer round1.deinit();
-        requireRowBudget("straddling 11x2, bounds(1)", round1, first);
+        requireRowBudget("straddling 11x2, bounds(1)", io, round1, first);
         try round1.eliminate(first);
 
         const b = try sys.bounds(1);
@@ -833,39 +904,39 @@ fn reportGeometry() !void {
         // what the projection actually came back with. A null here would mean
         // the straddle arms read as unbounded, which is the regression this
         // sweep exists to catch.
-        std.debug.print(
+        try out.print(
             "    straddling 11x2: {d} rows, first round of bounds(1) predicted {d}, achieved {d}; bounds(1) = ",
             .{ sys.rowCount(), predicted, round1.rowCount() },
         );
         if (b) |v| {
-            std.debug.print("[{d:.4}, {d:.4}]", .{ v.lo, v.hi });
+            try out.print("[{d:.4}, {d:.4}]", .{ v.lo, v.hi });
         } else {
-            std.debug.print("unbounded", .{});
+            try out.print("unbounded", .{});
         }
-        std.debug.print(", box = {s}\n", .{
+        try out.print(", box = {s}\n", .{
             if (boxed) |_| "all variables bounded" else "unbounded",
         });
     }
 }
 
 /// Measures everything and appends to a shared report. The runner owns the
-/// report and prints it, so several benchmark files can feed one table.
+/// report and prints it, so several benchmark files can feed one table, and
+/// its allocator is the heap every body below builds from.
 ///
 /// The wall time is printed here because the practical question about this
 /// file is not whether a row is fast but whether the whole run finishes: a
 /// benchmark that takes an hour is a benchmark nobody runs a second time.
-pub fn run(allocator: std.mem.Allocator, runner: *timing.Runner) !void {
-    gpa = allocator;
+pub fn run(runner: *timing.Runner) !void {
     const started = std.Io.Clock.real.now(runner.io);
-    try reportGeometry();
+    try reportGeometry(runner.gpa, runner.io);
 
-    try timing.measure(runner, "add 8 rows x 4 vars", 20_000, add8x4);
-    try timing.measure(runner, "add 64 rows x 8 vars", 2_000, add64x8);
+    try timing.measure("add 8 rows x 4 vars", add8x4, runner, 20_000);
+    try timing.measure("add 64 rows x 8 vars", add64x8, runner, 2_000);
 
     // Build time is reported on its own so the elimination row below can be
     // read as a difference.
-    try timing.measure(runner, "build 6 rows x 4 vars (control)", 20_000, build6x4);
-    try timing.measure(runner, "eliminate k=0, 6 rows x 4 vars", 20_000, eliminateOne);
+    try timing.measure("build 6 rows x 4 vars (control)", build6x4, runner, 20_000);
+    try timing.measure("eliminate k=0, 6 rows x 4 vars", eliminateOne, runner, 20_000);
 
     // Iteration counts. The four slow rows used to run 5,000 to 10,000 times
     // each, because each one paid a final round of 223,269 rows on top of
@@ -879,20 +950,21 @@ pub fn run(allocator: std.mem.Allocator, runner: *timing.Runner) !void {
     // `eliminateAll ascending` moves the other way, 20 to 100: the heuristic
     // system is half the size it was, the ascending sweep costs ~500 us rather
     // than a millisecond, and 20 calls was too few for a stable minimum.
-    try timing.measure(runner, "eliminationOrder, mixed 14x2", 500, orderOnly);
-    try timing.measure(runner, "eliminateInOrderOfChoice, mixed 14x2", 500, inOrderOfChoice);
+    try timing.measure("eliminationOrder, mixed 14x2", orderOnly, runner, 500);
+    try timing.measure("eliminateInOrderOfChoice, mixed 14x2", inOrderOfChoice, runner, 500);
 
-    try timing.measure(runner, "bounds k=0, mixed 14x2", 500, boundsOne);
-    try timing.measure(runner, "box, mixed 14x2", 200, boxAll);
-    try timing.measure(runner, "bounds k=1, straddling 11x2", 100, boundsStraddle);
-    try timing.measure(runner, "box, straddling 11x2", 50, boxStraddle);
+    try timing.measure("bounds k=0, mixed 14x2", boundsOne, runner, 500);
+    try timing.measure("box, mixed 14x2", boxAll, runner, 200);
+    try timing.measure("bounds k=1, straddling 11x2", boundsStraddle, runner, 100);
+    try timing.measure("box, straddling 11x2", boxStraddle, runner, 50);
 
-    try timing.measure(runner, "eliminateAll chosen, mixed 14x2", 200, eliminateAllMixed);
-    try timing.measure(runner, "eliminateAll chosen, heuristic 4v", 2_000, eliminateAllHeuristic);
-    try timing.measure(runner, "eliminateAll ascending, heuristic 4v", 100, eliminateAllNaive);
+    try timing.measure("eliminateAll chosen, mixed 14x2", eliminateAllMixed, runner, 200);
+    try timing.measure("eliminateAll chosen, heuristic 4v", eliminateAllHeuristic, runner, 2_000);
+    try timing.measure("eliminateAll ascending, heuristic 4v", eliminateAllNaive, runner, 100);
 
     const elapsed: i96 = std.Io.Clock.real.now(runner.io).nanoseconds - started.nanoseconds;
-    std.debug.print("\nbench_lp: {d:.3} s total, row budget {d} rows\n", .{
+    var out = timing.Out.init(runner.io);
+    try out.print("\nbench_lp: {d:.3} s total, row budget {d} rows\n", .{
         @as(f64, @floatFromInt(elapsed)) / 1e9,
         row_budget,
     });
@@ -905,6 +977,6 @@ pub fn main() !void {
     defer _ = dbg.deinit();
     var runner = try timing.Runner.init(dbg.allocator());
     defer runner.deinit();
-    try run(dbg.allocator(), &runner);
-    runner.report.print();
+    try run(&runner);
+    try runner.report.print();
 }

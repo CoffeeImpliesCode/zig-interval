@@ -97,16 +97,26 @@ cache directories (`build.zig:159-168`) had been justified by a claimed
 `lock_nonblocking = want_shared_lock`, which defaults to true, so a parent and
 a nested build can share one global cache. Dropping both flags was measured: the
 step finishes in the same ~43 s and prints the same `consumer ok: 29 checks`.
-The flags are **kept**, with the true reason in their place: both paths are
-relative to the working directory set at `build.zig:169`, so the cache output
-lands in `fixture/.zig-cache` — 163 MB at the time the comment was written —
-and goes away with the fixture, instead of joining the machine-wide cache this
-build shares with every other project. One consequence worth knowing: `fixture`
-is one of the six entries in `build.zig.zon`'s `.paths`, and that entry is
-recursive, so `zig fetch` or a package hash walks that cache too. `.gitignore`
-excludes it from version control; clean it before hashing a package. A false
-comment replaced by a true one is the whole of the fix; the behaviour did not
-change.
+The flags are **kept**, with the true reason in their place: at that time both
+paths were relative to the working directory set on the child, so the cache
+output landed in `fixture/.zig-cache` — 163 MB when the comment was written —
+and went away with the fixture, instead of joining the machine-wide cache this
+build shares with every other project. One consequence worth knowing, and the
+reason the wiring no longer reads that way: `fixture` is one of the six entries
+in `build.zig.zon`'s `.paths`, and that entry is recursive, so `zig fetch` or a
+package hash walked that cache too. `.gitignore` excluded it from version
+control, and it had to be cleaned before hashing a package. **Superseded since
+by `build.zig`'s `consumerCacheRoot`, which names both cache directories
+absolutely** — a per-user directory on a local volume where a host has one, the
+parent build's own local cache root where it does not, with the two directory
+names appended under it — so a gigabyte of generated compiler output no longer
+lands inside the fixture at all, which is what that `.paths` recursion was
+costing. **The install output is a separate question and did not move:** the
+child gets no `--prefix`, so its binaries still land in `fixture/zig-out` — the
+recursive `fixture` entry in `.paths` covers that directory too, and
+`.gitignore` excludes it. Replacing a false comment with a true one was the whole
+of that fix; what moved afterwards was where the cache lands, not what the step
+does.
 
 **P0 test gap, closed: `roundUp` and `roundDown` had zero direct tests.** These
 are the pair every computed bound in the library passes through —
@@ -1113,28 +1123,37 @@ three parts of the acceptance below are met, and the last is stronger than it
 was written to be.
 
 - **The gate delegates rather than shares.** `requireRowBudget` in
-  `bench/bench_lp.zig:352` holds no copy of the rule at all: it calls
-  `System.rowsAfterEliminating` (`src/lp.zig:626`), which is `pub` and tallies
-  through the solver's own `partitionInto` (`:583`). The acceptance asked that
-  the gate call the one public bucketing function and keep no float comparison
-  of its own. There is now nothing in the gate left to compare, so the
-  divergence cannot be reintroduced by editing the benchmark alone — which is
-  the whole point of the item.
+  `bench/bench_lp.zig` holds no copy of the rule at all: it calls
+  `System.rowsAfterEliminating`, which is `pub` and tallies through the solver's
+  own `System.partitionInto`. The acceptance asked that the gate call the one
+  public bucketing function and keep no float comparison of its own. There is
+  now nothing in the gate left to compare, so the divergence cannot be
+  reintroduced by editing the benchmark alone — which is the whole point of the
+  item.
 - **The private copy is gone.** `grep 'fn signOf' src/lp.zig` returns nothing.
   `partitionInto` reads the public `Interval.signOf` through the `Sign`
-  trichotomy (`src/lp.zig:588`), and that one function is the only classifier
-  in the file: every elimination, every count and every bound read goes through
-  it (`:611`, `:628`, `:664`, `:815`, `:939`, `:1207`). `boundDivisor`
-  (`src/lp_exact.zig:335`) is the one place a divisor is read for a bound, and
-  it moved to the exact block in `a26675b` — which is why the line this entry
-  used to cite for it, `src/lp.zig:1250`, is now `appendCombined`.
+  trichotomy, and that one function is the only classifier in the file: every
+  elimination, every count and every bound read reaches it, because
+  `eliminate`, `partition`, `rowsAfterEliminating`, `bounds`,
+  `derivesContradiction` and `pairCount` all classify through `partitionInto`
+  and none of them carries a comparison of its own. `boundDivisor`
+  (`src/lp_exact.zig`) is the one place a divisor is read for a bound, and it
+  moved to the exact block in `a26675b` — which is why the line this entry used
+  to cite for it, `src/lp.zig:1250`, no longer names it: that line is inside
+  `checkRowForContradiction`, and `appendCombined` has travelled further down
+  the file since. This entry cites all of that by name on purpose: the line
+  numbers it used to carry had drifted by the time anyone checked them again,
+  which is the same drift the paragraph below this list warns about, and a name
+  a reader can grep is worth more here than a line that was correct once.
 - **The NaN arm is settled by a test rather than by the merge.**
   `Interval.signOf` answers `negative` for a NaN endpoint, computed as a
-  comparison rather than as the absence of a better answer, and
-  `tests/lp_test.zig:1111-1120` pins what the solver does with such a row: it
-  fails the test for reaching zero, answers `negative`, and is filed in ONE list
-  with its coefficient carried through unchanged. `tests/interval_test.zig:1044`
-  and `:1052` pin the same rule on both canonical rays.
+  comparison rather than as the absence of a better answer, and the test named
+  "a poisoned coefficient enters one bucket whole and is never split" in
+  `tests/lp_test.zig` pins what the solver does with such a row: it fails the
+  test for reaching zero, answers `negative`, and is filed in ONE list with its
+  coefficient carried through unchanged. The test named "overflow ray:
+  canonical constructor" in `tests/interval_test.zig` pins the same rule on
+  both canonical rays.
 
 **What it bought.** Not the removal of a second copy of the rule — there was
 only ever one, and the item is not entitled to the credit for that. What it

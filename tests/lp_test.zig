@@ -25,6 +25,21 @@ fn expectRange(got: Interval, lo: f64, hi: f64, tol: f64) !void {
     try std.testing.expect(got.lo <= got.hi);
 }
 
+/// The projection of a variable the test has already established is
+/// bounded. A null answer is a failure of the property under test, so it
+/// is named as an error rather than forced out of the optional: the test
+/// still fails either way, and the name says which assertion to read.
+fn projectedBounds(x: ?Interval) !Interval {
+    return x orelse error.NoProjection;
+}
+
+/// The box of a system whose every variable the test has already
+/// established is bounded. The memory it hands back is still the
+/// caller's, and this changes nothing about that.
+fn projectedBox(x: ?[]Interval) ![]Interval {
+    return x orelse error.NoProjection;
+}
+
 /// Copy a coefficient vector of point values and add it as `<=`.
 fn addPoints(sys: *lp.System, coeffs: []const f64, rhs: f64) !void {
     const buf = try gpa.alloc(Interval, coeffs.len);
@@ -203,7 +218,7 @@ test "lt and gt relax outward, never inward" {
     try strict.add(&one, .lt, pt(3));
     try strict.add(&one, .gt, pt(1));
 
-    const relaxed = (try strict.bounds(0)).?;
+    const relaxed = try projectedBounds(try strict.bounds(0));
     try std.testing.expect(relaxed.contains(1.0));
     try std.testing.expect(relaxed.contains(3.0));
     try std.testing.expect(relaxed.lo <= 1.0);
@@ -216,7 +231,7 @@ test "lt and gt relax outward, never inward" {
     defer closed.deinit();
     try closed.add(&one, .le, pt(3));
     try closed.add(&one, .ge, pt(1));
-    const exact = (try closed.bounds(0)).?;
+    const exact = try projectedBounds(try closed.bounds(0));
     try std.testing.expect(relaxed.lo <= exact.lo + 1e-9);
     try std.testing.expect(relaxed.hi + 1e-9 >= exact.hi);
 }
@@ -248,10 +263,10 @@ test "a bounded two-variable system projects its exact box" {
     try std.testing.expectEqual(@as(usize, 4), sys.rowCount());
     try std.testing.expect(!sys.isUnsat());
 
-    try expectRange((try sys.bounds(0)).?, 0.5, 6.5, 1e-9);
-    try expectRange((try sys.bounds(1)).?, -0.5, 5.5, 1e-9);
+    try expectRange(try projectedBounds(try sys.bounds(0)), 0.5, 6.5, 1e-9);
+    try expectRange(try projectedBounds(try sys.bounds(1)), -0.5, 5.5, 1e-9);
 
-    const boxed = (try sys.box()).?;
+    const boxed = try projectedBox(try sys.box());
     defer gpa.free(boxed);
     try std.testing.expectEqual(@as(usize, 2), boxed.len);
     try expectRange(boxed[0], 0.5, 6.5, 1e-9);
@@ -324,7 +339,7 @@ test "a system whose straddling row contradicts another one projects to nothing"
     // y is still bounded on its own. Emptiness is a property of the system,
     // not of the variable asked about, and the y rows never touch x, so this
     // is the honest answer for the projection onto y alone.
-    try expectRange((try sys.bounds(1)).?, -2.0, 2.0, 1e-9);
+    try expectRange(try projectedBounds(try sys.bounds(1)), -2.0, 2.0, 1e-9);
 
     // Reading only the second row back, with the first one dropped, leaves an
     // ordinary satisfiable system with the same shape, so the null above
@@ -335,8 +350,8 @@ test "a system whose straddling row contradicts another one projects to nothing"
     try fine.add(&[_]Interval{ pt(-1), pt(0) }, .le, pt(5));
     try fine.add(&[_]Interval{ pt(0), pt(-1) }, .le, pt(2));
     try fine.add(&[_]Interval{ pt(0), pt(1) }, .le, pt(2));
-    try expectRange((try fine.bounds(0)).?, -5.0, -3.0, 1e-9);
-    const fine_box = (try fine.box()).?;
+    try expectRange(try projectedBounds(try fine.bounds(0)), -5.0, -3.0, 1e-9);
+    const fine_box = try projectedBox(try fine.box());
     defer gpa.free(fine_box);
     try std.testing.expectEqual(@as(usize, 2), fine_box.len);
 }
@@ -350,7 +365,7 @@ test "a variable pinned from both sides collapses to a point" {
     try sys.add(&c, .le, pt(3));
     try sys.add(&c, .ge, pt(3));
 
-    const b = (try sys.bounds(0)).?;
+    const b = try projectedBounds(try sys.bounds(0));
     try std.testing.expect(b.contains(3.0));
     try expectRange(b, 3.0, 3.0, 1e-9);
 
@@ -368,7 +383,7 @@ test "an unconstrained variable makes the whole box null" {
     try sys.add(&c, .le, pt(2));
     try sys.add(&c, .ge, pt(-2));
 
-    try expectRange((try sys.bounds(0)).?, -2.0, 2.0, 1e-9);
+    try expectRange(try projectedBounds(try sys.bounds(0)), -2.0, 2.0, 1e-9);
     try std.testing.expect((try sys.bounds(1)) == null);
 
     // Documented contract: box() is null when any variable is unbounded,
@@ -392,8 +407,8 @@ test "a coefficient interval straddling zero stays a sound superset" {
     // neither side of x on its own. What it does contribute is a valid lower
     // bound of -inf and a valid upper bound of +inf, through its parts. The
     // row is kept and never dropped.
-    const wide = (try sys.bounds(0)).?;
-    const wide_y = (try sys.bounds(1)).?;
+    const wide = try projectedBounds(try sys.bounds(0));
+    const wide_y = try projectedBounds(try sys.bounds(1));
     // The true range of x is [-1, 4]: the straddling row reads |x| + y <= 4
     // and y reaches 0, so x stops at 4 and the x <= 5 row never binds. The
     // looser [-1, 5] this test used to pin was the answer from a coefficient
@@ -413,7 +428,7 @@ test "a coefficient interval straddling zero stays a sound superset" {
     try tight.add(&[_]Interval{ pt(0), pt(1) }, .le, pt(3));
     try tight.add(&[_]Interval{ pt(-1), pt(0) }, .le, pt(1));
 
-    const narrow = (try tight.bounds(0)).?;
+    const narrow = try projectedBounds(try tight.bounds(0));
     // The two true ranges are the same interval, [-1, 4], so this compares
     // two roundings of the same two numbers rather than two nested sets, and
     // the outward widening leaves them a couple of ULPs apart in whichever
@@ -444,20 +459,20 @@ test "a coefficient that only reaches zero still bounds the variable" {
     // which is the case that used to read as no bound at all. Both sides are
     // now read, each off the endpoint of the coefficient farthest from zero,
     // and the answer for x is the true range.
-    const bx = (try sys.bounds(0)).?;
+    const bx = try projectedBounds(try sys.bounds(0));
     try expectRange(bx, -0.5, 0.5, 1e-9);
     try std.testing.expect(bx.contains(0.0));
 
     // The projection onto y comes back looser on the low side, which is
     // allowed and expected: a box must contain the true range, not equal it.
     // What it may not do is clip either end of it.
-    const by = (try sys.bounds(1)).?;
+    const by = try projectedBounds(try sys.bounds(1));
     try std.testing.expect(by.lo <= 1.0);
     try std.testing.expect(by.hi >= 3.0);
     try std.testing.expect(by.lo >= -1.0);
     try std.testing.expect(by.hi <= 3.0 + 1e-9);
 
-    const boxed = (try sys.box()).?;
+    const boxed = try projectedBox(try sys.box());
     defer gpa.free(boxed);
     try std.testing.expectEqual(@as(usize, 2), boxed.len);
     try expectRange(boxed[0], -0.5, 0.5, 1e-9);
@@ -774,14 +789,14 @@ test "an uncertain coefficient does not make a satisfiable system look empty" {
     // The projection contains the witness, so it is not the empty answer
     // dressed up as a narrow one, and it stays a rigorous superset of the
     // true ranges: x really does span [-1.5, 1.5] and y spans [-0.5, 1.5].
-    const bx = (try sys.bounds(0)).?;
-    const by = (try sys.bounds(1)).?;
+    const bx = try projectedBounds(try sys.bounds(0));
+    const by = try projectedBounds(try sys.bounds(1));
     try std.testing.expect(bx.contains(0.0));
     try std.testing.expect(by.contains(1.0));
     try expectRange(bx, -1.5, 1.5, 1e-9);
     try std.testing.expect(by.lo <= -0.5);
     try std.testing.expect(by.hi >= 1.5);
-    const reported = (try sys.box()).?;
+    const reported = try projectedBox(try sys.box());
     defer gpa.free(reported);
     try std.testing.expect(!sys.isUnsat());
 }
@@ -856,7 +871,7 @@ test "a well-posed three-variable system projects [0, 6] in every slot" {
     try addPoints(&sys, &.{ 0, 1, 0 }, 6);
     try addPoints(&sys, &.{ 0, 0, 1 }, 6);
 
-    const boxed = (try sys.box()).?;
+    const boxed = try projectedBox(try sys.box());
     defer gpa.free(boxed);
     try std.testing.expectEqual(@as(usize, 3), boxed.len);
     for (boxed) |iv| try expectRange(iv, 0.0, 6.0, 1e-9);
@@ -1023,8 +1038,8 @@ test "a cancelling pair of products is stored as the structural zero" {
     // [-10.000000000000007, 0] before the change and are still that: the
     // cancelled row was contributing 3.0e15 on each side of each variable and
     // neither figure was anywhere near the binding one.
-    try expectRange((try sys.bounds(0)).?, 0.0, 10.0, 1e-9);
-    try expectRange((try sys.bounds(1)).?, -10.0, 0.0, 1e-9);
+    try expectRange(try projectedBounds(try sys.bounds(0)), 0.0, 10.0, 1e-9);
+    try expectRange(try projectedBounds(try sys.bounds(1)), -10.0, 0.0, 1e-9);
 }
 
 test "a cancelled row that constrains nothing bounds nothing" {
@@ -1247,8 +1262,22 @@ test "box: the shared walk answers exactly what a private sweep per variable ans
     const Case = struct { n: usize, rows: []const []const f64, rhs: []const f64 };
     const cases = [_]Case{
         .{ .n = 2, .rows = &.{ &.{ 1, 1 }, &.{ 1, -1 }, &.{ -1, 1 }, &.{ -1, -1 } }, .rhs = &.{ 3, 2, 2, 1 } },
-        .{ .n = 3, .rows = &.{ &.{ 1, 1, 1 }, &.{ -1, -1, 0 }, &.{ 0, 1, -1 }, &.{ 1, -1, 1 }, &.{ -1, 1, 1 } }, .rhs = &.{ 6, 1, 1, 4, 4 } },
-        .{ .n = 4, .rows = &.{ &.{ 1, 1, 0, 0 }, &.{ 0, -1, 1, 0 }, &.{ 0, 0, -1, 1 }, &.{ 1, 0, 0, -1 }, &.{ -1, -1, -1, 1 } }, .rhs = &.{ 2, 1, 1, 3, 2 } },
+        .{
+            .n = 3,
+            .rows = &.{ &.{ 1, 1, 1 }, &.{ -1, -1, 0 }, &.{ 0, 1, -1 }, &.{ 1, -1, 1 }, &.{ -1, 1, 1 } },
+            .rhs = &.{ 6, 1, 1, 4, 4 },
+        },
+        .{
+            .n = 4,
+            .rows = &.{
+                &.{ 1, 1, 0, 0 },
+                &.{ 0, -1, 1, 0 },
+                &.{ 0, 0, -1, 1 },
+                &.{ 1, 0, 0, -1 },
+                &.{ -1, -1, -1, 1 },
+            },
+            .rhs = &.{ 2, 1, 1, 3, 2 },
+        },
     };
 
     for (cases) |case| {

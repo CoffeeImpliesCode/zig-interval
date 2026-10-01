@@ -71,14 +71,14 @@ fn check(x: ?Interval) !void {
 /// infinity, and an upper bound moves up. Every width below is counted
 /// in one of these two directions, so a table row can name the side it
 /// is talking about and mean exactly one thing by it.
-const side = enum { down, up };
+const Side = enum { down, up };
 
 /// `v` three ULP outward in the given direction: the bound the elementary
 /// widening of `src/interval_ext.zig` gives an endpoint whose value is
 /// exactly `v`. A bound compared against this has been moved at most
 /// three steps, so the comparison is what notices the widening being
 /// widened as well as what pins the count.
-fn outward(v: f64, comptime s: side) f64 {
+fn outward(comptime s: Side, v: f64) f64 {
     return switch (s) {
         .down => interval.prevDown(interval.prevDown(interval.prevDown(v))),
         .up => interval.nextUp(interval.nextUp(interval.nextUp(v))),
@@ -89,7 +89,7 @@ fn outward(v: f64, comptime s: side) f64 {
 /// one step taken back off. A bound strictly beyond this line has been
 /// moved the full three steps, so a margin narrowed to one or two steps
 /// fails against it and a three-step margin passes.
-fn inward(v: f64, comptime s: side) f64 {
+fn inward(comptime s: Side, v: f64) f64 {
     return switch (s) {
         .down => interval.prevDown(interval.prevDown(v)),
         .up => interval.nextUp(interval.nextUp(v)),
@@ -116,8 +116,8 @@ test "sqrt: the roots of a positive interval sit inside the result" {
     // the widening and nothing else: it is the cheapest place in the
     // file to read the count off, and a widening to four steps would
     // fail here first.
-    try std.testing.expect(s.lo >= outward(2.0, .down));
-    try std.testing.expect(s.hi <= outward(3.0, .up));
+    try std.testing.expect(s.lo >= outward(.down, 2.0));
+    try std.testing.expect(s.hi <= outward(.up, 3.0));
 }
 
 test "sqrt: a lower end below zero contributes only the bound at zero" {
@@ -619,8 +619,8 @@ test "tanh: the bound is three ULP out, so a narrower one fails" {
     for (cases) |x| {
         const computed = std.math.tanh(x);
         const t = try answer(ext.tanh(Interval.init(x, x)));
-        try std.testing.expect(t.lo < inward(computed, .down));
-        try std.testing.expect(t.hi > inward(computed, .up));
+        try std.testing.expect(t.lo < inward(.down, computed));
+        try std.testing.expect(t.hi > inward(.up, computed));
     }
 }
 
@@ -633,13 +633,13 @@ test "sin and cos: the endpoint evaluation carries the three-step margin" {
     for (cases) |x| {
         const s = try answer(ext.sin(Interval.init(x, x)));
         const sine = @sin(x);
-        try std.testing.expect(s.lo < inward(sine, .down));
-        try std.testing.expect(s.hi > inward(sine, .up));
+        try std.testing.expect(s.lo < inward(.down, sine));
+        try std.testing.expect(s.hi > inward(.up, sine));
 
         const c = try answer(ext.cos(Interval.init(x, x)));
         const cosine = @cos(x);
-        try std.testing.expect(c.lo < inward(cosine, .down));
-        try std.testing.expect(c.hi > inward(cosine, .up));
+        try std.testing.expect(c.lo < inward(.down, cosine));
+        try std.testing.expect(c.hi > inward(.up, cosine));
     }
 }
 
@@ -652,7 +652,7 @@ test "log: the one-sided bound widens three ULP, not two" {
     // count taken there would be a count of that constant instead.
     const l = try answer(ext.log(Interval.init(-1.0, 2.0)));
     try std.testing.expectEqual(-inf, l.lo);
-    try std.testing.expectEqual(outward(@log(2.0), .up), l.hi);
+    try std.testing.expectEqual(outward(.up, @log(2.0)), l.hi);
 
     // The zero case, pinned at the width it really has.
     const one = try answer(ext.log(Interval.init(-1.0, 1.0)));

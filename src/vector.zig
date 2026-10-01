@@ -28,16 +28,16 @@ const BinaryOpt = *const fn (Interval, Interval) ?Interval;
 const Unary = *const fn (Interval) Interval;
 
 /// Unary scalar operation undefined off its domain, which is the shape
-/// the transcendental functions have. Also the type of the `f` in
-/// `mapResult`.
+/// the transcendental functions have. The public `mapResult` signature
+/// spells out this function pointer rather than publishing the alias.
 const UnaryOpt = *const fn (Interval) ?Interval;
 
 // ---------------------------------------------------------------------------
 // Core: every operation, written once against a component slice.
 // ---------------------------------------------------------------------------
 
-// The length assertion in map2, map2Opt, map1, zipInPlace, all2 and
-// mapOpt is a contract check on a call site that has already fixed the
+// The length assertions in map2, map2Opt, map1, zipInPlace, all2 and
+// mapOpt are contract checks on a call site that has already fixed the
 // lengths, not a check on caller input. All six are private, and every
 // call site passes lengths that cannot differ: a `Vec(n)` hands them
 // arrays of the comptime length n, and a `DynVec` hands them output
@@ -61,7 +61,8 @@ const UnaryOpt = *const fn (Interval) ?Interval;
 
 /// out[i] = a[i] op b[i].
 fn map2(out: []Interval, a: []const Interval, b: []const Interval, op: Binary) void {
-    std.debug.assert(out.len == a.len and a.len == b.len);
+    std.debug.assert(out.len == a.len);
+    std.debug.assert(a.len == b.len);
     for (out, a, b) |*d, x, y| d.* = op(x, y);
 }
 
@@ -69,7 +70,8 @@ fn map2(out: []Interval, a: []const Interval, b: []const Interval, op: Binary) v
 /// the domain of op. On false, out holds a partial result that the
 /// caller discards; nothing reads it.
 fn map2Opt(out: []Interval, a: []const Interval, b: []const Interval, op: BinaryOpt) bool {
-    std.debug.assert(out.len == a.len and a.len == b.len);
+    std.debug.assert(out.len == a.len);
+    std.debug.assert(a.len == b.len);
     for (out, a, b) |*d, x, y| {
         d.* = op(x, y) orelse return false;
     }
@@ -258,6 +260,9 @@ pub fn Vec(comptime n: usize) type {
 
         /// Componentwise `Interval.add`, leaving the operands unchanged.
         pub fn add(self: Self, other: Self) Self {
+            // SAFETY: `map2` writes all n components of `out.comps`
+            // from the two operands before this returns, so no
+            // component of `out` is read while it is undefined.
             var out: Self = undefined;
             map2(&out.comps, &self.comps, &other.comps, Interval.add);
             return out;
@@ -265,6 +270,9 @@ pub fn Vec(comptime n: usize) type {
 
         /// Componentwise `Interval.sub`.
         pub fn sub(self: Self, other: Self) Self {
+            // SAFETY: `map2` writes all n components of `out.comps`
+            // from the two operands before this returns, so no
+            // component of `out` is read while it is undefined.
             var out: Self = undefined;
             map2(&out.comps, &self.comps, &other.comps, Interval.sub);
             return out;
@@ -272,6 +280,9 @@ pub fn Vec(comptime n: usize) type {
 
         /// Componentwise `Interval.mul`.
         pub fn mul(self: Self, other: Self) Self {
+            // SAFETY: `map2` writes all n components of `out.comps`
+            // from the two operands before this returns, so no
+            // component of `out` is read while it is undefined.
             var out: Self = undefined;
             map2(&out.comps, &self.comps, &other.comps, Interval.mul);
             return out;
@@ -280,6 +291,9 @@ pub fn Vec(comptime n: usize) type {
         /// Componentwise `Interval.div`. Every component of other must
         /// avoid zero; the scalar method is what reports that.
         pub fn div(self: Self, other: Self) Self {
+            // SAFETY: `map2` writes all n components of `out.comps`
+            // from the two operands before this returns, so no
+            // component of `out` is read while it is undefined.
             var out: Self = undefined;
             map2(&out.comps, &self.comps, &other.comps, Interval.div);
             return out;
@@ -287,6 +301,9 @@ pub fn Vec(comptime n: usize) type {
 
         /// Componentwise `Interval.neg`.
         pub fn neg(self: Self) Self {
+            // SAFETY: `map1` writes all n components of `out.comps`
+            // from the operand before this returns, so no component of
+            // `out` is read while it is undefined.
             var out: Self = undefined;
             map1(&out.comps, &self.comps, Interval.neg);
             return out;
@@ -295,6 +312,9 @@ pub fn Vec(comptime n: usize) type {
         /// Componentwise `Interval.recip`. Every component must avoid
         /// zero.
         pub fn recip(self: Self) Self {
+            // SAFETY: `map1` writes all n components of `out.comps`
+            // from the operand before this returns, so no component of
+            // `out` is read while it is undefined.
             var out: Self = undefined;
             map1(&out.comps, &self.comps, Interval.recip);
             return out;
@@ -302,6 +322,9 @@ pub fn Vec(comptime n: usize) type {
 
         /// Componentwise `Interval.abs`.
         pub fn abs(self: Self) Self {
+            // SAFETY: `map1` writes all n components of `out.comps`
+            // from the operand before this returns, so no component of
+            // `out` is read while it is undefined.
             var out: Self = undefined;
             map1(&out.comps, &self.comps, Interval.abs);
             return out;
@@ -309,6 +332,9 @@ pub fn Vec(comptime n: usize) type {
 
         /// Componentwise `Interval.sqr`.
         pub fn sqr(self: Self) Self {
+            // SAFETY: `map1` writes all n components of `out.comps`
+            // from the operand before this returns, so no component of
+            // `out` is read while it is undefined.
             var out: Self = undefined;
             map1(&out.comps, &self.comps, Interval.sqr);
             return out;
@@ -317,6 +343,9 @@ pub fn Vec(comptime n: usize) type {
         /// Per-component `Interval.hull`: the smallest box covering
         /// both.
         pub fn hull(self: Self, other: Self) Self {
+            // SAFETY: `map2` writes all n components of `out.comps`
+            // from the two operands before this returns, so no
+            // component of `out` is read while it is undefined.
             var out: Self = undefined;
             map2(&out.comps, &self.comps, &other.comps, Interval.hull);
             return out;
@@ -327,6 +356,11 @@ pub fn Vec(comptime n: usize) type {
         /// because they share no point along that axis. The empty box
         /// is never returned, only reported, so see `isEmpty`.
         pub fn intersect(self: Self, other: Self) ?Self {
+            // SAFETY: `map2Opt` writes the components of `out.comps` in
+            // turn and reports false at the first one that leaves the
+            // domain of the operation, and this function returns null
+            // there and drops `out` unread; on the path that returns
+            // `out` every one of the n components has been written.
             var out: Self = undefined;
             if (!map2Opt(&out.comps, &self.comps, &other.comps, Interval.intersect)) return null;
             return out;
@@ -434,8 +468,6 @@ pub fn Vec(comptime n: usize) type {
 /// same one: the caller keeps the slice it was given, because the
 /// rule cannot be carried by the type.
 pub const DynVec = struct {
-    const Self = @This();
-
     /// Failures of the box operations: the operand widths disagree, or
     /// the allocation for a new box did not fit.
     pub const Error = error{ DimensionMismatch, OutOfMemory };
@@ -457,7 +489,7 @@ pub const DynVec = struct {
     own: [*]Interval,
 
     /// A box of n components, all set to fill.
-    pub fn init(gpa: std.mem.Allocator, n: usize, fill: Interval) !Self {
+    pub fn init(gpa: std.mem.Allocator, n: usize, fill: Interval) !DynVec {
         const comps = try gpa.alloc(Interval, n);
         @memset(comps, fill);
         return .{ .gpa = gpa, .comps = comps, .own = comps.ptr };
@@ -469,7 +501,7 @@ pub const DynVec = struct {
     /// for `Vec(n).fromArray`, for `init(fill)`, and for a write to
     /// `comps[i]`, and an invalid component is stored here unchanged. See
     /// `isEmpty`.
-    pub fn fromArray(gpa: std.mem.Allocator, comps: []const Interval) !Self {
+    pub fn fromArray(gpa: std.mem.Allocator, comps: []const Interval) !DynVec {
         const owned = try gpa.dupe(Interval, comps);
         return .{ .gpa = gpa, .comps = owned, .own = owned.ptr };
     }
@@ -492,7 +524,7 @@ pub const DynVec = struct {
     /// This does not make a COPY safe to free, and cannot: the copy
     /// holds the same slice, so the second free is a double free. One
     /// box, one owner; see the ownership note on this type.
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *DynVec) void {
         // A box owns one slice, the one its constructor allocated, and
         // `own` is the address of that slice. Both fields are public,
         // so `comps` can name a slice this box never allocated, and
@@ -508,23 +540,34 @@ pub const DynVec = struct {
         // symptom rather than the mistake.
         if (std.debug.runtime_safety) {
             if (self.comps.ptr != self.own) {
-                std.debug.panic("DynVec.deinit: comps was replaced since construction: this box does not own the slice it holds, and freeing it hands the allocator memory it never allocated", .{});
+                std.debug.panic(
+                    "DynVec.deinit: comps was replaced since construction: " ++
+                        "this box does not own the slice it holds, and freeing it " ++
+                        "hands the allocator memory it never allocated",
+                    .{},
+                );
             }
         }
         const comps = self.comps;
+        // The box is left holding an empty slice at the address it
+        // owned, which is the state the second call reads: `own` still
+        // matches the check above and `Allocator.free` returns on an
+        // empty slice. An empty slice built somewhere else, `&.{}` say,
+        // would move `comps` off `own` and turn the second `deinit`
+        // into the very trap that check names.
         self.comps = comps[0..0];
         self.gpa.free(comps);
     }
 
     /// The runtime component count.
-    pub fn dim(self: Self) usize {
+    pub fn dim(self: DynVec) usize {
         return self.comps.len;
     }
 
     /// The components as a slice, for code written against the core.
     /// The receiver is a pointer, matching `Vec(n).slice`, so the two
     /// representations are spelled the same way at every call site.
-    pub fn slice(self: *const Self) []const Interval {
+    pub fn slice(self: *const DynVec) []const Interval {
         return self.comps;
     }
 
@@ -533,12 +576,12 @@ pub const DynVec = struct {
     /// inserts in Debug and ReleaseSafe, and reads past the allocation
     /// in ReleaseFast and ReleaseSmall, where that check is elided.
     /// The caller keeps the index in range.
-    pub fn get(self: Self, i: usize) Interval {
+    pub fn get(self: DynVec, i: usize) Interval {
         return self.comps[i];
     }
 
     /// Replace component i. The same index contract as `get`.
-    pub fn set(self: *Self, i: usize, v: Interval) void {
+    pub fn set(self: *DynVec, i: usize, v: Interval) void {
         self.comps[i] = v;
     }
 
@@ -550,7 +593,7 @@ pub const DynVec = struct {
     /// alone would decide equality over the prefix the two boxes
     /// share, and in a release build that check is not there to stop
     /// it.
-    pub fn eql(self: Self, other: Self) bool {
+    pub fn eql(self: DynVec, other: DynVec) bool {
         if (self.comps.len != other.comps.len) return false;
         for (self.comps, other.comps) |x, y| {
             if (!x.eql(y)) return false;
@@ -559,23 +602,23 @@ pub const DynVec = struct {
     }
 
     /// A new box of the same width, with uninitialised components.
-    fn allocLike(self: Self) !Self {
+    fn allocLike(self: DynVec) !DynVec {
         const comps = try self.gpa.alloc(Interval, self.comps.len);
         return .{ .gpa = self.gpa, .comps = comps, .own = comps.ptr };
     }
 
     /// The shared width check of every binary box operation.
-    fn sameWidth(self: Self, other: Self) Error!void {
+    fn sameWidth(self: DynVec, other: DynVec) Error!void {
         if (self.comps.len != other.comps.len) return error.DimensionMismatch;
     }
 
     /// Fill a freshly allocated box from a componentwise fold, freeing
     /// it when the fold leaves the domain of the operation.
     fn foldOpt(
-        self: Self,
-        other: Self,
+        self: DynVec,
+        other: DynVec,
         op: BinaryOpt,
-    ) Error!?Self {
+    ) Error!?DynVec {
         try self.sameWidth(other);
         var out = try self.allocLike();
         if (!map2Opt(out.comps, self.comps, other.comps, op)) {
@@ -586,7 +629,7 @@ pub const DynVec = struct {
     }
 
     /// Componentwise `Interval.add`, as a new box.
-    pub fn add(self: Self, other: Self) Error!Self {
+    pub fn add(self: DynVec, other: DynVec) Error!DynVec {
         try self.sameWidth(other);
         const out = try self.allocLike();
         map2(out.comps, self.comps, other.comps, Interval.add);
@@ -594,7 +637,7 @@ pub const DynVec = struct {
     }
 
     /// Componentwise `Interval.sub`, as a new box.
-    pub fn sub(self: Self, other: Self) Error!Self {
+    pub fn sub(self: DynVec, other: DynVec) Error!DynVec {
         try self.sameWidth(other);
         const out = try self.allocLike();
         map2(out.comps, self.comps, other.comps, Interval.sub);
@@ -602,7 +645,7 @@ pub const DynVec = struct {
     }
 
     /// Componentwise `Interval.mul`, as a new box.
-    pub fn mul(self: Self, other: Self) Error!Self {
+    pub fn mul(self: DynVec, other: DynVec) Error!DynVec {
         try self.sameWidth(other);
         const out = try self.allocLike();
         map2(out.comps, self.comps, other.comps, Interval.mul);
@@ -611,7 +654,7 @@ pub const DynVec = struct {
 
     /// Componentwise `Interval.div`, as a new box. Every component of
     /// other must avoid zero.
-    pub fn div(self: Self, other: Self) Error!Self {
+    pub fn div(self: DynVec, other: DynVec) Error!DynVec {
         try self.sameWidth(other);
         const out = try self.allocLike();
         map2(out.comps, self.comps, other.comps, Interval.div);
@@ -620,52 +663,52 @@ pub const DynVec = struct {
 
     /// `self + other`, overwriting the receiver. The in-place twin of
     /// `add`, and the reason `add` can stay non-destructive.
-    pub fn iadd(self: *Self, other: Self) Error!void {
+    pub fn iadd(self: *DynVec, other: DynVec) Error!void {
         try self.sameWidth(other);
         zipInPlace(self.comps, other.comps, Interval.add);
     }
 
     /// `self - other`, overwriting the receiver.
-    pub fn isub(self: *Self, other: Self) Error!void {
+    pub fn isub(self: *DynVec, other: DynVec) Error!void {
         try self.sameWidth(other);
         zipInPlace(self.comps, other.comps, Interval.sub);
     }
 
     /// `self * other`, overwriting the receiver.
-    pub fn imul(self: *Self, other: Self) Error!void {
+    pub fn imul(self: *DynVec, other: DynVec) Error!void {
         try self.sameWidth(other);
         zipInPlace(self.comps, other.comps, Interval.mul);
     }
 
     /// `self / other`, overwriting the receiver.
-    pub fn idiv(self: *Self, other: Self) Error!void {
+    pub fn idiv(self: *DynVec, other: DynVec) Error!void {
         try self.sameWidth(other);
         zipInPlace(self.comps, other.comps, Interval.div);
     }
 
     /// Componentwise `Interval.neg`, in place: the box is the receiver.
-    pub fn neg(self: *Self) void {
+    pub fn neg(self: *DynVec) void {
         applyInPlace(self.comps, Interval.neg);
     }
 
     /// Componentwise `Interval.recip`, in place. Every component must
     /// avoid zero.
-    pub fn recip(self: *Self) void {
+    pub fn recip(self: *DynVec) void {
         applyInPlace(self.comps, Interval.recip);
     }
 
     /// Componentwise `Interval.abs`, in place.
-    pub fn abs(self: *Self) void {
+    pub fn abs(self: *DynVec) void {
         applyInPlace(self.comps, Interval.abs);
     }
 
     /// Componentwise `Interval.sqr`, in place.
-    pub fn sqr(self: *Self) void {
+    pub fn sqr(self: *DynVec) void {
         applyInPlace(self.comps, Interval.sqr);
     }
 
     /// Per-component `Interval.hull`, as a new box.
-    pub fn hull(self: Self, other: Self) Error!Self {
+    pub fn hull(self: DynVec, other: DynVec) Error!DynVec {
         try self.sameWidth(other);
         const out = try self.allocLike();
         map2(out.comps, self.comps, other.comps, Interval.hull);
@@ -676,13 +719,13 @@ pub const DynVec = struct {
     /// as a single component is disjoint: the boxes are then disjoint,
     /// because they share no point along that axis. The empty box is
     /// never returned, only reported, so see `isEmpty`.
-    pub fn intersect(self: Self, other: Self) Error!?Self {
+    pub fn intersect(self: DynVec, other: DynVec) Error!?DynVec {
         return self.foldOpt(other, Interval.intersect);
     }
 
     /// True when every component overlaps, which is exactly when the
     /// boxes share at least one point.
-    pub fn overlaps(self: Self, other: Self) bool {
+    pub fn overlaps(self: DynVec, other: DynVec) bool {
         return self.comps.len == other.comps.len and
             all2(self.comps, other.comps, Interval.overlaps);
     }
@@ -690,7 +733,7 @@ pub const DynVec = struct {
     /// True when every component of self is a subset of the matching
     /// component of other. Widths that disagree are not comparable, so
     /// that is false.
-    pub fn subsetOf(self: Self, other: Self) bool {
+    pub fn subsetOf(self: DynVec, other: DynVec) bool {
         return self.comps.len == other.comps.len and
             all2(self.comps, other.comps, Interval.subsetOf);
     }
@@ -703,7 +746,7 @@ pub const DynVec = struct {
     /// holds in ReleaseFast and ReleaseSmall too, where an assertion
     /// would be elided and the fold would read past the shorter of the
     /// two.
-    pub fn contains(self: Self, p: []const f64) bool {
+    pub fn contains(self: DynVec, p: []const f64) bool {
         return allContains(self.comps, p);
     }
 
@@ -714,7 +757,7 @@ pub const DynVec = struct {
     /// so it is not in this one, and the distance is the positive
     /// infinity: the one value that keeps the zero-if-and-only-if
     /// promise and never under-reports.
-    pub fn distance(self: Self, p: []const f64) f64 {
+    pub fn distance(self: DynVec, p: []const f64) f64 {
         return normDistance(self.comps, p);
     }
 
@@ -733,7 +776,7 @@ pub const DynVec = struct {
     /// A deinited box is a zero-dimensional box and no component
     /// reaches this fold, so it is not empty. `deinit` frees memory; it
     /// does not build a box that holds nothing.
-    pub fn isEmpty(self: Self) bool {
+    pub fn isEmpty(self: DynVec) bool {
         for (self.comps) |c| {
             if (c.lo > c.hi) return true;
         }
@@ -750,7 +793,10 @@ pub const DynVec = struct {
 /// whether or not the branch holding it can run on this instantiation.
 /// One function with one arm per shape therefore hands the stack arm an
 /// `error.OutOfMemory` it can neither produce nor catch, and makes
-/// every caller of that arm write a `try` that can never fire.
+/// every caller of that arm write a `try` that can never fire. The arms
+/// are separate functions for that same reason: a `try` needs an error
+/// union under it, and no one return type is an error union for both
+/// shapes.
 fn MapResult(comptime V: type) type {
     if (V == DynVec) return DynVec.Error!?DynVec;
     return ?V;
@@ -787,21 +833,37 @@ fn MapResult(comptime V: type) type {
 /// `powf`. The remaining eighteen return a plain `Interval` and are not
 /// coercible here; to fold one of those, wrap it so that its result is
 /// lifted into an optional.
-pub fn mapResult(v: anytype, f: UnaryOpt) MapResult(@TypeOf(v)) {
+pub fn mapResult(v: anytype, f: *const fn (Interval) ?Interval) MapResult(@TypeOf(v)) {
     const V = @TypeOf(v);
     if (comptime @typeInfo(V) == .pointer) {
         @compileError("mapResult takes a box by value: pass the box, not a pointer to it.");
     }
-    if (comptime V == DynVec) {
-        var out = try v.allocLike();
-        if (!mapOpt(out.comps, v.comps, f)) {
-            out.deinit();
-            return null;
-        }
-        return out;
-    } else {
-        var out: V = undefined;
-        if (!mapOpt(&out.comps, &v.comps, f)) return null;
-        return out;
+    if (comptime V == DynVec) return mapResultOwned(v, f);
+    return mapResultStack(v, f);
+}
+
+/// The `DynVec` arm of `mapResult`: it allocates, so it has an error to
+/// report, and it is a function of its own so that the one `try` in it
+/// stands under a return type that admits an error. Written as an arm
+/// of the body above it was a `try` under a return type that is a plain
+/// `?Vec(n)` on the stack instantiation, which cannot produce one.
+fn mapResultOwned(v: DynVec, f: UnaryOpt) DynVec.Error!?DynVec {
+    var out = try v.allocLike();
+    if (!mapOpt(out.comps, v.comps, f)) {
+        out.deinit();
+        return null;
     }
+    return out;
+}
+
+/// The `Vec(n)` arm: a stack array, so nothing to allocate and no error
+/// to report, and nothing to free when the fold leaves the domain.
+fn mapResultStack(v: anytype, f: UnaryOpt) ?@TypeOf(v) {
+    // SAFETY: `mapOpt` writes the components of `out.comps` in turn and
+    // reports false at the first one that leaves the domain of f, and
+    // this function then drops `out` unread; on the path that returns
+    // it, all n components have been written.
+    var out: @TypeOf(v) = undefined;
+    if (!mapOpt(&out.comps, &v.comps, f)) return null;
+    return out;
 }

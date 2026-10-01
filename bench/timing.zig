@@ -23,6 +23,13 @@ const std = @import("std");
 /// Accumulator and ambient state handed to every benchmark body.
 pub const Ctx = struct {
     io: std.Io,
+    /// The heap a body allocates from: the allocator `Runner.init` was
+    /// given.
+    ///
+    /// A body is `fn (ctx, i) void` with nowhere to hang a context, so a
+    /// body that has to build something reaches the allocator through here
+    /// rather than through a file-scope global its `run` has published.
+    gpa: std.mem.Allocator,
     /// Every measured result is summed in here so the work cannot be elided.
     /// Reported once at exit as a checksum, purely to keep it live.
     sink: f64 = 0,
@@ -40,6 +47,56 @@ pub const Row = struct {
     ops_per_sec: f64,
     iterations: usize,
 };
+
+/// The process's own stderr, as a line-buffered writer.
+///
+/// Every table every benchmark prints goes out through this, and it is
+/// deliberately NOT the debug log: the bytes reach stderr exactly as
+/// `print` formats them, with no level, no prefix and no timestamp,
+/// because the reader of a benchmark parses what is written. One `Out`
+/// per report, so every line of that report is formatted into the same
+/// buffer. No lock is taken: these reports are written from one thread,
+/// and the timed regions they surround are not preemptible by anything
+/// this file starts.
+pub const Out = struct {
+    io: std.Io,
+
+    /// Wider than the longest line the three benchmark files print, so a
+    /// whole row is formatted before it is written and no row reaches
+    /// stderr in pieces.
+    // SAFETY: `std.Io.File.Writer` formats into this buffer and writes out
+    // `[0..end]`, so every byte is written before it is read, and a
+    // buffer nothing has been printed into is never written out at all.
+    buffer: [4096]u8 = undefined,
+
+    pub fn init(io: std.Io) Out {
+        return .{ .io = io };
+    }
+
+    /// Writes one formatted line to stderr, in `print` format.
+    pub fn print(self: *Out, comptime fmt: []const u8, args: anytype) !void {
+        var stderr = std.Io.File.stderr().writer(self.io, &self.buffer);
+        try stderr.interface.print(fmt, args);
+        try stderr.interface.flush();
+    }
+};
+
+/// Ends a run because a body could not do the work it was asked to do.
+///
+/// The message names the work in the same plain format as every other line
+/// of the report, and the process then exits non-zero. A body that could
+/// not build or allocate what it was measuring has measured nothing, and
+/// a time for work that never ran is the one figure a benchmark must not
+/// print.
+pub fn fail(comptime what: []const u8, io: std.Io, err: anyerror) noreturn {
+    var out = Out.init(io);
+    out.print("{s} failed: {s}\n", .{ what, @errorName(err) }) catch {
+        // stderr will not take the message and there is nowhere else to
+        // report it through, so the exit status below is the whole signal.
+        std.process.exit(1);
+    };
+    std.process.exit(1);
+}
 
 pub const Report = struct {
     rows: std.ArrayList(Row),
@@ -69,20 +126,26 @@ pub const Report = struct {
         return .{ .gpa = gpa, .rows = .empty, .io = io, .sink_total = 0 };
     }
 
+    /// Releases the rows. A `Report` is dead once this has run.
     pub fn deinit(self: *Report) void {
         self.rows.deinit(self.gpa);
+        // SAFETY: `rows` is the only resource a `Report` owns and it is
+        // released above; nothing may read the value after `deinit`, so
+        // what is left behind is never read.
+        self.* = undefined;
     }
 
     /// Prints the collected rows as a table, slowest first, so the things
     /// worth optimising are the first thing read.
-    pub fn print(self: *Report) void {
+    pub fn print(self: *Report) !void {
         std.sort.heap(Row, self.rows.items, {}, byCostDesc);
-        std.debug.print("\n{s:>34}  {s:>12}  {s:>16}  {s:>10}\n", .{
+        var out = Out.init(self.io);
+        try out.print("\n{s:>34}  {s:>12}  {s:>16}  {s:>10}\n", .{
             "operation", "ns/op", "ops/sec", "iters",
         });
-        std.debug.print("{s}\n", .{"-" ** 78});
+        try out.print("{s}\n", .{"-" ** 78});
         for (self.rows.items) |r| {
-            std.debug.print("{s:>34}  {d:>12.3}  {d:>16.1}  {d:>10}\n", .{
+            try out.print("{s:>34}  {d:>12.3}  {d:>16.1}  {d:>10}\n", .{
                 r.name,
                 r.ns_per_op,
                 r.ops_per_sec,
@@ -92,7 +155,7 @@ pub const Report = struct {
         // The real accumulated total, not a placeholder. A reader checking
         // whether the work was elided needs a figure that actually moved,
         // and this one moves whenever any body computed anything different.
-        std.debug.print("\nchecksum {x}\n", .{self.sink_total});
+        try out.print("\nchecksum {x}\n", .{self.sink_total});
     }
 
     fn byCostDesc(_: void, a: Row, b: Row) bool {
@@ -119,9 +182,14 @@ pub const Runner = struct {
         };
     }
 
+    /// Releases the report and the thread pool. A `Runner` is dead once this
+    /// has run.
     pub fn deinit(self: *Runner) void {
         self.report.deinit();
         self.threaded.deinit();
+        // SAFETY: both resources are released above and nothing may read a
+        // `Runner` after `deinit`, so what is left behind is never read.
+        self.* = undefined;
     }
 };
 
@@ -139,12 +207,12 @@ pub const warmup = 1;
 /// entitled to delete it. It is passed an index so that a benchmark can vary
 /// its inputs across iterations and avoid measuring a single cached case.
 pub fn measure(
-    runner: *Runner,
     comptime name: []const u8,
-    iterations: usize,
     comptime body: fn (ctx: *Ctx, i: usize) void,
+    runner: *Runner,
+    iterations: usize,
 ) !void {
-    var ctx: Ctx = .{ .io = runner.io };
+    var ctx: Ctx = .{ .io = runner.io, .gpa = runner.gpa };
 
     for (0..warmup) |i| body(&ctx, i);
 
@@ -161,7 +229,11 @@ pub fn measure(
     // Keep the sink observable after the last measurement, so nothing above
     // can be eliminated on the grounds that its result is unused.
     std.mem.doNotOptimizeAway(ctx.sink);
-    std.debug.print("checksum {d}\n", .{ctx.sink});
+    // Outside the timed region above: the sink is reported once the
+    // measurement is complete, and writing it cannot have cost anything
+    // that the row above is reporting.
+    var out = Out.init(runner.io);
+    try out.print("checksum {d}\n", .{ctx.sink});
 
     const ns_per_op: f64 = @as(f64, @floatFromInt(best)) / @as(f64, @floatFromInt(iterations));
     // Fold this body's sink into the run total before the row is recorded,

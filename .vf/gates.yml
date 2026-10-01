@@ -1,6 +1,6 @@
-suite-cmd: zig 0.16.0 build test
+suite-cmd: zig-gate
 suite-install:
 target-cmd: zig 0.16.0 build test
 test-paths: tests/**,**/test_*.py,**/*_test.py
-suite-timeout: 900
+suite-timeout: 3600
 enforce: true

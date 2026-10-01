@@ -82,11 +82,20 @@ const pi80: f80 = 3.14159265358979323846264338327950288;
 /// from the origin. Halving is exact in binary floating point.
 const half_pi80: f80 = pi80 / 2.0;
 
-/// Beyond this magnitude the index of a critical point no longer fits
-/// the i64 the search counts in, and the number of candidate points
-/// would be beyond counting. The three trigonometric functions answer
-/// there with the whole range each one spans, which is sound because
+/// Past this magnitude the index of a critical point has outgrown the
+/// integers an f64 holds exactly. The last of those is 2^53, and the
+/// index of a point at this magnitude is already about 3.2e16, so
+/// rounding the division that produces it reports a critical point
+/// that is not there. Missing a point that is there is the one failure
+/// that is not, so past the limit the three trigonometric functions
+/// answer with the whole range each one spans, which is sound because
 /// that range contains every value the function can take.
+///
+/// This is a bound on the argument and not on the conversion, and it is
+/// nowhere near where such a bound would fall. The index at this
+/// magnitude is about 3.2e16, which the i64 the search counts in holds
+/// exactly against a maximum near 9.2e18. The i64 does not run out;
+/// the f64 does.
 const phase_limit: f64 = 1e17;
 
 /// The integers k with `offset + k * pi` inside [lo, hi], as an
@@ -234,6 +243,27 @@ fn quotientHi(x: f64, offset: f80) f80 {
 /// The integers k with `offset + k * pi` inside [lo, hi]. The quotient
 /// runs below one past the last integer once the interval reaches a
 /// full period, so callers narrow the interval first.
+///
+/// **The conversions below are safe because of the ORDER of the guards
+/// at the call sites**, and nothing in the type system holds that
+/// order. `sin`, `cos` and `tan` each ask `phaseResolvable` before they
+/// get here, and that one test rejects a non-finite endpoint as
+/// surely as a large one: every IEEE comparison against NaN is false,
+/// and `inf <= phase_limit` is false too, so NaN and both infinities
+/// leave through it and no quotient is ever formed from one.
+///
+/// The width guard after it does NOT do this: the width of an interval
+/// with a NaN endpoint is NaN, and `NaN >= 2*pi` is false, so an
+/// interval reaching here carrying NaN would have a NaN converted and
+/// would trap. An `Interval` written by struct literal is how one
+/// arrives, `lo` and `hi` being public fields. With both endpoints
+/// finite and within `phase_limit` the quotient is a finite f80 of
+/// magnitude at most 1e17/pi, and the `@ceil` and `@floor` of it are
+/// integers an i64 holds exactly.
+///
+/// Reordering the two guards at any of the three call sites would make
+/// this a real trap, and `zbc` reports `intfromfloat-without-clamp` on
+/// both lines because it cannot see the caller.
 fn criticalRange(lo: f64, hi: f64, offset: f80) CriticalRange {
     return .{
         .first = @intFromFloat(@ceil(quotientLo(lo, offset))),

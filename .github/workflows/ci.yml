@@ -5,9 +5,11 @@
 # expensive to evaluate at comptime; bench/bench_vec.zig generates its whole
 # input table at comptime, so the benchmark stopped compiling on Zig's default
 # comptime branch quota. Nothing noticed for a working session, because
-# `zig build test` does not build the benchmarks (build.zig:371-375 says so and
-# means it) and because nothing ran automatically. The `bench` job below is the
-# fix; the other four jobs are the gate that was already true by hand.
+# `zig build test` does not build the benchmarks (nothing in build.zig makes
+# `test_step`, or the install step, depend on `bench_step`, and the comment
+# beside `bench_step` says so) and because nothing ran automatically. The
+# `bench` job below is the fix; the other four jobs are the gate that was
+# already true by hand.
 #
 # The benchmarks matter more than a step name suggests: build.zig.zon:73-81
 # lists the files a published copy of this package carries, and the `bench/`
@@ -117,23 +119,36 @@ jobs:
 
       - name: zig build test -Doptimize=${{ matrix.optimize }}
         run: |
-          # The NaN-trap probe ABORTS by design: `zig build test` spawns
+          # The NaN-trap probe ABORTS by design: the reproducers test spawns
           # tests/nan_probe.zig as a child process and reads its exit status
-          # (build.zig:149-153), and a SIGABRT otherwise leaves a core file in
-          # the workspace. The limit is `-c`, core-dump size, and it is set in
-          # THIS shell because that is where the child inherits it from. It is
-          # deliberately not `-v`: docs/performance-handover.md:328-333 records
-          # that a `ulimit -v` around `zig build` is wrong, because the compiler
-          # inherits it and dies with error:OutOfMemory before a single
-          # benchmark row runs.
+          # (build.zig builds `nan_probe` as its own executable and passes its
+          # emitted path to that test in `nan_probe_options` as `probe_path`),
+          # and a SIGABRT otherwise leaves a core file in the workspace. The
+          # limit is `-c`, core-dump size, and it is set in THIS shell because
+          # that is where the child inherits it from. It is deliberately not
+          # `-v`, and docs/performance-handover.md records why under "What not
+          # to do": a `ulimit -v` around `zig build` is wrong, because the
+          # compiler inherits it and dies with error:OutOfMemory before a
+          # single benchmark row runs.
           ulimit -c 0
-          # The nested consumer build is not parameterised by this flag;
-          # build.zig:278 pins it to ReleaseSafe itself and build.zig:283 hangs
-          # it off `test`, so all four modes build the fixture the same way.
-          # That is left as it is: the fixture is a real external package under
-          # fixture/ with its own relative cache directories (build.zig:270-279),
-          # and flattening them into the parent's would delete the containment
-          # those flags exist for.
+          # The nested consumer build is not parameterised by this flag:
+          # `run_consumer` in build.zig passes -Doptimize=ReleaseSafe itself
+          # and `test_step` depends on that step, so all four modes build the
+          # fixture the same way. That is left as it is: the fixture is a real
+          # external package under fixture/ and still runs with setCwd on that
+          # directory, and what keeps its caches out of the machine-wide global
+          # cache is that it gets two cache directories of its own, both
+          # ABSOLUTE, named by `consumerCacheRoot`. They are a parent local-cache
+          # root with two CHILD names appended - never the parent's own cache or
+          # global-cache directory - so flattening them into the parent's would
+          # delete the containment those flags exist for. Which root that is:
+          # a per-user directory on a local volume where the runner has one, and
+          # otherwise the cache directory this job's own `zig build` was given,
+          # which with no --cache-dir passed is the .zig-cache the restore step
+          # above keeps. The only thing this step still writes inside fixture/
+          # is fixture/zig-out, where the child installs - it gets no --prefix -
+          # and the recursive `fixture` entry in `.paths` covers that directory
+          # as well, which is why `.gitignore` already lists it.
           zig build test -Doptimize=${{ matrix.optimize }}
 
   # ------------------------------------------------------------- benchmarks --
@@ -144,9 +159,11 @@ jobs:
     name: bench (compile gate)
     runs-on: ubuntu-latest
     # Generous, because the LP benchmark is the slow one. The bound that
-    # matters is a row count, not a wall clock: bench/bench_lp.zig:160 caps
-    # every elimination this file drives at 20,000 predicted rows, which is the
-    # guard standing between a size mistake and a 329 GB incident.
+    # matters is a row count, not a wall clock: `row_budget` in
+    # bench/bench_lp.zig caps every elimination this file drives at 20,000
+    # predicted rows, and `requireRowBudget` is what checks each round against
+    # it before the round runs. That is the guard standing between a size
+    # mistake and a 329 GB incident.
     timeout-minutes: 30
     steps:
       - name: Install Zig ${{ env.ZIG_VERSION }}
@@ -172,8 +189,11 @@ jobs:
           key: zig-${{ env.ZIG_VERSION }}-${{ runner.os }}-${{ runner.arch }}-bench-${{ hashFiles('build.zig', 'build.zig.zon', 'src/**') }}
 
       # Three executables, four step names, and naming the three covers the
-      # fourth. build.zig:376-382 hangs the combined `bench` step on the same
-      # three run steps that build.zig:397-404 names individually, so `bench`
+      # fourth. In build.zig the combined `bench_step` depends on the same
+      # three run steps - `run_bench_scalar`, `run_bench_vec` and
+      # `run_bench_lp` - and `bench_scalar_step`, `bench_vec_step` and
+      # `bench_lp_step`, the three step names below, are pure aliases of those
+      # same three, so `bench`
       # is their union and adds no compilation of its own. They are run one at
       # a time rather than through `zig build bench` for two reasons: a failure
       # names the benchmark that produced it, and peak memory is one benchmark
@@ -184,12 +204,16 @@ jobs:
       # Nothing here asserts on a number. A benchmark off a contended runner is
       # a measurement, not a gate, and a threshold on one would be flaky and
       # wrong. The step's exit status is the only thing read, and it is a real
-      # signal: bench/bench_lp.zig:352-360 trips a non-zero exit through the row
-      # budget rather than an OOM kill, so the guard survives into CI.
+      # signal: `requireRowBudget` in bench/bench_lp.zig names the trip
+      # through `tripReport` and then leaves through `trap`, so exceeding the
+      # budget is a non-zero exit rather than an OOM kill, and the guard
+      # survives into CI.
       #
       # `-Doptimize` is not passed and does not need to be. The three benchmark
-      # root modules pin ReleaseFast themselves (build.zig:332-360) and a
-      # compilation takes its mode from its root module (build.zig:302-321), so
+      # root modules pin ReleaseFast themselves - build.zig gives each of the
+      # three `b.createModule` roots `.optimize = .ReleaseFast` - and a
+      # compilation takes its mode from its root module, which is the rule
+      # build.zig states in the benchmark comment above `bench_scalar`, so
       # the library inside these binaries is ReleaseFast whatever the parent
       # step asks for. Passing it would look like it mattered.
       - name: bench-scalar
@@ -276,8 +300,9 @@ jobs:
   # or an alignment assumption gets caught - and it is not a runtime check.
   #
   # ReleaseSafe, not Debug: it is the mode the consumer fixture builds
-  # (build.zig:278) and the mode a real consumer gets, and the checked modes
-  # are already covered natively by the four-way matrix in the `test` job.
+  # (`run_consumer` in build.zig passes -Doptimize=ReleaseSafe itself), and
+  # the mode a real consumer gets. The checked modes are already covered
+  # natively by the four-way matrix in the `test` job.
   #
   # WHY THE FOREIGN TESTS ARE NOT RUN BY HAND HERE, since a Linux runner
   # could execute those binaries under QEMU and this build can be told to
@@ -458,7 +483,9 @@ jobs:
 
   # ------------------------------------------------------------------ docs --
   # `zig build docs` installs the library's emitted doc comments into
-  # zig-out/docs (build.zig:285-291). It is the only job that PARSES every
+  # zig-out/docs (in build.zig, `docs_step` depends on `install_docs`, the
+  # `addInstallDirectory` that installs `lib.getEmittedDocs()` under `.prefix`
+  # with `install_subdir = "docs"`). It is the only job that PARSES every
   # doc comment in src/, so a malformed `///` block fails here and nowhere
   # else - a class of break the compiler will not report to a job that only
   # links the library. No cache: the artifact is a few hundred kilobytes of
@@ -523,9 +550,33 @@ jobs:
 # declares no dependencies and fixture/build.zig.zon:6-8 takes this package by
 # path, so nothing is ever fetched and the global cache holds nothing this
 # build would reuse. The nested consumer build under fixture/ is left alone for
-# the same reason its own flags are: build.zig:270-279 gives it relative cache
-# directories so that its output lands in fixture/.zig-cache and goes away with
-# it, and a cache entry that spanned both would be asserting a sharing this
-# build deliberately does not have. Where a key's precision was in doubt the
-# answer here was to leave the cache out, not to widen the key until it looked
-# precise.
+# the same reason its own flags are: `consumerCacheRoot` in build.zig gives it
+# two cache directories of its own rather than the machine-wide global cache,
+# and where they land is that function's decision - outside the repository on a
+# host with a sanctioned local volume, and otherwise under the local cache root
+# THIS build was itself given. The second case is the test job's, and there the
+# result is CORRECT for three reasons, each a property of this cache rather
+# than of luck: the local cache is content-addressed, so a restored manifest is
+# used only when every input hashes the same; every key in this file already
+# hashes build.zig, so a change to the resolver invalidates that entry
+# outright; and the bench and cross jobs never run the consumer step at all, so
+# no key here has two writers of it.
+#
+# It is NOT free, and calling that case harmless was wrong. On a runner the
+# third candidate is `.zig-cache` - the cache directory this job's own `zig
+# build` was given - with `zig-interval-consumer` and
+# `zig-interval-consumer-global` appended, so both child caches sit inside the
+# `path: .zig-cache` this job's cache action archives: the test entry now
+# carries the consumer build's output too. Correct is not the same as free.
+# The only size evidence here is dated - that same nested build's local cache
+# measured 163 MB when it was captured and 1014 MB at its worst, back when it
+# lived at `fixture/.zig-cache` - and no figure in this file is a measurement
+# taken on a runner. If that size is ever worth spending, the lever is this
+# job's cache path or ZIG_INTERVAL_CONSUMER_CACHE on the runner, never the key:
+# a key names WHICH entry, and every entry over this path already names the
+# same two directories.
+#
+# The containment at stake was always the GLOBAL one, and that still holds.
+#
+# Where a key's precision was in doubt the answer here was to leave the cache
+# out, not to widen the key until it looked precise.

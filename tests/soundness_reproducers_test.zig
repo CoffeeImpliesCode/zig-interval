@@ -35,6 +35,7 @@ const inf64 = shared.inf64;
 const lowerOk = shared.lowerOk;
 const neg_inf64 = shared.neg_inf64;
 const quotientHolds = shared.quotientHolds;
+const reportErr = shared.reportErr;
 const showInterval = shared.showInterval;
 const sumGeq = shared.sumGeq;
 const sumLeq = shared.sumLeq;
@@ -152,7 +153,7 @@ test "guard: an overflowed corner is not the true extremum, so its bound is pull
 
     const saturating = Interval.init(-inf64, -std.math.floatMax(f64));
     const saturating_ok = lowerOk(want.lo, saturating.lo) and upperOk(want.hi, saturating.hi);
-    std.debug.print("\n  guard (saturating step, [-inf, -floatMax]): -> {s}\n", .{
+    reportErr("\n  guard (saturating step, [-inf, -floatMax]): -> {s}\n", .{
         if (saturating_ok) "ENCLOSES the true -1e600" else "does NOT enclose it",
     });
     try std.testing.expect(saturating_ok);
@@ -166,7 +167,7 @@ test "guard: an overflowed corner is not the true extremum, so its bound is pull
     // literal is the documented way to hold a non-canonical one.
     const collapsed: Interval = .{ .lo = neg_inf64, .hi = neg_inf64 };
     const collapsed_ok = lowerOk(want.lo, collapsed.lo) and upperOk(want.hi, collapsed.hi);
-    std.debug.print("  guard (non-strict step, [-inf, -inf]): -> {s}\n", .{
+    reportErr("  guard (non-strict step, [-inf, -inf]): -> {s}\n", .{
         if (collapsed_ok) "ENCLOSES the true -1e600" else "does NOT enclose it",
     });
     try std.testing.expect(!collapsed_ok);
@@ -201,10 +202,10 @@ test "reproducer 1: mul underflow to a signed zero - the lost corner is outside 
     const audit_case = Interval.init(-1e-200, -1e-200).mul(Interval.init(1e-200, 1e-200));
     const audit_exact = exactMul(Interval.init(-1e-200, -1e-200), Interval.init(1e-200, 1e-200));
     const audit_ok = lowerOk(audit_exact.lo, audit_case.lo) and upperOk(audit_exact.hi, audit_case.hi);
-    std.debug.print("\n  reproducer 1a (literal audit case): exact image [{e}, {e}] -> {s}\n", .{
+    reportErr("\n  reproducer 1a (literal audit case): exact image [{e}, {e}] -> {s}\n", .{
         audit_exact.lo, audit_exact.hi, if (audit_ok) "ENCLOSED" else "NOT ENCLOSED",
     });
-    std.debug.print("    returned =\n", .{});
+    reportErr("    returned =\n", .{});
     showInterval(audit_case);
 
     const got = positive.mul(mixed);
@@ -263,20 +264,20 @@ test "guard: an overflowed quotient is not the true extremum either" {
     const b = Interval.init(1e-300, 1e-300);
     const got = a.div(b);
     if (!quotientHolds(a.lo, b.lo, got)) {
-        std.debug.print("\n  UNSOUND: div overflow does not enclose the true 1e600\n", .{});
-        std.debug.print("    returned =\n", .{});
+        reportErr("\n  UNSOUND: div overflow does not enclose the true 1e600\n", .{});
+        reportErr("    returned =\n", .{});
         showInterval(got);
-        std.debug.print("    exact quotient {e} / {e} = about {e}\n", .{ a.lo, b.lo, ex(a.lo) / ex(b.lo) });
+        reportErr("    exact quotient {e} / {e} = about {e}\n", .{ a.lo, b.lo, ex(a.lo) / ex(b.lo) });
         return error.NotAnEnclosure;
     }
 
     const tiny = Interval.init(1e-320, 1e-320);
     const recip_got = tiny.recip();
     if (!quotientHolds(1.0, tiny.lo, recip_got)) {
-        std.debug.print("\n  UNSOUND: recip overflow does not enclose the true 1e320\n", .{});
-        std.debug.print("    returned =\n", .{});
+        reportErr("\n  UNSOUND: recip overflow does not enclose the true 1e320\n", .{});
+        reportErr("    returned =\n", .{});
         showInterval(recip_got);
-        std.debug.print("    exact quotient 1 / {e} = about {e}\n", .{ tiny.lo, 1.0 / ex(tiny.lo) });
+        reportErr("    exact quotient 1 / {e} = about {e}\n", .{ tiny.lo, 1.0 / ex(tiny.lo) });
         return error.NotAnEnclosure;
     }
 }
@@ -291,10 +292,10 @@ test "reproducer 4: div underflow to a signed zero" {
     const b = Interval.init(1e200, 1e200);
     const got = a.div(b);
     if (quotientHolds(a.hi, b.lo, got)) return;
-    std.debug.print("\n  UNSOUND: div underflow excludes the true +1e-400\n", .{});
-    std.debug.print("    returned =\n", .{});
+    reportErr("\n  UNSOUND: div underflow excludes the true +1e-400\n", .{});
+    reportErr("    returned =\n", .{});
     showInterval(got);
-    std.debug.print("    exact quotient {e} / {e} = about {e}\n", .{ a.hi, b.lo, ex(a.hi) / ex(b.lo) });
+    reportErr("    exact quotient {e} / {e} = about {e}\n", .{ a.hi, b.lo, ex(a.hi) / ex(b.lo) });
     return error.NotAnEnclosure;
 }
 
@@ -308,14 +309,14 @@ test "reproducer 5: recip underflow" {
     // is on the record.
     const audit = Interval.init(1e300, 1e300).recip();
     const audit_ok = quotientHolds(1.0, 1e300, audit);
-    std.debug.print("\n  reproducer 5a (1/1e300): -> {s}\n", .{if (audit_ok) "ENCLOSED" else "NOT ENCLOSED"});
+    reportErr("\n  reproducer 5a (1/1e300): -> {s}\n", .{if (audit_ok) "ENCLOSED" else "NOT ENCLOSED"});
     try std.testing.expect(audit_ok);
 
     const huge = Interval.init(1.7e308, 1.7e308);
     const got = huge.recip();
     if (quotientHolds(1.0, huge.lo, got)) return;
-    std.debug.print("\n  UNSOUND: recip underflow excludes the true 1/1.7e308\n", .{});
-    std.debug.print("    returned =\n", .{});
+    reportErr("\n  UNSOUND: recip underflow excludes the true 1/1.7e308\n", .{});
+    reportErr("    returned =\n", .{});
     showInterval(got);
     return error.NotAnEnclosure;
 }
@@ -508,6 +509,13 @@ test "the certain comparisons on the four geometric classes" {
 /// tests with it, and the exit status is the only signal that survives.
 const nan_probe = @import("nan_probe_options");
 
+/// The optional runner the build may hand this test so the probe executes
+/// under a cross target's user-mode emulation. It is named here beside
+/// `nan_probe` rather than imported inline at the one call site that reads
+/// it, because both are build options and a reader comparing them should not
+/// have to find one of them written into a function body.
+const probe_runner_options = @import("probe_runner_options");
+
 /// The operations the NaN contract names. The test walks this list and not
 /// the probe's own, so that an operation the probe fails to dispatch shows
 /// up as a failed control below rather than as a pass that quietly has an
@@ -548,7 +556,7 @@ const ProbeVerdict = struct {
 /// verdict: a probe that cannot be spawned has reported nothing about the
 /// library, and turning that into "it died" would be the vacuous pass.
 fn runProbe(op: []const u8, value: []const u8) !ProbeVerdict {
-    const runner = @import("probe_runner_options").runner;
+    const runner = probe_runner_options.runner;
     const argv = [_][]const u8{ runner orelse "", nan_probe.probe_path, op, value };
     var child = try std.process.spawn(std.testing.io, .{
         .argv = if (runner == null) argv[1..] else &argv,
@@ -571,9 +579,9 @@ fn runProbe(op: []const u8, value: []const u8) !ProbeVerdict {
 /// did about it.
 fn reportVerdict(row: []const u8, op: []const u8, value: []const u8, v: ProbeVerdict) void {
     if (v.code) |code| {
-        std.debug.print("    {s} {s} with {s} -> exit code {d}\n", .{ row, op, value, code });
+        reportErr("    {s} {s} with {s} -> exit code {d}\n", .{ row, op, value, code });
     } else {
-        std.debug.print("    {s} {s} with {s} -> died with no exit code\n", .{ row, op, value });
+        reportErr("    {s} {s} with {s} -> died with no exit code\n", .{ row, op, value });
     }
 }
 
@@ -586,7 +594,7 @@ test "contract: a NaN scalar traps in every operation named, and in no other" {
     var verdicts: [nan_ops.len]ProbeVerdict = undefined;
     var controls: [nan_ops.len]ProbeVerdict = undefined;
 
-    std.debug.print("\n  NaN scalar, observed as a child process:\n", .{});
+    reportErr("\n  NaN scalar, observed as a child process:\n", .{});
     for (nan_ops, 0..) |op, i| {
         controls[i] = try runProbe(op, control_value);
         verdicts[i] = try runProbe(op, nan_value);
@@ -605,7 +613,7 @@ test "contract: a NaN scalar traps in every operation named, and in no other" {
         if (v.died) trapped += 1 else survived += 1;
         if (c.died) control_failed += 1;
     }
-    std.debug.print("    -> {d} of {d} operations trapped on the NaN, {d} well-formed controls failed\n", .{
+    reportErr("    -> {d} of {d} operations trapped on the NaN, {d} well-formed controls failed\n", .{
         trapped,
         nan_ops.len,
         control_failed,

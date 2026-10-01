@@ -55,8 +55,31 @@ const Row = struct {
     exponent: i32,
 };
 
+/// One line of this tier's report, written RAW to the process's stderr.
+///
+/// The same choice the oracle's own report writer makes, and for the same
+/// reason: these bytes are what a reader reads a corpus failure out of, and
+/// `std.log` would put a level and a timestamp in front of every one of
+/// them. The writer is this file's own rather than the oracle's because this
+/// tier is the one reference in the tree that was NOT written in the tree,
+/// and ten lines of writer are a cheaper thing to repeat than the
+/// independence is.
+fn reportErr(comptime fmt: []const u8, args: anytype) void {
+    var buf: [512]u8 = undefined;
+    const failed = blk: {
+        const stderr = std.debug.lockStderr(&buf);
+        defer std.debug.unlockStderr();
+        stderr.file_writer.interface.print(fmt, args) catch break :blk true;
+        stderr.file_writer.interface.flush() catch break :blk true;
+        break :blk false;
+    };
+    if (failed) {
+        std.debug.panic("the corpus report could not be written to stderr", .{});
+    }
+}
+
 fn fail(comptime fmt: []const u8, args: anytype) error{CorpusViolation} {
-    std.debug.print(fmt, args);
+    reportErr(fmt, args);
     return error.CorpusViolation;
 }
 
@@ -89,7 +112,7 @@ fn parseRow(line: []const u8) !?Row {
     var exponent: i32 = 0;
     if (exp_hex) |e| exponent = try std.fmt.parseInt(i32, e, 10);
 
-    return Row{
+    return .{
         .op = op,
         .lo = f64FromBits(patterns[0]),
         .hi = f64FromBits(patterns[1]),
@@ -154,7 +177,10 @@ test "corpus: every operation's answers contain an independently certified brack
             failures += 1;
             if (shown < 12) {
                 shown += 1;
-                std.debug.print("  REFUSED {s}({e}, {e}) — the corpus says its image is real\n", .{ row.op, row.lo, row.hi });
+                reportErr(
+                    "  REFUSED {s}({e}, {e}) — the corpus says its image is real\n",
+                    .{ row.op, row.lo, row.hi },
+                );
             }
             continue;
         };
@@ -167,8 +193,11 @@ test "corpus: every operation's answers contain an independently certified brack
             failures += 1;
             if (shown < 12) {
                 shown += 1;
-                std.debug.print("  NOT CONTAINED {s}({e}, {e}) [ternary {d}]\n", .{ row.op, row.lo, row.hi, row.ternary });
-                std.debug.print("    library [{e}, {e}] does not contain the certified [{e}, {e}]\n", .{ got.lo, got.hi, row.want_lo, row.want_hi });
+                reportErr("  NOT CONTAINED {s}({e}, {e}) [ternary {d}]\n", .{ row.op, row.lo, row.hi, row.ternary });
+                reportErr(
+                    "    library [{e}, {e}] does not contain the certified [{e}, {e}]\n",
+                    .{ got.lo, got.hi, row.want_lo, row.want_hi },
+                );
             }
             continue;
         }
@@ -176,7 +205,10 @@ test "corpus: every operation's answers contain an independently certified brack
         if (row.ternary == 0) exact_rows += 1;
     }
 
-    std.debug.print("  corpus: {d} rows checked, {d} FAILED, {d} of them exactly representable\n", .{ checked, failures, exact_rows });
+    reportErr(
+        "  corpus: {d} rows checked, {d} FAILED, {d} of them exactly representable\n",
+        .{ checked, failures, exact_rows },
+    );
     if (checked == 0) return fail("corpus tier ran zero rows: a corpus that checks nothing proves nothing", .{});
     // Every operation the oracle did not already judge must be present, or the
     // corpus has silently lost the tier it was built for.
@@ -219,11 +251,17 @@ test "reproducer 3: powf's fixed relative margin does not grow with the exponent
         got = ext.powf(Interval.init(base, base), Interval.init(expo, expo)) orelse
             return error.CorpusViolation;
         if (!(got.lo <= row.want_lo and got.hi >= row.want_hi)) {
-            std.debug.print("  powf reproducer FAILED\n", .{});
-            std.debug.print("    library [{e}, {e}] does not contain the certified [{e}, {e}]\n", .{ got.lo, got.hi, row.want_lo, row.want_hi });
+            reportErr("  powf reproducer FAILED\n", .{});
+            reportErr(
+                "    library [{e}, {e}] does not contain the certified [{e}, {e}]\n",
+                .{ got.lo, got.hi, row.want_lo, row.want_hi },
+            );
             return error.CorpusViolation;
         }
-        std.debug.print("  powf reproducer: library [{e}, {e}] contains the certified [{e}, {e}]\n", .{ got.lo, got.hi, row.want_lo, row.want_hi });
+        reportErr(
+            "  powf reproducer: library [{e}, {e}] contains the certified [{e}, {e}]\n",
+            .{ got.lo, got.hi, row.want_lo, row.want_hi },
+        );
         break;
     }
     // A reproducer that silently stopped finding its row would pass forever.
@@ -241,6 +279,6 @@ test "reproducer 3: powf's fixed relative margin does not grow with the exponent
     // tightening by that much changes nothing. The relative width below is
     // what a tightened reference would have been testing.
     const rel_width = (got.hi - got.lo) / @max(got.hi, 1e-300);
-    std.debug.print("  powf reproducer: relative width {e}\n", .{rel_width});
+    reportErr("  powf reproducer: relative width {e}\n", .{rel_width});
     try std.testing.expect(rel_width < 1e-14);
 }

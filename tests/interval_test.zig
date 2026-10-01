@@ -9,6 +9,17 @@ fn expectOrdered(i: Interval) !void {
     try std.testing.expect(i.lo <= i.hi);
 }
 
+/// An answer the operation under test was required to produce.
+///
+/// Every call site below has already established that the two intervals
+/// overlap, or that the slice is not empty, so a null one is a failure of
+/// the property under test rather than an oversight at the call. Naming it
+/// as an error says which property failed, where a trap on `?` says only
+/// that an unwrap did.
+fn answer(x: ?Interval) !Interval {
+    return x orelse error.NoAnswer;
+}
+
 test "contains: endpoint-inclusive membership" {
     const i = Interval.init(1.0, 3.0);
     try std.testing.expect(i.contains(1.0));
@@ -34,7 +45,7 @@ test "union: smallest interval covering both" {
 test "intersect: overlapping core" {
     const a = Interval.init(1.0, 3.0);
     const b = Interval.init(2.0, 5.0);
-    const x = a.intersect(b).?;
+    const x = try answer(a.intersect(b));
     try std.testing.expectEqual(@as(f64, 2.0), x.lo);
     try std.testing.expectEqual(@as(f64, 3.0), x.hi);
 }
@@ -42,7 +53,7 @@ test "intersect: overlapping core" {
 test "intersect: touching endpoints overlap at a point" {
     const a = Interval.init(0.0, 2.0);
     const b = Interval.init(2.0, 4.0);
-    const x = a.intersect(b).?;
+    const x = try answer(a.intersect(b));
     try std.testing.expectEqual(@as(f64, 2.0), x.lo);
     try std.testing.expectEqual(@as(f64, 2.0), x.hi);
 }
@@ -260,7 +271,7 @@ test "hullOf: empty slice returns null" {
 
 test "hullOf: single input returns that interval" {
     const items = [_]Interval{Interval.init(2.0, 5.0)};
-    const h = Interval.hullOf(&items).?;
+    const h = try answer(Interval.hullOf(&items));
     try std.testing.expectEqual(@as(f64, 2.0), h.lo);
     try std.testing.expectEqual(@as(f64, 5.0), h.hi);
 }
@@ -271,7 +282,7 @@ test "hullOf: spans min lo and max hi across inputs" {
         Interval.init(1.0, 3.0),
         Interval.init(2.0, 9.0),
     };
-    const h = Interval.hullOf(&items).?;
+    const h = try answer(Interval.hullOf(&items));
     try std.testing.expectEqual(@as(f64, 1.0), h.lo);
     try std.testing.expectEqual(@as(f64, 9.0), h.hi);
 }
@@ -283,7 +294,7 @@ test "intersectionOf: empty slice returns null" {
 
 test "intersectionOf: single input returns that interval" {
     const items = [_]Interval{Interval.init(2.0, 5.0)};
-    const x = Interval.intersectionOf(&items).?;
+    const x = try answer(Interval.intersectionOf(&items));
     try std.testing.expectEqual(@as(f64, 2.0), x.lo);
     try std.testing.expectEqual(@as(f64, 5.0), x.hi);
 }
@@ -294,7 +305,7 @@ test "intersectionOf: common core of overlapping inputs" {
         Interval.init(2.0, 6.0),
         Interval.init(3.0, 4.0),
     };
-    const x = Interval.intersectionOf(&items).?;
+    const x = try answer(Interval.intersectionOf(&items));
     try std.testing.expectEqual(@as(f64, 3.0), x.lo);
     try std.testing.expectEqual(@as(f64, 4.0), x.hi);
 }
@@ -312,7 +323,7 @@ test "intersectionOf: touching endpoints overlap at a point" {
         Interval.init(0.0, 2.0),
         Interval.init(2.0, 4.0),
     };
-    const x = Interval.intersectionOf(&items).?;
+    const x = try answer(Interval.intersectionOf(&items));
     try std.testing.expectEqual(@as(f64, 2.0), x.lo);
     try std.testing.expectEqual(@as(f64, 2.0), x.hi);
 }
@@ -340,9 +351,9 @@ test "invariant: every interval-returning operation yields lo <= hi" {
 
     try expectOrdered(base);
     try expectOrdered(base.hull(other));
-    try expectOrdered(Interval.hullOf(&items).?);
-    try expectOrdered(base.intersect(other).?);
-    try expectOrdered(Interval.intersectionOf(&items).?);
+    try expectOrdered(try answer(Interval.hullOf(&items)));
+    try expectOrdered(try answer(base.intersect(other)));
+    try expectOrdered(try answer(Interval.intersectionOf(&items)));
     try expectOrdered(base.translate(-5.0));
     try expectOrdered(base.scale(2.0));
     try expectOrdered(base.scale(-1.0));
@@ -358,7 +369,7 @@ test "invariant: every interval-returning operation yields lo <= hi" {
 /// it is rather than as a rounding of it, which is what lets a test state
 /// an extremum that no f64 holds.
 inline fn ex(x: f64) f128 {
-    return @as(f128, x);
+    return x;
 }
 
 /// Whether the exact real extremum of the expression under test is itself
@@ -1564,7 +1575,7 @@ test "overflow ray: the algebraic operations agree with the rays" {
     try std.testing.expect(hulled.lo == neg_inf and hulled.hi == inf);
     try std.testing.expect(pos.intersect(neg) == null);
     const items = [_]Interval{ pos, neg };
-    const hulled_of = Interval.hullOf(&items).?;
+    const hulled_of = try answer(Interval.hullOf(&items));
     try std.testing.expect(hulled_of.lo == neg_inf and hulled_of.hi == inf);
     try std.testing.expect(Interval.intersectionOf(&items) == null);
 }
@@ -1585,6 +1596,22 @@ const ext_names = [_][]const u8{
 /// from outside the package at all.
 const lp_names = [_][]const u8{ "System", "Lin", "Cmp", "Part", "Partition" };
 
+/// Write one line of failure output to stderr, in the raw format given.
+///
+/// This is the test's own report rather than a debug trace: `std.log`
+/// would put it behind a level a failing test never sets, and the bytes
+/// are what the message has always been. The lock keeps one report whole
+/// against another writer on the same stream, and the buffer is empty so
+/// the line goes to the stream as it is written rather than sitting in a
+/// stack slot a failing test is about to abandon. The error is returned
+/// rather than dropped: a stderr that cannot be written to is itself a
+/// failure worth surfacing instead of swallowing.
+fn reportFailure(comptime fmt: []const u8, args: anytype) !void {
+    const locked = std.debug.lockStderr(&.{});
+    defer std.debug.unlockStderr();
+    try locked.file_writer.interface.print(fmt, args);
+}
+
 /// Assert that the namespace `namespace` publishes exactly `expected`,
 /// naming the namespace `what` in the message when it does not.
 ///
@@ -1604,25 +1631,25 @@ const lp_names = [_][]const u8{ "System", "Lin", "Cmp", "Part", "Partition" };
 /// comptime-known name is what `@hasDecl` asks for, and a name reached
 /// through a slice is not comptime-known however comptime the slice is.
 fn expectExactDecls(
-    comptime what: []const u8,
     comptime namespace: type,
+    comptime what: []const u8,
     comptime expected: anytype,
 ) !void {
     const published = @typeInfo(namespace).@"struct".decls.len;
     if (published != expected.len) {
-        std.debug.print("{s} publishes {d} names, expected {d}:\n", .{
+        try reportFailure("{s} publishes {d} names, expected {d}:\n", .{
             what,
             published,
             expected.len,
         });
         for (@typeInfo(namespace).@"struct".decls) |d| {
-            std.debug.print("  {s}\n", .{d.name});
+            try reportFailure("  {s}\n", .{d.name});
         }
         return error.UnexpectedPublicNames;
     }
     inline for (expected) |want| {
         if (!@hasDecl(namespace, want)) {
-            std.debug.print("{s} does not publish {s}\n", .{ what, want });
+            try reportFailure("{s} does not publish {s}\n", .{ what, want });
             return error.MissingPublicName;
         }
     }
@@ -1725,8 +1752,8 @@ test "ext and lp publish exactly the enumerated names" {
     // `interval.ext` and `interval.lp` are struct types, and a type is
     // passed as itself: `@TypeOf` of either one answers `type`, which is
     // the type of the namespace rather than the namespace.
-    try expectExactDecls("ext", interval.ext, ext_names);
-    try expectExactDecls("lp", interval.lp, lp_names);
+    try expectExactDecls(interval.ext, "ext", ext_names);
+    try expectExactDecls(interval.lp, "lp", lp_names);
 
     // The other side of the same check, and why this is a test rather than
     // a comment: every name in both lists has to keep resolving, and

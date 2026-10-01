@@ -44,8 +44,15 @@
 # ---------------------------------------------------------------------------
 # HOW TO RUN IT ON THIS CHECKOUT
 # ---------------------------------------------------------------------------
-#   export PATH=/tmp/zigbin:$PATH        # real 0.16.0; the PATH `zig` is an anyzig shim
-#   ZIG=/tmp/zigbin/zig cross-test --output /tmp/cross-out
+#   export PATH=/home/tmp2/$USER/zigbin:$PATH   # real 0.16.0; PATH `zig` is an anyzig shim
+#   ZIG=/home/tmp2/$USER/zigbin/zig cross-test --output /home/tmp2/$USER/cross-out
+#
+# Both paths are on a large LOCAL volume, never /tmp. Rechnerbetriebsgruppe
+# (2026-10-01) asked that processes stop filling local /tmp and /var/tmp; on
+# buildhost /tmp is a 10 G local ext4 volume. `scripts/scratch.sh` resolves a
+# sanctioned location if you would rather not write it out - see the storage
+# note in docs/performance-handover.md for why /vol/tmp is deliberately not
+# used even though it exists on every buildhost.
 #
 # `--output` is not optional here: /nfs rejects `renameat2` with
 # EINVAL, so a Zig build cannot keep a cache on the network mount. cross-test
@@ -64,10 +71,10 @@
 # ---------------------------------------------------------------------------
 # This project's heaviest test takes 108 s NATIVELY on its own:
 # `test.Vec: distance is never below the true Euclidean distance` sweeps
-# 4,000,000 cases (`norm_cases`, tests/vector_test.zig:1673), and the whole
-# 55-test vector binary also reports 108 s, so essentially all of that is that
-# one loop. Natively it fits inside 300 s with room to spare. Under qemu_user
-# it does not, and the run then dies inside `zig build` with
+# 4,000,000 cases - the `norm_cases` constant in tests/vector_test.zig - and the
+# whole 55-test vector binary also reports 108 s, so essentially all of that is
+# that one loop. Natively it fits inside 300 s with room to spare. Under
+# qemu_user it does not, and the run then dies inside `zig build` with
 #
 #   error: 'vector_test.test.Vec: distance is never below the true Euclidean
 #          distance' timed out after 5m98.663ms
@@ -135,7 +142,7 @@ TARGETS=(
 #
 #   cross-test --targets 'x86_64-linux aarch64-linux riscv64-linux s390x-linux \
 #                       aarch64_be-linux powerpc64-linux mips64-linux ...' \
-#               --output /tmp/cross-out
+#               --output /home/tmp2/$USER/cross-out
 #
 # `cross-test --no-profile --list` prints every platform in the table with the
 # runner detected for it on this host, and is where those names come from. Note
