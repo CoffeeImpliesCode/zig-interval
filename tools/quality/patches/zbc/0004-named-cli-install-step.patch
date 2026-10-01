@@ -1,0 +1,71 @@
+# zbc: a named `cli` step that builds and installs the analyzer, without the
+#      default step's dogfood self-check.
+#
+# NOT a capture from a moving working copy. 0001 and 0002 are the verbatim local
+# captures and 0003 is authored; all three are left byte-for-byte untouched and
+# this patch is authored against the exact tree they produce.
+#
+# Base: upstream 419d153ca411d1698899992d86c51eb9a7e14919 + 0001 + 0002 + 0003.
+# Apply with: git -C <checkout> apply -p1 <this file>   AFTER 0001, 0002, 0003.
+# Author-recorded time: 2026-10-02T01:57Z. 0003 records a later time for
+# items 5-6. These header timestamps are retained, but do not establish
+# the order of authoring. The numbered patch series defines apply order.
+# source_digest: UNCHANGED at
+#   b794e308392834b79892e36078c49cfd74598f67b26e069cd47a864013e5e3d2
+#   This patch touches build.zig only, and the manifest's source_digest is a
+#   sha256 over src/**/*.zig, so no src byte changed and no digest moves.
+#
+# WHAT CHANGES. One line pair becomes three:
+#   -    b.installArtifact(exe);
+#   +    const install_exe = b.addInstallArtifact(exe, .{});
+#   +    b.getInstallStep().dependOn(&install_exe.step);
+#   +    b.step("cli", "Build and install the CLI").dependOn(&install_exe.step);
+# std/Build.zig:1660-1662 defines `installArtifact` as exactly
+#   b.getInstallStep().dependOn(&b.addInstallArtifact(artifact, .{}).step)
+# so the default step's dependency on the artifact install is byte-for-byte the
+# same graph as before, under a name this file can also hang a second step on.
+# `zig build cli` builds and installs the same `zig-out/bin/zbc` and runs nothing
+# else. Nothing else in build.zig is touched: the dogfood self-check
+# (`b.addRunArtifact(exe)` + `addDirectoryArg(b.path("src/"))` +
+# `b.default_step.dependOn(&self_check.step)`), the `run`, `test` and `fuzz`
+# steps, and the `fuzz-zbc` install-artifact registration, are unchanged. The
+# `zbc` registration is not deleted, only written out: see WHAT CHANGES.
+#
+# WHY IT IS NOT THE INSTALL STEP. b.default_step is `&b.install_tls.step`
+# (std/Build.zig:324), i.e. the default step IS the install step. A step that
+# depended on the default step would drag the dogfood with it, so the named step
+# depends on the install ARTIFACT step directly and never on default_step.
+#
+# WHAT THIS DOES NOT CLAIM. `zig build cli` succeeding says the pinned tree
+# compiles, links and installs; it says nothing about the analyzer finding
+# nothing. The default `zig build` on this tree still FAILS, and still should:
+# 0003 item 6 records `zbc: selected=153 analyzed=153 failed=0 findings=75` and
+# main.zig exits 1 on any finding at any severity, so the dogfood self-check
+# cannot pass. This patch does not suppress, re-severitise or exclude a single
+# finding to make that true, and `cli` is not a self-lint gate in disguise.
+#
+# Separately: the project gate runs all four analyzers over the project and
+# treats ERROR findings as failures, which is enforced by that gate and not by
+# this build file. The one reviewed advisory
+# (intfromfloat_without_clamp, .warning) stays .warning.
+diff --git a/build.zig b/build.zig
+index 53b3f2a..eb3bb7e 100644
+--- a/build.zig
++++ b/build.zig
+@@ -54,7 +54,15 @@ pub fn build(b: *std.Build) void {
+     });
+ 
+     exe_mod.link_libc = true; // project_cache.zig uses std.c.realpath on non-absolute paths
+-    b.installArtifact(exe);
++    // ── CLI artifact install ───────────────────────────────
++    // `cli` builds and installs the analyzer and nothing else. The install
++    // step keeps its dependency on the artifact, so the default step still
++    // installs it; `cli` does not depend on the default step, which is an
++    // alias for the install step and so cannot express "install only". The
++    // dogfood self-check below is untouched and still on the default step.
++    const install_exe = b.addInstallArtifact(exe, .{});
++    b.getInstallStep().dependOn(&install_exe.step);
++    b.step("cli", "Build and install the CLI").dependOn(&install_exe.step);
+ 
+     // ── Dogfood: self-check on every `zig build` ────────────
+     const self_check = b.addRunArtifact(exe);

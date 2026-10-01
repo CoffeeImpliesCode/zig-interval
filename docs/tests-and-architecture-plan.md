@@ -38,10 +38,25 @@ verified output.
 **Where the 56 comes from, so it is counted rather than inherited.** 28
 operations are methods on `Interval` in `src/interval.zig`, 28 are free
 functions in `src/interval_ext.zig`, and `28 + 28 = 56`. The `Op` enum in
-`tests/soundness_shared.zig:1467-1502` names **35** of them; the other **21** are
-the T4 list. `35 + 21 = 56`. Both figures are counted from the tree, and a document that
-restates them without counting them is how the 34-of-55 figure in an earlier
-draft of this file survived.
+`tests/soundness_shared.zig` names **35** of them — all 28 of the audit-set
+methods, plus `floor`, `ceil`, `trunc`, `round`, `sqrt`, `cbrt` and `tanh` — and
+the other **21** are the corpus labels (T4). `35 + 21 = 56`. Both figures are
+counted from the tree, and a document that restates them without counting them
+is how the 34-of-55 figure in an earlier draft of this file survived.
+
+**The 56 is the AUDIT'S set, and the tree publishes three more.** `Interval.halve`
+(A9) and `Interval.signOf` and `Interval.zeroSplit` (A3) were made public after
+that count was taken, so `src/interval.zig` now publishes 31 operations besides
+the `init` constructor, against `src/interval_ext.zig`'s 28 free functions.
+None of the three is in `Op` and none is
+judged by the corpus tier either, and they do not need to be: `signOf` and
+`zeroSplit` are the classifier the 35 in-tree operations read rather than
+operations they judge, and `halve` is pinned by the subset sweep in
+`tests/interval_test.zig` against `div` by two. **So neither tier's "covered"
+means "proved for every input".** Each asserts containment on drawn and named
+cases — random streams plus the directed frontier shapes for the oracle, a
+committed corpus of 1886 rows for the other tier — and every claim below is
+written to that limit.
 
 One change since the last four-mode run, and it is the reason section 2 exists:
 the elementary functions widen **three** ULP outward rather than two. The width
@@ -294,8 +309,11 @@ survived as long as it did: **`tanh` was one of the 22 operations with no
 containment oracle at all** when the defect was found. Nothing in the tree was
 checking it. The `lo <= hi` invariant sweep in `tests/interval_ext_test.zig`
 calls `tanh` and passes, because `lo <= hi` says nothing about whether the truth
-is inside. It is covered now (§2.3); the other 21 uncovered operations are the
-same trap waiting for the same argument, and section 3, T4 is the work.
+is inside. It is covered now (§2.3), and so are the other 21: T4 answered them
+with the MPFR corpus rather than with a reference written in this tree, for the
+reason this section gives — a hand-written `f128` series is the second
+implementation that makes the trap fatal. The eight reference shapes in T4
+below are what would have been written next, and none of them was.
 
 ### 2.3 The reference and the tests that now hold this line
 
@@ -347,11 +365,16 @@ finer than the type is only sufficient if it is computed without cancellation.
 
 ---
 
-## 3. Ranked remaining test work
+## 3. Test work, ranked by what it catches
 
 Ranked by (defect class caught) × (probability the defect recurs), not by cost.
-T1, T2 and T3 are **done** and keep their letters because the other two
-documents cite them; each says what it bought and what it left behind.
+**Every item here is resolved: T1 through T7 and T9 through T10 are DONE, and T8
+is MOSTLY DONE** with the one half it never had, and the reason it does not need,
+recorded in its own entry. They keep their letters because the other two documents
+cite them; each says what it bought and what it left behind. Where an entry
+describes work that was specified and then **not** done — a hand-written `f128`
+series per operation, most of it — that part is labelled as history and is not a
+work list.
 
 ### T1 — DONE: `width` and `distanceTo` are judged as VALUES
 
@@ -450,14 +473,16 @@ consumer-visible containment plus canonical-input regression, not bit patterns:
 the test that asserted a degenerate infinite box is a point rather than a ray
 was **deleted** rather than re-pinned, because under this contract that shape is
 unreachable through `init` and pinning it would pin the representation instead of
-the behaviour. **The sweep is not green yet**, and the failures are in the
-oracle's own references in `tests/soundness_shared.zig` and
-`tests/soundness_frontier_test.zig` rather than in `src/`: a one-sided
-`reaches zero` quotient test used two-sidedly on `div` and `recip`, the same
-shape of error on `abs` and `sqr`, a zero-factor collapse skipped on
-`mul` when the other end is a ray, and an inverted sign in the `-inf` margin
-reference for `expand`. Judging rather than withholding is what exposed them.
-Per-operation tallies are read from a run rather than recorded here.
+the behaviour. **The sweep is green.** What it took to get there was the five
+defects in the oracle's OWN references — in `tests/soundness_shared.zig` and
+`tests/soundness_frontier_test.zig`, never in `src/` — and they are listed one by
+one in P8 of `docs/next-work-plan.md`: a one-sided `reaches zero` quotient test
+used two-sidedly on `div` and `recip`, the same shape of error on `abs` and `sqr`,
+a zero-factor collapse skipped on `mul` when the other end is a ray, an inverted
+sign in the `-inf` margin reference for `expand`, and a `guard` row that P8 itself
+had made vacuous. All five are fixed, so this paragraph records what judging
+rather than withholding bought and not a state the tree is in. Per-operation
+tallies are read from a run rather than recorded here.
 
 **Fully finite frontier shapes sit beside the unbounded ones**, so `div`, `mul`,
 `hull` and `intersect` exercise finite corners next to infinite ones instead of
@@ -479,32 +504,38 @@ another operation inserted anywhere in the enum, so a count printed by one run
 keeps meaning against the next: adding a case must change the case, and adding
 an operation must not.
 
-**Why it was sequenced first.** T4 appends to that enum twenty-one times, and a
-re-key done afterwards would invalidate every measurement made in between. It
-is now the reason the numbers in this file and in the handover stay meaningful
-as T4 lands.
+**Why it was sequenced first.** T4 was going to append to that enum twenty-one
+times, and a re-key done afterwards would have invalidated every measurement made
+in between. It turned out not to be needed: the corpus tier lands OUT of tree, in
+`tests/corpus_test.zig` over a committed file, so no member was ever added to `Op`
+and every stream in this file and in the handover kept the cases it had. The re-key
+is what would have made that safe rather than lucky.
 
 ### T4 — DONE: 1886 independently certified rows, and 21 of the 24 labels are operations nothing else judges
 
 **Done.** `tests/corpus/elementary.txt` carries **1886** rows over **24**
 operation labels, and both figures are counted off the file rather than
 carried forward from the figure this entry used to print. Of the 24, **21** are
-the operations the in-tree oracle did not judge and `tanh` was the twenty-second
-and is done (§2.3); the other three — `sqrt`, `cbrt`, `tanh` — are already
-members of the `Op` enum (`tests/soundness_shared.zig:1499-1502`), so the
-corpus is a superset of the 21 rather than exactly it. `tests/corpus_test.zig`
-checks every row for containment. The reference is MPFR at 256 bits, called
-with a declared rounding direction, by `scripts/gen_corpus.c`; the corpus is
-committed rather than generated at test time. The rows grew twice since the
-entry was first written — 1654 at `076b3ca`, 1886 at `1fe118d` — and the
-figure in the heading is the one the file holds now: `grep -vc '^\s*#\|^\s*$'`
-over it, and `cut -d' ' -f1 | sort -u` for the labels.
+the operations the in-tree oracle does not judge; the other three — `sqrt`,
+`cbrt` and `tanh` — are already members of the `Op` enum in
+`tests/soundness_shared.zig`, so the corpus is a superset of the 21 rather than
+exactly it, and on those three it is external corroboration rather than new
+coverage. `tanh` also has the hand-written reference of §2.3, which is the one
+reference of its kind in the tree. `tests/corpus_test.zig` checks every row for
+containment. The reference is MPFR at 256 bits, called with a declared rounding
+direction, by `scripts/gen_corpus.c`; the corpus is committed rather than
+generated at test time. The rows grew twice after this entry was first written —
+1654, then 1886 — and the figure in the heading is the one the file holds now:
+`grep -vc '^\s*#\|^\s*$'` over it, and `cut -d' ' -f1 | sort -u` for the labels.
+(The two commit ids this line used to carry are from a history that has since
+been squashed and no longer resolve; the counts are what a reader needs, and they
+are recounted here.)
 
 **The exactness count, also recounted.** **427** rows carry MPFR's ternary `0`
-and are exactly representable; the same 427 is what the test counts as
-`exact_rows` (`tests/corpus_test.zig:176`) and prints beside the failure count
-at `:179`. The last recorded run read `1886 rows checked, 0 FAILED, 427 of
-them exactly representable`.
+and are exactly representable; the same 427 is what `tests/corpus_test.zig`
+counts in `exact_rows` and prints beside the failure count in its one report
+line. The last recorded run read `1886 rows checked, 0 FAILED, 427 of them
+exactly representable`.
 
 #### The blocker recorded here earlier was wrong, and the correction is the useful part
 
@@ -591,7 +622,7 @@ hex bounds. Committed, not generated at test time: a test that shells out to
 Python is not a gate, and a corpus nobody can read is not evidence.
 
 **How it is consumed.** `tests/corpus_test.zig` has a tier that reads each
-row, calls the library, and asserts `want_lo <= got.lo and got.hi <= want_hi`.
+row, calls the library, and asserts `got.lo <= want_lo and got.hi >= want_hi`.
 Containment of the certified bracket, which is the only sound direction.
 Tightness is NOT asserted — a corpus bounds correctness, not width, and a
 tightness claim is what §2.2 shows goes wrong.
@@ -600,6 +631,12 @@ tightness claim is what §2.2 shows goes wrong.
 `want_lo` by one `f64` ULP for one named operation; that operation must then
 report `FAILED`. A corpus that cannot be made to fail proves nothing, and this
 is the standard the frontier sweep and the `f128` bounds in §2.3 were held to.
+
+**Met, and with a correction to the direction**: see "The mutation, and the
+direction that works" above. Containment is `got.lo <= want_lo and
+got.hi >= want_hi`, so a bracket is made unmeetable by moving `want_lo` BELOW the
+library's widened bound — the opposite of what "tighten" suggests — and the
+mutation that fires is `exp`'s brackets pushed 16 ULP past the library's margin.
 
 **What it was.**
 
@@ -610,7 +647,13 @@ are `pow`, `powf`, `exp`, `exp2`, `expm1`, `log`, `log2`, `log10`, `log1p`,
 done (§2.3); it is the one reference already written, and its shape is the
 eighth one below, which the table did not have.
 
-**They are grouped below by the shape of reference that works for them, because
+**Everything from this paragraph to the end of the shape table is HISTORY: the
+hand-written-reference plan, written before the corpus decision and never
+executed.** It is kept because the reasoning is what changed the direction, and
+because a later session must not read it as a queue. None of it was built; the
+shapes below were never authorised and no reference was written from them.
+
+**They were grouped below by the shape of reference that works for them, because
 the shape is what decides whether a containment oracle is affordable at all.**
 The recorded blocker ("Zig 0.16's `f128` transcendentals are not wider than
 `f64`") is TRUE as stated, and the inference drawn from it was WRONG. Calling
@@ -622,25 +665,29 @@ thirty-odd orders of magnitude below the three-ULP margin the library applies an
 enough to make the reference an independent check rather than a restatement of
 the primitive. The oracle is buildable today.
 
-**Direction changed after this section was written, and T4 is still open.** The
-eight hand-written shapes below were the design; they are kept here as the
-fallback analysis, not as the plan. The direction is an **independently
-generated MPFR directed-rounding containment corpus**: the oracle would be
-checked against values produced by an external arbitrary-precision library at a
-declared rounding direction, using its ternary return code to keep strictness
-and exactness apart, and the tightest enclosing `f64` floor and ceiling of each
-would be certified rather than approximated. A hand-written `f128` series is a
-**second implementation of the same function**, and the audit needed to convince
-anyone it is correct costs more than the coverage it buys — which is the same
-reason §2.2's trap is fatal to a rounded `f128` result. No shape table is
-authorised, and no reference is written, until the generator spec and the
-evidence that the corpus actually bites are in hand. Nothing here has been
-implemented: all **21** remain uncovered.
+**Direction changed after this section was written, and T4 is CLOSED — by the
+corpus.** The eight hand-written shapes below were the design; they are kept as
+the fallback analysis and the record of why the direction changed, not as the
+plan. The direction that was adopted is an **independently generated MPFR
+directed-rounding containment corpus**: the library is checked against values
+produced by an external arbitrary-precision library at a declared rounding
+direction, using its ternary return code to keep strictness and exactness apart,
+and the tightest enclosing `f64` floor and ceiling of each is certified rather
+than approximated. A hand-written `f128` series is a **second implementation of
+the same function**, and the audit needed to convince anyone it is correct costs
+more than the coverage it buys — which is the same reason §2.2's trap is fatal
+to a rounded `f128` result. So the series plan below is **refused rather than
+queued**, and the corpus landed in its place: 1886 rows over 24 labels, 427 of
+them exactly representable, every row checked for containment, and the mutation
+recorded above is the evidence that the tier bites. All **21** are covered, and
+none of them is covered by the in-tree oracle — which is why the oracle's `Op`
+enum still has 35 members and not 56.
 
-The current probe says the direction is reachable rather than hypothetical, and
-it is evidence about the **backend**, not a substitute for the corpus: `gmpy2`
-2.3.1 on MPFR 4.2.2 returns `rc = (-1, +1)` for directed `RoundDown` / `RoundUp`
-on `sin`, `cos`, `sinh`, `cosh`, `log1p` and `atanh` at `minsub`, and certifies
+The probe below is kept as the reason the direction was believed reachable before
+the corpus existed. It is evidence about the **backend**, not a substitute for the
+corpus: `gmpy2` 2.3.1 on MPFR 4.2.2 returns `rc = (-1, +1)` for directed
+`RoundDown` / `RoundUp` on `sin`, `cos`, `sinh`, `cosh`, `log1p` and `atanh` at
+`minsub`, and certifies
 binary64 floor and ceiling for `exp(±floatMax)`, `expm1(-floatMax)` and
 `1.0000000001^1e8`. Ten directed ray-endpoint certificates at 256 bits came back
 clean for `sqrt`, `cbrt`, `log`, `log2`, `log10`, `log1p`, `asinh` and `acosh` on
@@ -672,23 +719,35 @@ the answer.
 | **6. Reference by composition through the library's own identity** | `powf` | `powf` IS `exp(log(x)·y)` composed from the library's own operations (`src/interval_ext.zig:308-318`). The reference composes the same identity from the oracle's `log` and `exp` (shapes 2 and 3) through rigorous interval algebra | The library's guarantee already rests on the composition being sound; the oracle checks the composition against two INDEPENDENT references rather than against itself. `powf` needs no transcendental of its own |
 | **7. Two-argument, quadrant by quadrant** | `atan2` | Not a composition. The quadrants at `src/interval_ext.zig:469-491` are four separate cases and each needs its own reference, with the sign of `x` and whether `y` reaches zero deciding which | **This one is NOT READY.** What is missing: a decision on whether the reference is a Taylor series in each quadrant, or a bounded search over certified `atan` values that brackets the true angle. The second is cheaper and sound; neither has been written. Do not fake it with `@atan2` — that is the `f64` trap of section 2 wearing a different hat |
 
-**Acceptance, per operation added.** Three things, all decidable:
+**Acceptance as this item originally specified it — HISTORICAL, and superseded by
+the acceptance above that was met.** It was written per operation ADDED TO THE
+`Op` ENUM, and it is kept because it names three properties any future tier
+needs. None of the three was met for these 21, because none of them was added to
+the enum:
 
 1. The operation appears in the `Op` enum and the sweep reports `0 FAILED` for
-   it, with a non-zero case count.
+   it, with a non-zero case count. **Not done, and not to be done for these 21.**
+   The enum still holds 35; their coverage is a corpus tier in another file.
 2. **The reference bites.** Tighten the series tail bound by a factor of
    `2^-40` and the operation must report `FAILED` on at least one case. A
-   reference that cannot be made to fail is not a reference.
+   reference that cannot be made to fail is not a reference. **Superseded** by
+   the mutation recorded above, which is on the corpus brackets rather than on a
+   series tail, and which had to be pushed in the opposite direction.
 3. **For an operation whose defect has a known witness, the witness must be in
    the case set**, not merely its result. `tanh` at
    `0.23139395412799124` is pinned by name in `reproducer 6` because a sweep
    that never draws it would not find that defect again even with a perfect
    oracle — the argument sits in a sliver, and random draws land elsewhere.
+   **Met, and the property generalised**: the corpus was given
+   `1.0000000001^1e8` for `powf` for the same reason, and `tests/corpus_test.zig`
+   reads that row by name and fails if the row is not found.
 
-Ship in shape order, not operation order: shape 1 is a day, shape 8 is written,
-shapes 2 and 3 are the bulk of the work and unlock 9 operations, shape 4 is the
-hard one and unlocks 3 plus all of shape 5, and shapes 5 and 6 are then
-arithmetic on references that already exist.
+**"Ship in shape order" is not a plan and never became one.** Shape 8 was written
+— it is `tanh`, §2.3 — and shape 1's named cases landed as exact-arithmetic rows
+in the test `pow: exponentiation by squaring accumulates a widening` (T6).
+Shapes 2 to 7 were never started, and with the corpus landed there is nothing left
+for them to do: a corpus row costs a regeneration, and a hand-written series
+costs an audit of a second implementation of the function it is checking.
 
 ### T5 — DONE: `phase_limit` fallback coverage, and the spec's own boundary was wrong
 
@@ -734,17 +793,20 @@ argument anywhere in the tree is 100.5, at `tests/interval_ext_test.zig:233`.
 So the fallback at `:418`, `:445` and `:480` is **completely unexercised**,
 and a defect there is invisible.
 
-**What it adds.** Coverage of three branches that currently cannot be reached by
-any test, on the operations whose range is widest.
+**What it was to add.** Coverage of three branches that then could not be reached
+by any test, on the operations whose range is widest.
 
-**Acceptance.** Four named inputs, exact answers:
+**Acceptance as specified — HISTORICAL, and two clauses of it were wrong.** Four
+named inputs, exact answers:
 `sin([1e17, 1e17]) == [-1, 1]`, `cos([1e18, 1e18]) == [-1, 1]`,
 `tan([1e17, 1e17]) == [-inf, +inf]`, and
 `sin([-2e17, 2e17]) == [-1, 1]`. **And the mutation must fire:** lowering
-`phase_limit` to `1e3` must make `tests/interval_ext_test.zig:236` fail, because
-`sin([100.0, 100.5])` would then return `[-1, 1]` and the existing
-`expect(s.lo > -1.0)` at `:239` would go red. If that mutation is green, the
-new tests are not reaching the branch.
+`phase_limit` to `1e3` must make the existing `sin` test fail, because
+`sin([100.0, 100.5])` would then return `[-1, 1]` and its `expect(s.lo > -1.0)`
+would go red. If that mutation is green, the new tests are not reaching the
+branch. **Both clauses were corrected above** — the arguments do not reach the
+branch, and the mutation runs the other way — and it is the corrected form that
+was met, together with the two-sided boundary the spec did not ask for.
 
 ### T6 — DONE: `pow` beyond integer endpoints and integer exponents
 
@@ -783,19 +845,25 @@ Every `pow` test uses an integer exponent and integer base endpoints
 base with endpoints of different signs or a fractional magnitude, and a `pow`
 that dropped one widening would pass.
 
-**What it adds.** The accumulation path of exponentiation by squaring, which is
+**What it was to add.** The accumulation path of exponentiation by squaring,
+which is
 the only reason `pow` is implemented that way rather than as a loop of `n`
 multiplies.
 
-**Acceptance.** A named case held to an exact reference: `pow([0.5, 2.0], 5)`
-must enclose `[0.03125, 32]`, and `pow([-2.0, 3.0], 4)` must enclose the true
-image including the interior minimum at 0. The reference is exact integer
-arithmetic, not a rounded `f128` sum, for the reason §2.2 gives. **And the
-mutation must fire:** replacing `result = result.mul(base)` at
-`src/interval_ext.zig:258` with the same corner product taken in raw `f64` with
-no outward step must make the new case fail. Nothing here is written yet: `pow`
-is still uncovered, and this item closes with T4's corpus rather than ahead of
-it.
+**Acceptance as specified — HISTORICAL, and met with one correction.** A named
+case held to an exact reference: `pow([0.5, 2.0], 5)` must enclose
+`[0.03125, 32]`, and `pow([-2.0, 3.0], 4)` must enclose the true image including
+the interior minimum at 0. The reference is exact integer arithmetic, not a
+rounded `f128` sum, for the reason §2.2 gives. **And the mutation must fire:**
+replacing `result = result.mul(base)` with the same corner product taken in raw
+`f64` with no outward step must make the new case fail. **Both met; the mutation
+fires on the FRACTIONAL row rather than the exact one**, as recorded above. The
+last two sentences of the original acceptance — "Nothing here is written yet:
+`pow` is still uncovered, and this item closes with T4's corpus rather than ahead
+of it" — are what was true when the entry was written and are no longer:
+`pow` is not in the `Op` enum and never was, and its containment coverage is the
+corpus (T4), whose 230 `pow` rows are the independent reference this item chose
+not to need.
 
 ### T7 — DONE: `powf`'s reference replaced, not reused
 
@@ -842,9 +910,9 @@ reused as-is.
 
 **What it was.**
 
-`powf` has **exactly one** containment assertion in the whole tree, at the
-`reproducer 3` test. Its reference, `exactPowf`, is unsound and must be
-**replaced, not reused**:
+`powf` had **exactly one** containment assertion in the whole tree, at the
+`reproducer 3` test, and it now has 412 more from the corpus tier. Its old
+reference, `exactPowf`, was unsound and had to be **replaced, not reused**:
 
 - it evaluates `@exp(ex(y) * @log(ex(x)))` on `f128`, and Zig 0.16's `f128`
   transcendentals are f64-accurate — the file's own header says so and gives
@@ -856,13 +924,22 @@ reused as-is.
   wrong. It passes today only because the library's answer is many ULP wide and
   swallows the reference's error, which is not evidence of anything.
 
-**Acceptance.** `exactPowf` is deleted; `powf` is a member of the `Op` enum with
-a reference from the directed-rounding corpus; and tightening that reference by
-`1e-18` relative must make `powf` report `FAILED`. The old single-assertion
-test stays, because the `1.0000000001^1e8` case at the reproducer is a
-regression worth pinning, but it must be re-pointed at the corpus result, which
-the current probe has already certified once. **T7 is OPEN and its spec is not
-fixed**; it is closed by the same corpus decision as T4, not ahead of it.
+**Acceptance as specified — HISTORICAL, and two of its three clauses did not
+survive contact with the tree.** As written it asked that `exactPowf` be deleted,
+that `powf` become a member of the `Op` enum with a reference from the
+directed-rounding corpus, and that tightening that reference by `1e-18` relative
+make `powf` report `FAILED`. **Deleted: yes.** **A member of the `Op` enum: no,
+and deliberately not.** `Op` still names 35 operations and `powf` is not one of
+them; the enum's reference arms are per-operation cases in
+`tests/soundness_shared.zig`, and adding an entry whose only reference is a
+committed corpus row would have given the sweep a reference it cannot compute
+from the arguments. The corpus tier in `tests/corpus_test.zig` covers `powf` in
+412 rows instead, which is where the reproducer's reference comes from. **The
+`1e-18` mutation: it does not fire**, and the entry above says why and what
+replaced it. The old single-assertion test stayed, because the
+`1.0000000001^1e8` case is a regression worth pinning, and it was re-pointed at
+the corpus result. **T7 is DONE**, closed by the same corpus decision as T4 rather
+than ahead of it.
 
 ### T8 — MOSTLY DONE: the re-export half is closed, at compile time
 
@@ -903,14 +980,20 @@ items are P0 rather than P2. It also does not catch a missing re-export or a
 signature a consumer cannot call, because nothing in the tree names the public
 surface without also using it.
 
-**What it adds.** The only class of defect in this list that a runtime test
+**What it was to add.** The only class of defect in this list that a runtime test
 cannot see at all.
 
-**Acceptance.** A build step compiles each README example as its own executable
-against the fixture package; and **deleting any one `pub const` re-export from
-`src/root.zig` must make that step fail to compile.** Two-sided: the probe must
-also go green when the re-export is restored. Without the deletion check the
-step proves nothing.
+**Acceptance as specified — HISTORICAL, and the mechanism changed.** It asked for
+a build step that compiles each README example as its own executable against the
+fixture package, with deleting any one `pub const` re-export from `src/root.zig`
+making that step fail to compile, two-sided. **The deletion check is met by a
+different mechanism and is stronger**: `tests/interval_test.zig` names all forty
+top-level re-exports with `@hasDecl` under an `inline for`, so a missing one is a
+compile error in the ordinary test run rather than in a bespoke step, and both
+directions were run. **The per-example executables were not built**, and the
+paragraph above gives why they are not owed: one fixture file compiles and runs
+all 31 examples, and splitting them buys isolation of failure reporting rather
+than additional proof. Do not read the first clause as outstanding work.
 
 ### T9 — DONE: the refusals were pinned first, and F2 then changed exactly that test
 
@@ -928,25 +1011,27 @@ having.
 
 **What it was.**
 
-`asin` (`src/interval_ext.zig:489`) and `acos` (`:497`) return `null` unless the
-WHOLE interval lies inside `[-1, 1]`, and `atanh` (`:576`) returns `null` unless
-it lies strictly inside `(-1, 1)`. So `atanh([-2, -0.5])` returns `null` where
+`asin` and `acos` returned `null` unless the WHOLE interval lies inside `[-1, 1]`,
+and `atanh` returned `null` unless it lies strictly inside `(-1, 1)`. So
+`atanh([-2, -0.5])` returned `null` where
 the true image is `[-inf, atanh(-0.5)]`. **Sound but lossy.** The feature that
 clips to the domain instead of refusing is `F2` in `docs/next-work-plan.md`,
-which owns the ranking, and is not this file's business; what is this file's
-business is that the loss is currently **pinned by no test**, so a replacement
-could change the null into something else and nothing would notice.
+which owns the ranking, and is not this file's business; what was this file's
+business is that the loss was **pinned by no test**, so a replacement could
+change the null into something else and nothing would notice.
 
-**Acceptance.** A test naming `atanh(Interval.init(-2.0, -0.5))` and asserting
+**Acceptance as specified — HISTORICAL, and met.** A test naming
+`atanh(Interval.init(-2.0, -0.5))` and asserting
 `== null`, plus one for `asin(Interval.init(-1.5, 0.5))`. When `F2` lands, that
-test changes and only that test changes.
+test changes and only that test changes — which is what happened: `F2` landed and
+the pin changed, and nothing else in that test did.
 
 ### T10 — DONE: one shared vocabulary, four registered test files, and 68 names unmoved
 
 **Done, and the count is the thing to check first.** `tests/soundness_test.zig`
 is gone. What is there is `tests/soundness_shared.zig` — the vocabulary every
-concern file imports, and the only place the `Op` enum (`:1467`), the
-label-keyed seed (`streamSeed`, `:310`) and the report (`summary`, `:2046`) now
+concern file imports, and the only place the `Op` enum, the
+label-keyed seed (`streamSeed`) and the report (`summary`) now
 live — and four siblings over it: `tests/soundness_reference_test.zig` (2
 tests), `tests/soundness_fuzz_test.zig` (35), `tests/soundness_frontier_test.zig`
 (18) and `tests/soundness_reproducers_test.zig` (13). `2 + 35 + 18 + 13 = 68`,
@@ -984,16 +1069,19 @@ to read, and the file the next twenty-one operations went into.
 **Why it was ranked last, and the hazard that was already gone.** Splitting it
 fixes no defect and catches no regression; it costs a careful move of the `Op`
 enum, the seed derivation and three shared helpers across four files, on the
-file that guards the library's central claim. Do it **after T4, never before**:
-moving the seed derivation and the enum while the enum is being appended to is
-how a stream gets silently re-keyed. T3 had already removed the hazard that
-made this the dangerous half of the job, and it was sequenced that way.
+file that guards the library's central claim. The sequencing note this entry
+carried — do it **after T4, never before**, because moving the seed derivation
+and the enum while the enum is being appended to is how a stream gets silently
+re-keyed — is history and it turned out not to bind: T4 landed as a corpus tier
+outside the oracle entirely, so nothing was ever appended to `Op`. T3 had already
+removed the hazard that made this the dangerous half of the job, and it was
+sequenced that way.
 
 **Acceptance. MET.** Each of the four concerns heads its own file, each is a
 registered test step in `build.zig` (`build.zig:198`, `:209`, `:220`, `:238`),
 and `zig build test` still runs all of them with the same report — the same
-`summary` (`tests/soundness_shared.zig:2046`), called from
-`tests/soundness_fuzz_test.zig:400` and `tests/soundness_frontier_test.zig:1139`.
+`summary`, called from
+`tests/soundness_fuzz_test.zig` and `tests/soundness_frontier_test.zig`.
 One thing the acceptance did not anticipate and should be recorded: the report
 is now printed from **two** binaries rather than one, because the fuzz and
 frontier tiers each own one. The per-operation line is byte-identical; there
@@ -1005,9 +1093,12 @@ are simply two processes printing it.
 
 Ranked by (correctness risk) × (future defects prevented), the ranking the
 audits produced. Every acceptance criterion here is an observable end state,
-and most are a probe that must **stop compiling**. A2 and A4 are **done** and
-keep their letters because the other two documents cite them; each says what it
-bought and, where it applies, what it did not.
+and most are a probe that must **stop compiling**. **All eleven are done**, A1
+through A11, and they keep their letters because the other two documents cite
+them; each says what it bought and, where it applies, what it did not. Nothing in
+this section is a task: where an entry names work that was specified and then
+refused or replaced — A10's module boundary, A11's containment reading — that
+part is labelled as history.
 
 ### A1 — DONE: `Lin.coeffs` is `[]const Interval`, and `Lin.op` is deleted
 
@@ -1043,8 +1134,12 @@ stops a probe from quietly starting to compile again.
 
 **What automatic compile-failure wiring would take, and where it belongs.**
 Running those probes from the build needs a step that compiles each and
-inverts its exit status. That is the machinery `T8` is about, and it belongs
-there rather than being built twice.
+inverts its exit status. That was to be `T8`'s machinery, and `T8` landed with a
+different and cheaper mechanism: a comptime `@hasDecl` over every re-export, so a
+missing one is a compile error in the ordinary test run. Neither an exit-status
+inverting step nor a second copy of these probes was built, and neither is owed —
+the two probes stay in `probe/` as the readable record of the two errors they
+produce.
 
 **What it was.**
 
@@ -1356,16 +1451,14 @@ that matters — builds the same allocator with nothing failing and checks the
 system it returns actually works. A probe that only proved the failure would
 pass against an `init` that could never succeed at all.
 
-**Acceptance. MET.**
-
 **What it was.**
 
 `src/lp.zig:139-141` is the only allocator call in the file that cannot report
 failure; every other one propagates. It panics with a message, which means a
 caller in a program that wanted to handle exhaustion cannot.
 
-**Acceptance.** `lp.System.init` returns `!System`. The README worked example
-(`README.md:926`) and the fixture both use `try`. A probe built against a
+**Acceptance. MET.** `lp.System.init` returns `!System`. The README's worked LP
+example and the fixture both use `try`. A probe built against a
 failing allocator **must return `error.OutOfMemory` rather than panic** — that
 is the observable end state, and it is decidable with
 `std.testing.FailingAllocator`.
@@ -1521,9 +1614,10 @@ which is a row borrowed from a `System`, and returned a value.
 Being pure is what made it extractable and testable in isolation, and neither
 was available while it sat inside a file whose other half is memory management.
 
-**Ranked last deliberately, and it is still the largest diff of the ten.** It
+**Ranked last deliberately, and it is still the largest diff in the list.** It
 is the one with the least defect risk behind it, and the renames of section 5
-were meant to ride along with it rather than land alone.
+were meant to ride along with it rather than land alone. They did not; see that
+entry's own note on what it did not take.
 
 ### A11 — DONE: the guard in `boundDivisor` is an endpoint test, and its doc now says so
 
@@ -1693,8 +1787,10 @@ the library's own `log`, `mul` and `exp` whether they are right.
 that touches every caller and no test. A4 is done and did not take them: it
 rewrote the `ext` surface without renaming it, because renaming a namespace and
 changing what it publishes are two changes with two different failure modes, and
-only one of them has a test. They ride along with A10, whose module boundary is
-what would make `ext` a better name in the first place.
+only one of them has a test. They were going to ride along with A10, whose module
+boundary is what would make `ext` a better name in the first place. **A10 has
+landed and did not take them**, so that clause is spent: the renames are not
+queued behind anything and are not being done.
 
 **Also not being done, referenced rather than restated:** the `log2` / `log10`
 subnormal claim stays withdrawn (it was checked and not reproduced — the apparent
@@ -1760,7 +1856,7 @@ larger system does not fail; it takes the machine with it.
 
 **What this means for the work in this file.** Sections 2 through 5 are
 correctness and structure work. None of it needs a benchmark, and **none of it
-should be justified by one**. A1 through A10 are compiler-enforced changes whose
+should be justified by one**. A1 through A11 are compiler-enforced changes whose
 acceptance criteria are compile errors and assertion outcomes; T1 through T10 are
 oracle and coverage work whose criteria are `FAILED` counts and failing
 mutations. That is deliberate. The next person to reach for a timing number to

@@ -1,0 +1,816 @@
+# zbc: a full-index-coverage certificate for `for` loops, so a fixed array a
+#      loop provably fills in full is not reported as still `undefined`.
+# AUTHORED, not captured; 0001-0004 are byte-for-byte untouched.
+# Base: upstream 419d153ca411d1698899992d86c51eb9a7e14919 + 0001-0004.
+# Apply with: git -C <checkout> apply --whitespace=nowarn -p1 <this file>, AFTER 0001, 0002, 0003, 0004.
+# source_digest: b794e308…e5e3d2 -> ddcb7de4c311651caba3133fa3e15915bc4bf4df3815da36bc0442962c56c868
+#
+# THE DEFECT. lowerFor gives every loop an unconditional header->exit edge, so a local read
+# after the loop is reachable on a path where the body never ran. For `var arr: [dims.len]T =
+# undefined;` filled by `inline for (table, 0..) |v, i| arr[i] = v;` and returned, that path
+# does not exist: bench/bench_vec.zig buildPlan and buildSeedNames were four such errors.
+# WHAT IT ADDS. A proof used only from lowerFor. Each level needs exactly one zero-based
+# index-range input — a `.for_range` node; Ast.fullSlice does not cover it — whose capture is
+# a plain `|x, i|` name, and every input's exact compile-time length > 0, all read through
+# the EXISTING FileCache.fixedArrayLenOf and .comptimeIntValueOf. The body must be exactly ONE
+# statement: the filling assignment, or a single nested `for`, recursed into; the LHS index
+# chain must be exactly the enclosing counters, and each dimension exactly as long as the
+# counter that walks it. Only then is one `.pointer_write` — the statement emitWritesInLhs
+# already emits — appended to natural_exit, BEFORE any `else` is lowered onto it. It acts in
+# transfer's `.pointer_write` arm in cfg_transfer, NOT in transferAssign: that comment in
+# emitWritesInLhs named the wrong function and is corrected here, no behaviour moving. The
+# counter query runs past the cheap gates only, and an open `0..` reuses the read length.
+# WHAT IT REFUSES, each pinned by a test that must still report: a body that is not one
+# statement or whose statement is neither an assignment nor a `for`; a value carrying
+# `undefined`, `break`, `continue` or `return`; an `else` on a nested loop; a constant LHS
+# index; a range not starting at 0 or whose length is not the dimension; a runtime-length or
+# zero-length input; a nested loop filling part of a row, or an outer body filling part of the
+# rows; and a payload token that is not one. That token is COMPUTED by fullForComponents —
+# lastToken(last_input)+3, one more after a comma — so a payloadless `for (0..n)` sends it
+# PAST the statement; it is now bounded and anchored on a `|` and a capture token before the
+# scan. Unpinned on purpose: that loop binds nothing, so no valid LHS index equals its name.
+# WHAT IT DOES NOT TOUCH. No CFG edge, no clear at `merge` in addition, and emitWritesInLhs
+# with its rule that ANY indexed write clears the whole array's .undef is untouched: the
+# certificate makes a whole-array clear honest, emitting one only when the write set equals
+# the dimension set, and adds no element-granular state. No rule, severity, catalog entry or
+# exclusion moves — all 113 stand, as do the reviewed intfromfloat_without_clamp warning and
+# the dogfood self-check 0004 left failing. No name or input is special-cased; no benchmark,
+# input file or exported API is touched.
+# COVERAGE. 20 tests in src/flow/worklist.zig, named in that file: 4 expect no findings (1D
+# fill, nested 2D fill, nested 3D with unequal dimensions, an `else` reading a filled buffer),
+# 16 expect the rule SET to be exactly {use-undefined} and assert no count. Plus 2 helpers.
+# EVIDENCE. Two runs of `zig test --test-filter "use_undefined:"`, 29 selected each, all 20 of
+# these tests among them. The first, taken before the review correction was folded in here,
+# passed in 7.4878057 s — waves/wave1-zbc-array-green-final.log. The second, over the bytes this
+# file now carries, so with the payload bound, the moved query and the carried length present,
+# passed in 13.7402239 s — waves/wave1-zbc-array-reviewed-green.log.
+# BUILT AND GATED. The tree 0001-0005 produces was built with `zig build cli`, installed into a
+# fresh prefix under an empty HOME with a REUSED work cache (276.1623 s, so not a cold install),
+# and the full gate from that prefix exited 0 in 1061.0422 s: zbc selected=32 analyzed=32
+# failed=0, 0 errors and the 3 reviewed intfromfloat advisories, so the four bench_vec
+# use-undefined errors are gone from the project's own gate.
+# NOT PROVED: no `zbc src/` self-run over this tree, so its self-finding count is unknown and
+# the untouched default dogfood would still exit 1 on any finding; no three-run benchmark
+# baseline, no remote GitHub Actions run, no vf engine run.
+diff --git a/src/flow/cfg_builder.zig b/src/flow/cfg_builder.zig
+--- a/src/flow/cfg_builder.zig
++++ b/src/flow/cfg_builder.zig
+@@ -590,6 +590,18 @@
+ const DeferKind = enum { normal, err };
+ const DeferEntry = struct { kind: DeferKind, body: Ast.Node.Index };
+ 
++/// How many `for` levels the full-fill proof walks.  The proof recurses
++/// through the loop body; a body that nests deeper than this simply is
++/// not proved, and the conservative CFG is left exactly as it was.
++const max_fill_depth = 8;
++
++/// One dimension of a proved full initialisation: the zero-based counter
++/// capture that walks it, and how many values that counter takes.
++const FillLevel = struct {
++    counter: []const u8,
++    len: u64,
++};
++
+ const Builder = struct {
+     gpa: std.mem.Allocator,
+     tree: *const Ast,
+@@ -2005,6 +2017,286 @@
+         }
+     }
+ 
++    /// True when `input` is a zero-based index range — the `0..N` or `0..`
++    /// that `for (xs, 0..)` uses to bind a counter.  A `for` input range is
++    /// a `.for_range` node carrying `lhs..rhs` / `lhs..` in
++    /// `node_and_opt_node`, NOT a `.slice`: `Ast.fullSlice` returns null for
++    /// it, which is why matching the wrong tag proves nothing at all.
++    fn isZeroBasedRange(self: *Builder, input: Ast.Node.Index) bool {
++        if (self.tree.nodeTag(input) != .for_range) return false;
++        const cache = self.cache orelse return false;
++        const lo = cache.comptimeIntValueOf(self.tree.nodeData(input).node_and_opt_node[0]) orelse return false;
++        return lo == 0;
++    }
++
++    /// How many values the index range at input position `k` takes: the
++    /// explicit end of `0..N`, or, for the open `0..` that `for (xs, 0..)`
++    /// writes, `prev_len` — the length this same walk has already read for
++    /// the input it was written next to, rather than reading it a second
++    /// time.  Null when that neighbour did not resolve, or was itself a
++    /// range.
++    fn forRangeLen(
++        self: *Builder,
++        loop: Ast.full.For,
++        k: usize,
++        prev_len: ?u64,
++    ) ?u64 {
++        const end = self.tree.nodeData(loop.ast.inputs[k]).node_and_opt_node[1].unwrap() orelse
++            return prev_len;
++        const cache = self.cache orelse return null;
++        return cache.comptimeIntValueOf(end);
++    }
++
++    /// The identifier `loop`'s `|a, b, c|` binds at position `want`, or
++    /// null when the payload is absent, ends first, or binds that
++    /// position by pointer (`|*x|`), which is not a counter.
++    ///
++    /// `payload_token` is COMPUTED, not validated: `fullForComponents`
++    /// sets it to `lastToken(last_input) + 3`, plus one more when a comma
++    /// follows that input.  With a payload that lands exactly on the
++    /// token after `|`, but `for (0..n)` has no `|`, and the same sum
++    /// then points past the whole statement.  Anchor it on a `|` and a
++    /// capture token here, before the scan, so a following statement's
++    /// identifier cannot be read as this loop's counter.
++    fn forPayloadCaptureName(self: *Builder, loop: Ast.full.For, want: usize) ?[]const u8 {
++        const tree = self.tree;
++        const tags = tree.tokens.items(.tag);
++        const open = loop.payload_token;
++        if (open == 0 or open >= tags.len or tags[open - 1] != .pipe) return null;
++        switch (tags[open]) {
++            .identifier, .asterisk => {},
++            else => return null,
++        }
++        var pt = open;
++        var pos: usize = 0;
++        var by_ptr = false;
++        while (pt < tags.len) : (pt += 1) {
++            switch (tags[pt]) {
++                .pipe => return null,
++                .asterisk => by_ptr = true,
++                .identifier => {
++                    const name = tree.tokenSlice(pt);
++                    if (pos == want) return if (by_ptr) null else name;
++                    pos += 1;
++                    by_ptr = false;
++                },
++                .comma => {},
++                else => {},
++            }
++        }
++        return null;
++    }
++
++    /// The counter `loop` binds its index range to, with the number of
++    /// values that counter takes, or null unless the loop has exactly
++    /// one zero-based index range and every input a known positive
++    /// compile-time length.
++    fn forCounterLevel(self: *Builder, loop: Ast.full.For) ?FillLevel {
++        var counter: ?[]const u8 = null;
++        for (loop.ast.inputs, 0..) |input, k| {
++            if (self.tree.nodeTag(input) != .for_range) continue;
++            if (counter != null) return null;
++            counter = self.forPayloadCaptureName(loop, k) orelse return null;
++        }
++        const name = counter orelse return null;
++        return .{ .counter = name, .len = self.forTripCount(loop) orelse return null };
++    }
++
++    /// How many times `loop` iterates.  Null unless every input has a
++    /// compile-time length and none is empty: a runtime-length input, an
++    /// input that does not resolve, or any zero-length input leaves the
++    /// empty outcome reachable and the proof unestablished.
++    fn forTripCount(self: *Builder, loop: Ast.full.For) ?u64 {
++        const cache = self.cache orelse return null;
++        if (loop.ast.inputs.len == 0) return null;
++        var trips: ?u64 = null;
++        // What this walk already read for the input BEFORE `k`, for an
++        // open `0..` to stand on.  Cleared across a range, so an open
++        // range still refuses a range neighbour the way it did when it
++        // looked that neighbour's length up itself.
++        var prev_len: ?u64 = null;
++        for (loop.ast.inputs, 0..) |input, k| {
++            const is_range = self.tree.nodeTag(input) == .for_range;
++            // An index range that is not zero-based (`1..3`) does not walk
++            // the dimension from zero, so the loop is refused outright
++            // rather than measured.
++            const len: u64 = if (is_range) blk: {
++                if (!self.isZeroBasedRange(input)) return null;
++                break :blk self.forRangeLen(loop, k, prev_len) orelse return null;
++            } else cache.fixedArrayLenOf(input) orelse return null;
++            if (len == 0) return null;
++            prev_len = if (is_range) null else len;
++            trips = if (trips) |t| @min(t, len) else len;
++        }
++        return trips;
++    }
++
++    /// True when `node`, a fill's VALUE, cannot be a value at all.  Two
++    /// ways that happens, both of which make "the body is one assignment"
++    /// a false promise that the write happened:
++    ///
++    ///   - `undefined`, directly or as a struct-literal field.  That writes
++    ///     no initialised data, so the element is exactly as undefined as
++    ///     it was.
++    ///   - `break`, `continue` or `return` anywhere in the value.  The body
++    ///     still parses as a single assignment, and
++    ///     `arr[i] = if (skip) continue else v;` is valid Zig, but on the
++    ///     skipping path the assignment never executes at all.
++    ///
++    /// A token walk, in the shape of `destructorHasSelfUndefined`, and
++    /// conservative in that same direction: any of these tokens anywhere in
++    /// the value refuses the proof.  It is not a value model and it does not
++    /// try to be — it never asks what a callee does to the array.
++    fn rhsIsNotAValue(self: *Builder, node: Ast.Node.Index) bool {
++        const tree = self.tree;
++        const tags = tree.tokens.items(.tag);
++        const last = tree.lastToken(node);
++        var t = tree.firstToken(node);
++        while (t <= last) : (t += 1) {
++            switch (tags[t]) {
++                .identifier => {
++                    if (std.mem.eql(u8, tree.tokenSlice(t), "undefined")) return true;
++                },
++                .keyword_break, .keyword_continue, .keyword_return => return true,
++                else => {},
++            }
++        }
++        return false;
++    }
++
++    /// The root local that `for_node`'s body provably initialises in
++    /// full on normal completion, or null when that is not proved.
++    ///
++    /// WHY IT IS NEEDED.  `lowerFor` gives every loop an unconditional
++    /// edge from its header to its exit, so a local read after the loop
++    /// is reachable along a path where the body never ran.  For the
++    /// compile-time table idiom — a fixed array filled by
++    /// `inline for (table, 0..) |v, i| arr[i] = v` and then returned —
++    /// that path does not exist, and without this the `return arr` is
++    /// reported as returning a value that is still `undefined`.
++    ///
++    /// WHAT IS NOT PROVED, and why each keeps reporting:
++    ///   - a body that is not exactly one statement, or whose single
++    ///     statement is neither an assignment nor a `for` — so no `if`,
++    ///     no `while`, no `break`, no `continue`, no second statement
++    ///   - an LHS index that is a constant rather than the enclosing
++    ///     loop's own counter capture (`arr[0] = v`)
++    ///   - a counter range that does not start at zero (`1..3`)
++    ///   - a counter range whose length is not the dimension it indexes
++    ///     (`0..2` into `[4]u32`)
++    ///   - an input with no compile-time length (a runtime slice), or
++    ///     one whose length is zero
++    ///   - a nested `for` that fills part of a row, or an outer body that
++    ///     fills part of the rows
++    ///   - a value that is `undefined`, or that carries `break`, `continue`
++    ///     or `return`: one assignment whose value is not a value leaves the
++    ///     element as undefined as it was, or never writes it at all
++    ///   - an `else` on a NESTED loop, which runs inside the enclosing body
++    ///     and can write or reset the buffer after the fill was proved
++    ///
++    /// The proof never claims which ELEMENTS were written.  It
++    /// establishes that the index chain covers every dimension of the
++    /// root's fixed array exactly, which is the fact the single
++    /// per-local `undefined` bit can then honestly carry.
++    ///
++    /// `levels` is the caller's stack — the counter/length pairs the
++    /// enclosing loops established, outermost first — and `depth` is how
++    /// many of them are live.  Nothing here allocates.
++    fn fullFillRoot(
++        self: *Builder,
++        for_node: Ast.Node.Index,
++        levels: *[max_fill_depth]FillLevel,
++        depth: usize,
++    ) ?LocalId {
++        if (depth >= max_fill_depth) return null;
++        const tree = self.tree;
++        const loop = tree.fullFor(for_node) orelse return null;
++        // A NESTED loop's `else` runs on that loop's own normal completion,
++        // inside the enclosing body, and this walk never looks at it — so
++        // an `else` there can write or reset the buffer after the fill has
++        // been proved.  Refuse it.  The OUTER loop's `else` is a different
++        // matter and is exactly where the emitted `.pointer_write` goes: it
++        // runs after the whole fill, which is the order the else-read test
++        // pins.
++        if (depth > 0 and loop.ast.else_expr != .none) return null;
++
++        // Exactly one statement, and that statement an assignment or a
++        // single nested `for`.  Anything else can skip the write.
++        var buf: [2]Ast.Node.Index = undefined;
++        const stmts = blockStmts(tree, loop.ast.then_expr, &buf);
++        const stmt: Ast.Node.Index = switch (stmts.len) {
++            1 => stmts[0],
++            0 => switch (tree.nodeTag(loop.ast.then_expr)) {
++                .block, .block_semicolon, .block_two, .block_two_semicolon => return null,
++                else => loop.ast.then_expr,
++            },
++            else => return null,
++        };
++
++        // Gate the body's shape before the counter query, which is the only
++        // cache-backed work this walk does: a body that is neither the
++        // filling assignment nor a single nested `for` cannot be a full
++        // fill whatever its counters say, and most loops never get that
++        // far.  `levels[depth]` is still filled before either consumer
++        // recurses or reads it.
++        const tag = tree.nodeTag(stmt);
++        switch (tag) {
++            .for_simple, .@"for", .assign => {},
++            else => return null,
++        }
++        levels[depth] = self.forCounterLevel(loop) orelse return null;
++        switch (tag) {
++            .for_simple, .@"for" => return self.fullFillRoot(stmt, levels, depth + 1),
++            .assign => {
++                const pair = tree.nodeData(stmt).node_and_node;
++                if (self.rhsIsNotAValue(pair[1])) return null;
++                return self.fullFillAssignTarget(pair[0], levels, depth + 1);
++            },
++            else => unreachable,
++        }
++    }
++
++    /// The root local `lhs = …` fully initialises, when its index chain
++    /// is exactly the established counters, and every dimension it
++    /// indexes is exactly as long as the counter that walks it.
++    /// `level_count` is the number of enclosing loops established so
++    /// far, which is also the chain's required length.
++    fn fullFillAssignTarget(
++        self: *Builder,
++        lhs: Ast.Node.Index,
++        levels: *const [max_fill_depth]FillLevel,
++        level_count: usize,
++    ) ?LocalId {
++        const tree = self.tree;
++        const cache = self.cache orelse return null;
++        if (level_count == 0 or level_count > max_fill_depth) return null;
++        // Index nodes are visited innermost-first. Each remaining array
++        // therefore matches levels[level_count - 1 - n], including the root.
++        var inner: [max_fill_depth]Ast.Node.Index = undefined;
++        var cur = lhs;
++        for (0..level_count) |n| {
++            if (tree.nodeTag(cur) != .array_access) return null;
++            const data = tree.nodeData(cur).node_and_node;
++            if (tree.nodeTag(data[1]) != .identifier) return null;
++            const level = levels[level_count - 1 - n];
++            if (!std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(data[1])), level.counter)) return null;
++            cur = data[0];
++            inner[n] = cur;
++        }
++        // Nothing left over: the container is a plain local, not a field
++        // or an element of one.
++        if (tree.nodeTag(cur) != .identifier) return null;
++        const root = self.name_to_local.get(tree.tokenSlice(tree.nodeMainToken(cur))) orelse return null;
++        // Every dimension must be exactly as long as the counter that walks
++        // it.  `inner[level_count - 1]` is the root itself, so this covers
++        // dimension 0 with no separate case.
++        for (inner[0..level_count], 0..) |node, n| {
++            const len = cache.fixedArrayLenOf(node) orelse return null;
++            if (len != levels[level_count - 1 - n].len) return null;
++        }
++        return root;
++    }
++
+     fn lowerFor(self: *Builder, for_node: Ast.Node.Index, cur: *BlockId) !void {
+         const loop = self.tree.fullFor(for_node).?;
+         for (loop.ast.inputs) |input| try self.emitUsesInExpr(input, cur.*, null);
+@@ -2012,6 +2304,25 @@
+         const body = try self.newBlock();
+         const merge = try self.newBlock();
+         const natural_exit = if (loop.ast.else_expr != .none) try self.newBlock() else merge;
++        // A body that provably initialises a whole fixed array cannot
++        // reach the exit without the fill having happened, so the
++        // header's edge to the exit is not a path on which that array
++        // is still undefined.  State it on the exit block, and BEFORE
++        // any `else` body is lowered onto it: `else` runs on normal
++        // completion and may read what the body wrote.  With no `else`
++        // the exit IS `merge`, which is where the post-loop read is.
++        // With an `else`, a `break` still reaches `merge` without
++        // passing through here and carries only what the body itself
++        // established — which, for a body this shape accepts, already
++        // is the full fill.
++        var fill_levels: [max_fill_depth]FillLevel = undefined;
++        if (self.fullFillRoot(for_node, &fill_levels, 0)) |root| {
++            try self.appendStmt(natural_exit, .{
++                .kind = .{ .pointer_write = .{ .target = root } },
++                .pos = self.posOf(for_node),
++                .end_pos = self.endPosOf(for_node),
++            });
++        }
+         try self.addEdge(cur.*, header);
+         try self.addEdge(header, body);
+         try self.addEdge(header, natural_exit);
+@@ -6113,7 +6424,9 @@
+             // identity (.heap / .arena / .arena_borrow) is unchanged;
+             // only an .undef may have been initialized.  Emit
+             // assign-via-pointer-write that only clears .undef →
+-            // .plain in transferAssign, preserving resource origins.
++            // .plain in transfer's `.pointer_write` arm in cfg_transfer,
++            // preserving resource origins.  NOT transferAssign, which
++            // rebinds the local and has no `.undef`-clearing arm.
+             try self.appendStmt(cur, .{
+                 .kind = .{ .pointer_write = .{ .target = id } },
+                 .pos = pos,
+diff --git a/src/flow/worklist.zig b/src/flow/worklist.zig
+--- a/src/flow/worklist.zig
++++ b/src/flow/worklist.zig
+@@ -2470,6 +2470,368 @@
+     try std.testing.expectEqual(@as(usize, 0), problems.items.len);
+ }
+ 
++test "use_undefined: a for over a nonempty comptime array initialises every element" {
++    // The compile-time table idiom: a global `const` array whose length
++    // types the buffer, filled by `inline for (table, 0..) |v, i|` and
++    // returned whole.  Every element is written on every iteration, so a
++    // report here can only come from a path that runs zero iterations.
++    try expectFlowRulesWithZls(
++        \\const dims = [_]u32{ 4, 8 };
++        \\pub fn build() [dims.len]u32 {
++        \\    var arr: [dims.len]u32 = undefined;
++        \\    inline for (dims, 0..) |d, i| arr[i] = d;
++        \\    return arr;
++        \\}
++    , &.{});
++}
++
++test "use_undefined: nested for over nonempty comptime arrays initialise the whole matrix" {
++    // The same idiom one level down.  Both loops iterate nonempty global
++    // tables, so the inner write runs for every (di, oi) pair and the
++    // matrix is fully initialised when it is returned.
++    try expectFlowRulesWithZls(
++        \\const dims = [_]u32{ 4, 8 };
++        \\const ops = [_]u8{ 'a', 'b' };
++        \\const Row = struct { v: u32, n: u8 };
++        \\pub fn build() [dims.len][ops.len]Row {
++        \\    var arr: [dims.len][ops.len]Row = undefined;
++        \\    inline for (dims, 0..) |d, di| {
++        \\        inline for (ops, 0..) |op, oi| {
++        \\            arr[di][oi] = .{ .v = d, .n = op };
++        \\        }
++        \\    }
++        \\    return arr;
++        \\}
++    , &.{});
++}
++
++test "use_undefined: three nested for over unequal nonempty comptime arrays initialise the whole block" {
++    // Depth 3 with three DIFFERENT dimension lengths — 2, 3 and 4.  At
++    // depth 2 the two orderings a chain walk could pair each dimension
++    // with coincide, so a depth-2 test cannot tell them apart; here they
++    // do not, and every dimension has to be checked against the counter
++    // that actually walks it.
++    try expectFlowRulesWithZls(
++        \\const outer = [_]u8{ 1, 2 };
++        \\const middle = [_]u8{ 3, 4, 5 };
++        \\const inner = [_]u8{ 6, 7, 8, 9 };
++        \\const Cell = struct { v: u8 };
++        \\pub fn build() [outer.len][middle.len][inner.len]Cell {
++        \\    var arr: [outer.len][middle.len][inner.len]Cell = undefined;
++        \\    inline for (outer, 0..) |a, i| {
++        \\        inline for (middle, 0..) |b, j| {
++        \\            inline for (inner, 0..) |c, k| {
++        \\                arr[i][j][k] = .{ .v = a + b + c };
++        \\            }
++        \\        }
++        \\    }
++        \\    return arr;
++        \\}
++    , &.{});
++}
++
++test "use_undefined: the else of a fully filled for can read the buffer" {
++    // `else` runs on NORMAL COMPLETION — every iteration taken, no
++    // `break` — not only when the input turned out to be empty.  The
++    // read there is safe for the same reason the read after the loop is:
++    // the table is nonempty and every element was written.
++    try expectFlowRulesWithZls(
++        \\const dims = [_]u32{ 4, 8 };
++        \\pub fn build() [dims.len]u32 {
++        \\    var arr: [dims.len]u32 = undefined;
++        \\    inline for (dims, 0..) |d, i| {
++        \\        arr[i] = d;
++        \\    } else {
++        \\        for (arr, 0..) |v, i| {
++        \\            if (i == 0) continue;
++        \\            _ = v;
++        \\        }
++        \\    }
++        \\    return arr;
++        \\}
++    , &.{});
++}
++
++test "use_undefined: the else of a partially filled for still reports the read" {
++    // Same ordering, same place: the read in `else` comes after the body
++    // ran to completion, and the body only ever wrote element 0.  Being
++    // on the completion path is not a licence to call the buffer defined.
++    //
++    // Two read sites of `arr` here — the `for` input inside `else` and the
++    // return after it — so this states the rule set, not a count.
++    try expectRuleIdsWithZls(
++        \\const dims = [_]u32{ 4, 8 };
++        \\pub fn build() [dims.len]u32 {
++        \\    var arr: [dims.len]u32 = undefined;
++        \\    inline for (dims, 0..) |d, i| {
++        \\        arr[0] = d;
++        \\    } else {
++        \\        for (arr, 0..) |v, i| {
++        \\            if (i == 0) continue;
++        \\            _ = v;
++        \\        }
++        \\    }
++        \\    return arr;
++        \\}
++    , &.{"use-undefined"});
++}
++
++test "use_undefined: a nonempty for that writes one element of a larger array still reports" {
++    // Entering the body is not the same as initialising the buffer.  The
++    // table is nonempty, so the body is entered, but the write sits
++    // behind a condition and every element past index 0 stays undefined.
++    // Dropping the zero-iteration path without asking what the body
++    // guarantees would silence exactly this.
++    try expectRuleIdsWithZls(
++        \\const dims = [_]u32{ 4, 8 };
++        \\pub fn build() [dims.len]u32 {
++        \\    var arr: [dims.len]u32 = undefined;
++        \\    inline for (dims, 0..) |d, i| {
++        \\        if (i == 0) arr[0] = d;
++        \\    }
++        \\    return arr;
++        \\}
++    , &.{"use-undefined"});
++}
++
++test "use_undefined: a nested nonempty for whose inner body is partial still reports" {
++    // The inner loop is nonempty, so the outer body's exit is only reached
++    // through the inner body — but that body skips the write for every
++    // oi but the first, so the matrix is still undefined where it is read.
++    try expectRuleIdsWithZls(
++        \\const dims = [_]u32{ 4, 8 };
++        \\const ops = [_]u8{ 'a', 'b' };
++        \\const Row = struct { v: u32, n: u8 };
++        \\pub fn build() [dims.len][ops.len]Row {
++        \\    var arr: [dims.len][ops.len]Row = undefined;
++        \\    inline for (dims, 0..) |d, di| {
++        \\        inline for (ops, 0..) |op, oi| {
++        \\            if (oi == 0) arr[di][oi] = .{ .v = d, .n = op };
++        \\        }
++        \\    }
++        \\    return arr;
++        \\}
++    , &.{"use-undefined"});
++}
++
++test "use_undefined: a nested nonempty for that writes one row of the matrix still reports" {
++    // Complete inner body, incomplete outer body: row 0 is written, rows
++    // 1.. are not, and a completed inner loop says nothing about that.
++    try expectRuleIdsWithZls(
++        \\const dims = [_]u32{ 4, 8 };
++        \\const ops = [_]u8{ 'a', 'b' };
++        \\const Row = struct { v: u32, n: u8 };
++        \\pub fn build() [dims.len][ops.len]Row {
++        \\    var arr: [dims.len][ops.len]Row = undefined;
++        \\    inline for (dims, 0..) |d, di| {
++        \\        if (di == 0) {
++        \\            inline for (ops, 0..) |op, oi| {
++        \\                arr[di][oi] = .{ .v = d, .n = op };
++        \\            }
++        \\        }
++        \\    }
++        \\    return arr;
++        \\}
++    , &.{"use-undefined"});
++}
++
++test "use_undefined: a nonempty for that always writes only element 0 still reports" {
++    // The same partial fill as the conditional case above, but with the
++    // write UNCONDITIONAL, so it runs on every path out of the body and
++    // dominates every exit.  Proving "the body always reaches a write"
++    // would silence this; only proving the write covers every element
++    // keeps it reported.
++    try expectRuleIdsWithZls(
++        \\const dims = [_]u32{ 4, 8 };
++        \\pub fn build() [dims.len]u32 {
++        \\    var arr: [dims.len]u32 = undefined;
++        \\    inline for (dims, 0..) |d, i| {
++        \\        arr[0] = d;
++        \\    }
++        \\    return arr;
++        \\}
++    , &.{"use-undefined"});
++}
++
++test "use_undefined: a nonempty for that always writes only row 0 still reports" {
++    // Unconditional, and it does sweep the second dimension — every oi is
++    // written.  Row 1 is never touched, so one dimension of the two is
++    // covered and the matrix is still partly undefined at the return.
++    try expectRuleIdsWithZls(
++        \\const dims = [_]u32{ 4, 8 };
++        \\const ops = [_]u8{ 'a', 'b' };
++        \\const Row = struct { v: u32, n: u8 };
++        \\pub fn build() [dims.len][ops.len]Row {
++        \\    var arr: [dims.len][ops.len]Row = undefined;
++        \\    inline for (dims, 0..) |d, di| {
++        \\        inline for (ops, 0..) |op, oi| {
++        \\            arr[0][oi] = .{ .v = d, .n = op };
++        \\        }
++        \\    }
++        \\    return arr;
++        \\}
++    , &.{"use-undefined"});
++}
++
++test "use_undefined: a bounded for that covers fewer elements than the buffer still reports" {
++    // `0..2` is a bounded, provably nonempty range, so the body always
++    // runs and always writes — into a four-element buffer, of which it
++    // covers two.  A nonempty loop over a shorter range than the
++    // dimension is partial initialisation, not initialisation.
++    try expectRuleIdsWithZls(
++        \\pub fn build() [4]u32 {
++        \\    var arr: [4]u32 = undefined;
++        \\    for (0..2) |i| {
++        \\        arr[i] = i;
++        \\    }
++        \\    return arr;
++        \\}
++    , &.{"use-undefined"});
++}
++
++test "use_undefined: a bounded for over a range that does not start at 0 still reports" {
++    // `1..3` is bounded, provably nonempty, and written unconditionally,
++    // so elements 1 and 2 are always filled.  Element 0 is the one thing
++    // missing, and a coverage proof has to count it: the index has to
++    // walk the whole dimension from zero, not most of it.
++    try expectRuleIdsWithZls(
++        \\pub fn build() [4]u32 {
++        \\    var arr: [4]u32 = undefined;
++        \\    for (1..3) |i| {
++        \\        arr[i] = i;
++        \\    }
++        \\    return arr;
++        \\}
++    , &.{"use-undefined"});
++}
++
++test "use_undefined: a for over an empty comptime array leaves the buffer undefined" {
++    // The other side of the same fact: a table whose length is zero runs
++    // no iterations, so the write below never executes and the buffer
++    // really is still undefined at the return.
++    try expectRuleIdsWithZls(
++        \\const rows = [_]u32{};
++        \\pub fn build() [1]u32 {
++        \\    var arr: [1]u32 = undefined;
++        \\    for (rows) |r| arr[0] = r;
++        \\    return arr;
++        \\}
++    , &.{"use-undefined"});
++}
++
++test "use_undefined: a for over a runtime slice can still take zero trips" {
++    // The length of a runtime slice is unknown, so the empty outcome stays
++    // reachable however the body is written.
++    try expectRuleIdsWithZls(
++        \\pub fn build(values: []const u32) [4]u32 {
++        \\    var arr: [4]u32 = undefined;
++        \\    for (values, 0..) |v, i| arr[i] = v;
++        \\    return arr;
++        \\}
++    , &.{"use-undefined"});
++}
++
++test "use_undefined: a conditional continue before the write leaves elements undefined" {
++    // Taking the first iteration is not the same as writing on it: the
++    // `continue` path reaches the exit with the buffer untouched.
++    try expectRuleIdsWithZls(
++        \\const dims = [_]u32{ 4, 8 };
++        \\pub fn build(skip: bool) [dims.len]u32 {
++        \\    var arr: [dims.len]u32 = undefined;
++        \\    inline for (dims, 0..) |d, i| {
++        \\        if (skip) continue;
++        \\        arr[i] = d;
++        \\    }
++        \\    return arr;
++        \\}
++    , &.{"use-undefined"});
++}
++
++test "use_undefined: an early break before the write leaves elements undefined" {
++    // Same for `break`, which leaves the loop before the write runs.
++    try expectRuleIdsWithZls(
++        \\const dims = [_]u32{ 4, 8 };
++        \\pub fn build(stop: bool) [dims.len]u32 {
++        \\    var arr: [dims.len]u32 = undefined;
++        \\    inline for (dims, 0..) |d, i| {
++        \\        if (stop) break;
++        \\        arr[i] = d;
++        \\    }
++        \\    return arr;
++        \\}
++    , &.{"use-undefined"});
++}
++
++test "use_undefined: a for that fills every element with undefined is not an initialisation" {
++    // The coverage is complete and the write is unconditional, so a
++    // certificate that looked only at the target would clear the buffer
++    // here.  It is not initialised data: the array is exactly as undefined
++    // after the loop as it was before it.
++    try expectRuleIdsWithZls(
++        \\const dims = [_]u32{ 4, 8 };
++        \\pub fn build() [dims.len]u32 {
++        \\    var arr: [dims.len]u32 = undefined;
++        \\    inline for (dims, 0..) |d, i| arr[i] = undefined;
++        \\    return arr;
++        \\}
++    , &.{"use-undefined"});
++}
++
++test "use_undefined: a for that fills every element with an undefined struct field is not an initialisation" {
++    // The same hole one level down: the assignment is not to `undefined`,
++    // it is to a struct literal that leaves one field undefined.  The
++    // element is still not initialised data.
++    try expectRuleIdsWithZls(
++        \\const dims = [_]u32{ 4, 8 };
++        \\const Row = struct { v: u32 };
++        \\pub fn build() [dims.len]Row {
++        \\    var arr: [dims.len]Row = undefined;
++        \\    inline for (dims, 0..) |d, i| arr[i] = .{ .v = undefined };
++        \\    return arr;
++        \\}
++    , &.{"use-undefined"});
++}
++
++test "use_undefined: a nested for whose else resets the buffer is not an initialisation" {
++    // The inner loop fills its row completely, so a walk that only ever
++    // looks at each `then_expr` would clear the whole matrix here.  The
++    // inner `else` runs on the inner loop's normal completion, inside the
++    // outer body, and puts the buffer back to undefined — which this walk
++    // never inspects.
++    try expectRuleIdsWithZls(
++        \\const dims = [_]u32{ 4, 8 };
++        \\const ops = [_]u8{ 'a', 'b' };
++        \\pub fn build() [dims.len][ops.len]u32 {
++        \\    var arr: [dims.len][ops.len]u32 = undefined;
++        \\    inline for (dims, 0..) |d, di| {
++        \\        inline for (ops, 0..) |op, oi| {
++        \\            arr[di][oi] = 1;
++        \\        } else {
++        \\            arr = undefined;
++        \\        }
++        \\    }
++        \\    return arr;
++        \\}
++    , &.{"use-undefined"});
++}
++
++test "use_undefined: a for whose value continues out of the loop writes nothing" {
++    // The body is one assignment and the coverage is exact, so both shape
++    // checks pass.  The VALUE is what fails: `continue` is noreturn, so
++    // `if (skip) continue else i` has the element's type and this is valid
++    // Zig, but on the skipping path the assignment never executes at all.
++    // A runtime `for`, not an `inline for`.
++    try expectRuleIdsWithZls(
++        \\pub fn build(skip: bool) [4]usize {
++        \\    var arr: [4]usize = undefined;
++        \\    for (0..4) |i| {
++        \\        arr[i] = if (skip) continue else i;
++        \\    }
++        \\    return arr;
++        \\}
++    , &.{"use-undefined"});
++}
++
+ test "lowering_gap collapses locals to plain — no spurious reports" {
+     const gpa = std.testing.allocator;
+     var problems = try analyze(gpa,
+@@ -3709,6 +4071,43 @@
+     for (expected, problems.items) |rule, problem| try std.testing.expectEqualStrings(rule, problem.rule_id);
+ }
+ 
++/// `expectFlowRules` with the ZLS resolver attached, for the shapes whose
++/// correctness depends on resolved types — a `for` over a global table,
++/// where the proof that the table is nonempty needs the array's length.
++fn expectFlowRulesWithZls(source: []const u8, expected: []const []const u8) !void {
++    const gpa = std.testing.allocator;
++    var problems = try analyzeWithZls(gpa, source);
++    defer freeProblems(gpa, &problems);
++    try std.testing.expectEqual(expected.len, problems.items.len);
++    for (expected, problems.items) |rule, problem| try std.testing.expectEqualStrings(rule, problem.rule_id);
++}
++
++/// Which rules a source reports, without pinning how many times or in what
++/// order.  `reportWithNote` dedups by (byte offset, rule id), so a shape
++/// with two separate read sites of the same local is two problems, and
++/// whether the second one still fires depends on the shape under test.
++/// This states the rule SET exactly — every expected rule reported, and
++/// every reported rule expected — and leaves the count to the reading.
++fn expectRuleIdsWithZls(source: []const u8, expected: []const []const u8) !void {
++    const gpa = std.testing.allocator;
++    var problems = try analyzeWithZls(gpa, source);
++    defer freeProblems(gpa, &problems);
++    for (expected) |rule| {
++        var found = false;
++        for (problems.items) |problem| {
++            if (std.mem.eql(u8, problem.rule_id, rule)) found = true;
++        }
++        try std.testing.expect(found);
++    }
++    for (problems.items) |problem| {
++        var listed = false;
++        for (expected) |rule| {
++            if (std.mem.eql(u8, problem.rule_id, rule)) listed = true;
++        }
++        try std.testing.expect(listed);
++    }
++}
++
+ test "cleanup flow: defer uses the final ownership flag" {
+     try expectFlowRules(
+         \\const std = @import("std");

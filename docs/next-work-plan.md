@@ -35,9 +35,10 @@ Severity here means:
 
 Every row carries a state. **FIXED** means the repair is in the tree and the
 paragraph under the row says what it bought; **OPEN** means the next session owns
-it. The proof column records whether the behaviour was **executed** — the
-reproducer was run and produced the stated output — or established from
-**code**, which is decisive without running anything.
+it. **Every row is FIXED at this revision** — D10 and D11 were the last two, and
+P6 and P7 own them. The proof column records whether the behaviour was
+**executed** — the reproducer was run and produced the stated output — or
+established from: **code**, which is decisive without running anything.
 
 ### 1.1 S1 — the contract
 
@@ -255,13 +256,13 @@ are not recorded here.
 | **D7** | S2 | `src/vector.zig:774` | The `!@TypeOf(v)` return type carried `error.OutOfMemory` from a comptime-dead branch, so `mapResult` on a `Vec(2)` value failed to compile. | code; the caller-visible symptom is a compile error, not a crash | **FIXED** (P5) |
 | **D8** | S3 | `src/root.zig:95-115` | The `roundUp` / `roundDown` doc comments claimed they differ from `nextUp` / `prevDown` **at the infinities**. They are bit-identical there; the pairs differ only at the two signed zeros. | code | **FIXED** (P6) |
 | **D9** | S3 | `src/vector.zig:188-191`, `:362-369`, `:713-715` | `fromArray` documented that it is "the one way to place an inverted interval in a box", and both `isEmpty` comments claimed every component of every box obeys `lo <= hi`. Two comments on one type contradicted. | code | **FIXED** (P6) |
-| **D10** | S3 | `src/rounding.zig:109-110` | The `-0.0` guard in `nextUp` is justified as preventing a step "to the smallest negative subnormal, which is below -0.0". The general pattern step from `0x8000000000000000` does not produce that subnormal at all — it produces `+floatMax` — so the stated reason is not the reason the guard is there. The direction of the step is what changes at the zeros, and the comment one line up already says so. `prevDown`'s mirror comment at `:129-131` is wrong the same way. | code | **OPEN** |
-| **D11** | S3 | `README.md` | Drift, partly closed. **Closed:** the `prevDown`/`nextUp` recipe is gone everywhere, all four rounding helpers are documented, the benchmark build steps and the `iadd` ownership trap are in. **Open:** the README says the elementary functions widen by **two** ULP at `:69`, `:73`, `:81`, `:119` and `:123`, and the code now widens **three** (D17) — that is new drift created by the fix and it misstates the margin the package's central claim rests on; `:300` says `abs` returns "the interval itself" off zero, dropping the widening; `:295` says `sub` is "computed as `self + (-other)`" when the code crosses the pairing (`src/interval.zig:503-507`); and the remaining row numbers from the original audit have not been walked. | code, spot-verified line by line | **PART** (P7) |
+| **D10** | S3 | `src/rounding.zig` (`nextUp`, `prevDown`) | The `-0.0` guard in `nextUp` was justified as preventing a step "to the smallest negative subnormal, which is below -0.0". The general pattern step from `0x8000000000000000` does not produce that subnormal at all — it produces `+floatMax` — so the stated reason was not the reason the guard is there. The direction of the step is what changes at the zeros, and the comment one line up already said so. `prevDown`'s mirror comment was wrong the same way. | code | **FIXED** (P6): both comments now state the change of direction at the zeros; the guards were always right, only the stated reason was wrong |
+| **D11** | S3 | `README.md` | Drift, closed in two passes. **First:** the `prevDown`/`nextUp` recipe is gone everywhere, all four rounding helpers are documented, the benchmark build steps and the `iadd` ownership trap are in. **Second:** the two-ULP elementary claims, `abs` off zero, `sub`'s pairing and `DynVec.own` were corrected or verified against `src/`, and the original audit's line list — "the remaining row numbers from the original audit have not been walked" — has been walked: all 16 tables and 149 data rows were checked, and every sentence naming a symbol, a build step, a line number or a file was resolved against the tree. | code, and a sweep of the whole document | **FIXED** (P7): four further defects were found by the sweep and corrected, two of them by the document contradicting itself |
 | **D12** | S3 | `build.zig:146-158` | The private cache directories for the nested fixture build were justified by a global-cache-lock deadlock that does not exist. `Cache.Manifest.hit` locks ONE manifest at a time and defaults to a shared lock. | code, and the flags dropped with the step measured unchanged | **FIXED** (P6): the flags are kept for containment, with the measured reason in their place |
 | **D13** | S4 | `tests/rounding_test.zig` | The file imported `nextUp`, `prevDown`, `piDown`, `piUp` and never bound `roundUp` or `roundDown` anywhere. The two functions the entire library widens with had no test at all. | code | **FIXED** (P6): ten tests, green in all four optimise modes, and mutation-checked — mutating the `-inf` arm of `roundUp` fails three of them, where it used to fail nothing in the tree |
 | **D14** | S4 | `src/vector.zig:53-60` | `errdefer out.deinit();` in `add`, `sub`, `mul`, `div` and `hull` was unreachable: the only statement between it and the return is a `map2` that returns `void`. | code | **FIXED** (P5): deleted, and the absence argued in the file header |
 | **D15** | S4 | `docs/performance-handover.md` | The source-layout table and the step-4 table described a tree that no longer existed. | code | **FIXED** |
-| **D16** | S4 | `tests/soundness_test.zig` | The oracle covered **8 of the 56** public operations with a containment check, and skipped 2,040 `div` cases and 2,163 `recip` cases as preconditions. | code, counted from the `Op` enum and the `apply` / `exact` switches | **FIXED** (F1): 35 covered, `0 skipped precondition` for both |
+| **D16** | S4 | `tests/soundness_test.zig` (now `tests/soundness_shared.zig` and its four siblings) | The oracle covered **8 of the 56** public operations with a containment check, and skipped 2,040 `div` cases and 2,163 `recip` cases as preconditions. | code, counted from the `Op` enum and the `apply` / `exact` switches | **FIXED** (F1): 35 covered, `0 skipped precondition` for both; the other 21 of the 56 are covered by the MPFR corpus tier (T4) rather than by the in-tree oracle |
 
 Two things about D16 are worth keeping, because they are the reason D1 survived
 a 200-test suite and a `f128` oracle. First, the `div` and `recip` skips were
@@ -271,15 +272,24 @@ divisor that reaches zero, and a documented answer is a contract value to be
 checked, not a case the oracle may decline to judge. Both are now checked, from
 the sign of the two one-sided limits, and both report zero skips. Second, there
 was no containment oracle for any elementary function at all, which is how D17
-survived a tree that had already grown to 34 covered operations. Twenty-one
-elementary functions still have none; the ranking of that work is T4 in
-`docs/tests-and-architecture-plan.md`, and this document does not repeat it.
+survived a tree that had already grown to 34 covered operations. **All 21 are
+covered now, and not by the oracle.** They were closed by an independently
+generated MPFR directed-rounding corpus rather than by anything written in this
+tree: `tests/corpus/elementary.txt` carries **1886** rows over **24** labels, of
+which **21** are operations nothing else judges, and 427 rows are exactly
+representable. Hand-written wider-precision reference series stay refused — an
+`f128` series is a second implementation of the same function, and §2.2 of the
+test plan is the record of what that costs. T4 in
+`docs/tests-and-architecture-plan.md` owns the corpus and its mutation
+evidence; this document does not repeat it. What "covered" means here is that a
+containment oracle exists and is checked on drawn and named cases — not that
+every input of every operation has been proved.
 
 ---
 
 ## 2. Implementation plan
 
-**Soundness fixes precede feature work, and P1 through P5 are done.** That
+**Every item in this section is done — P1 through P8, with no exception.** The
 ordering was not ceremonial: D1 and D2 were each a single missing outward step,
 and either one can be reintroduced by a later change that touches the same line
 and does not know why the step is there. What each bought is recorded, because a
@@ -290,11 +300,14 @@ Ordering inside the S1 block was severity, then blast radius, then risk. D1 and
 D2 were code defects on a shipped public path; D3 was a document that shipped
 the wrong recipe to every third-party caller; D4 was confined to the solver.
 
-**P8 is resolved, and it was the last open soundness item.** It came before
-anything in section 3, and it was not a wider version of D17: D17 was one
+**P8 was the last soundness item, and nothing in this document is open.** It came
+before anything in section 3, and it was not a wider version of D17: D17 was one
 function widening by one step too few, and P8 was a question about what an
-infinity *means*. What is still open in this document is documentation, not
-soundness: D10 and the remainder of D11 under P6 and P7 below.
+infinity *means*. The documentation items that followed it are closed too: D10
+and the remainder of D11 are under P6 and P7 below, and both rows in section 1's
+table read FIXED. What remains open in this project is not here — it is section
+3's features and section 4's optimisations, and of those, one is answered, two
+have landed and one is refused.
 
 ### P1 — DONE: `div` at infinite endpoints (D1)
 
@@ -512,14 +525,17 @@ were right. Recorded so a later session does not re-derive the choice.
 **Files.** `src/interval.zig` for the constructor, `translate`, `expand` and
 `scale`; `src/interval_ext.zig` for the ray readers; `src/vector.zig` for the
 `fromArray` input contract; `tests/interval_test.zig` for the regressions; and
-`tests/soundness_test.zig` for the frontier judging.
+`tests/soundness_frontier_test.zig` over `tests/soundness_shared.zig` for the
+frontier judging — `tests/soundness_test.zig` was the single flat file when this
+was written and T10 split it, so cite the two files it became.
 
-**Acceptance. MET — four modes green, `withheld` empty.** The two changed
+**Acceptance. MET — four modes green, and nothing withheld.** The two changed
 constructor shapes are documented in the README, `scale`'s conservative whole
-line is documented rather than skipped, and `withheld` in
-`tests/soundness_test.zig` is empty. `zig build test` exits 0 in Debug,
-ReleaseSafe, ReleaseFast and ReleaseSmall, and the oracle reports `0 FAILED` on
-all 35 of its operations in each.
+line is documented rather than skipped, and no frontier row is withheld: the six
+that were are swept like the rest, for the reason `soundness_frontier_test.zig`
+states in its own header. `zig build test` exits 0 in Debug, ReleaseSafe,
+ReleaseFast and ReleaseSmall, and the oracle reports `0 FAILED` on all 35 of its
+operations in each.
 
 **What the red frontier sweep turned out to be, which is the part worth
 keeping.** The paragraph this replaces traced every failing row to a defect in
@@ -567,10 +583,13 @@ been read past the compile.
 
 ## 3. Feature proposals, ranked by value against cost
 
-Separate from the defects above. Nothing here is a bug. P1 through P5 have
-landed, so F1 has been running while the rest of this section waited.
+Separate from the defects above. Nothing here is a bug. **All three features are
+done.** F1's coverage goal is met by two tiers rather than one: 35 of the 56
+audit-set operations are judged by the in-tree oracle and the other 21 by the
+MPFR corpus. What was refused rather than deferred is hand-written wider-precision
+reference series, and the refusal is recorded below rather than queued.
 
-### F1 — MOSTLY DONE: the oracle now reaches 35 of the 56 public operations
+### F1 — DONE: the 56-operation audit set is covered, by the oracle and by the corpus
 
 **What it was.** Take `tests/soundness_test.zig` from 8 operations to as close to
 56 as the machinery honestly allows, in three tiers by how the reference is
@@ -595,20 +614,34 @@ by 3 ULP fails 1,739 of 7,314, tightening `cbrt` by 3 ULP fails 6,895 of 7,251,
 dropping the third element of `hullOf` fails 4,231. That is what separates a
 live oracle from a decorative one.
 
-**And the tier-three direction changed after this section was written.**
-`tanh` is already in, built from the exponential identity with the cancellation
-paid for, and catching D17 is what it was built for. **Twenty-one elementary
-functions still have no containment oracle**, and all twenty-one remain open
-until that work lands — none of them is implemented and none of them is
-exercised. The plan is not to hand-write more reference series in this tree: an
-`f128` series is a *second implementation* of the same function, and the audit
-needed to convince anyone it is right costs more than the coverage it buys. The
-plan is an **independently generated MPFR directed-rounding containment corpus**,
-against which this library's answers are checked by containment at the declared
-rounding direction. T4, T6 and T7 in
-`docs/tests-and-architecture-plan.md` carry it and are **open** until that spec
-and its evidence land; the shape table there is kept as the fallback analysis,
-not as the plan.
+**And the tier-three direction changed, twice: once away from the plan this item
+was written with, once into the corpus.** `tanh` is in, built from the exponential
+with the cancellation paid for, and catching D17 is what it was built for. The
+remaining **21** are covered as well, and not by anything written in this tree.
+Hand-written reference series were refused on the grounds §2.2 of
+`docs/tests-and-architecture-plan.md` gives: an `f128` series is a *second
+implementation of the same function*, and the audit needed to convince anyone it
+is right costs more than the coverage it buys. What landed instead is an
+**independently generated MPFR directed-rounding containment corpus**:
+`tests/corpus/elementary.txt` carries **1886** rows over **24** operation labels,
+**21** of which are operations nothing else judges and **427** of which are
+exactly representable, and `tests/corpus_test.zig` checks every row for
+containment. T4, T6 and T7 in `docs/tests-and-architecture-plan.md` own it and
+are **done**, including the mutation evidence that the corpus bites. The eight
+shape designs that entry used to carry are kept there as the fallback analysis
+and are **not** a plan: nothing on that list was written and nothing on it is to
+be written.
+
+**What "the 56" is, so that the coverage claim is not over-read.** The 56 is the
+audit's own set: 28 public methods on `Interval` and 28 free functions in
+`src/interval_ext.zig`. Three helper methods were published afterwards and are
+outside that set — `Interval.halve` (A9), and `Interval.signOf` /
+`Interval.zeroSplit` (A3), which are the classifier the 35 in-tree operations
+read rather than operations they judge. All 28 of the audit-set methods are in
+the `Op` enum, and so are seven of the 28 free functions; the remaining 21 are
+the corpus labels. `35 + 21 = 56` with no remainder, and nothing here claims
+anything about the three added helpers or about every input of any of the 56:
+what each tier asserts is containment on drawn and named cases.
 
 ### F2 — DONE: `asin`, `acos` and `atanh` clip to their domains instead of refusing
 
@@ -641,25 +674,34 @@ argument, because a negative base to a general real exponent has no real value
 at any part of the argument and there is nothing to clip to. `acosh` already
 clipped.
 
-**What it is.** `src/interval_ext.zig:489` returns `null` unless the whole
-interval lies inside `[-1, 1]`; `:497` does the same for `acos`; `:576` refuses
+**What follows this line is the specification as it was written BEFORE the
+change landed, kept as history.** It is not a work list: the clipping is in the
+tree, the tests named below are in `tests/interval_ext_test.zig` under the names
+"asin: the argument is clipped to [-1, 1], and null only when it misses it
+whole", the same for `acos`, "atanh: the argument is clipped to (-1, 1) and the
+pole answers", and "domain: clipping must not have merged null into an answer".
+**Acceptance. MET**, on those four tests. Read the rest for the reasoning, not
+for the tree.
+
+**What it was.** `asin` returned `null` unless the whole
+interval lies inside `[-1, 1]`; `acos` did the same; `atanh` refused
 anything reaching `±1`. Clip instead: intersect the argument with the domain,
 evaluate the monotone function at the clipped ends, and let the pole produce an
 infinite endpoint. `atanh([-2, -0.5])` becomes `[-inf, atanh(-0.5)]` instead of
 of `null`. Under the proposal `null` would then mean what the package prose says
 of `src/root.zig` — the true image empty in the reals — which happens only when
 the whole interval is outside the domain, as `asin([2, 4])` already does. It is
-not what those three functions mean **today**: as they stand, `null` there also
+not what those three functions meant then: `null` also
 covers a partly valid argument, which is precisely the case this proposal
 removes. That asymmetry is the finding, and it is the same asymmetry
 `sqrt`, `log*` and `acosh` do not have, because those clip a partial violation
 and refuse only a wholly invalid one.
 
-**Why it matters to a user.** Today a caller doing global reachability gets no
-answer where a sound one exists, and the only workaround is to split the domain
-by hand at every call site. The change costs a caller nothing and saves them
-that. It is also the difference between a library that refuses and one that
-bounds, which is the identity this library is selling.
+**Why it matters to a user.** Before the change, a caller doing global
+reachability got no answer where a sound one exists, and the only workaround was
+to split the domain by hand at every call site. The change costs a caller nothing
+and saves them that. It is also the difference between a library that refuses and
+one that bounds, which is the identity this library is selling.
 
 **What it risks.** The `mapResult` null contract in `src/vector.zig`, which
 folds a scalar `?Interval` over a box and reports null as soon as one component
@@ -669,16 +711,18 @@ true image is empty", never "some component reached a boundary". `acosh`
 (`src/interval_ext.zig:568`) has the same shape and should be considered
 together.
 
-**Acceptance.** New tests in `tests/interval_ext_test.zig` asserting
-`atanh(Interval.init(-2.0, -0.5))` is non-null with `.lo == -inf` and
-`.hi <= atanh(-0.5)`, that `asin(Interval.init(-4.0, 0.5))` and
+**Acceptance, as specified before the change and since met.** New tests in
+`tests/interval_ext_test.zig` asserting `atanh(Interval.init(-2.0, -0.5))` is
+non-null with `.lo == -inf` and `.hi <= atanh(-0.5)`, that
+`asin(Interval.init(-4.0, 0.5))` and
 `acos(Interval.init(0.5, 4.0))` are non-null with the unclipped end at
 ±pi/2 widened, and that `asin(Interval.init(2.0, 4.0))`,
 `acos(Interval.init(2.0, 4.0))` and `atanh(Interval.init(1.0, 2.0))` still
 return `null`. A `mapResult` test over a `Vec(3)` with one component outside the
 domain must still return `null` while the other two would clip, proving the two
-answers were not merged. README rows `README.md:297`, `:298` and `:306` updated
-in the same commit.
+answers were not merged. (The last clause named three README rows by line number
+as work still to do; the row numbers are gone, the rows were walked by P7, and
+the citation is not carried forward.)
 
 ### F3 — DONE: `roundUp` / `roundDown` documented as the widening pair
 
@@ -693,39 +737,68 @@ separate decision — the acceptance is P3's, one grep.
 ## 4. Optimisation backlog for the next round
 
 Drawn from the step-4 ranking in `docs/performance-handover.md`, with the
-verdicts that ranking already reached and the figures it ended on. One caveat,
-restated because it governs every number here: **cheap operations move by up to
-44 % between two runs of the same binary on this shared host, so nothing under
-about 10 ns/op is claimable from a single pair of runs.** Take the measurement
-on an idle machine, or take three runs and compare minima. And do not re-derive
-a figure that file already holds: cite it, with its date and its mode.
+verdicts that ranking already reached and the figures it ended on. **All four
+are now resolved** — O2 and O3 landed, O1 is answered in the negative by a proof
+that was written afterwards, and O4 is refused and closed — so nothing here is a
+task. One caveat, restated because it governs every number here: **cheap
+operations move by up to 44 % between two runs of the same binary on this shared
+host, so nothing under about 10 ns/op is claimable from a single pair of runs.**
+Take the measurement on an idle machine, or take three runs and compare minima.
+And do not re-derive a figure that file already holds: cite it, with its date
+and its mode.
 
 **O1 — `scale` at 47.795 ns/op, six widening steps per endpoint.**
-`src/interval.zig`. Verdict: **NO, not without a proof.** Its doc comment is the
-reason and it is correct: a bound has to bound the whole chain, and the error of
-a chain is not the error of its last step. A direct formulation needs one step
-per endpoint, and nothing establishes that one step covers the chain of roundings
-the present composition encloses. It remains the single largest scalar win
-available — 3.1x `div`, 5.0x `mul`, 9.5x `add` at the round-2 capture — and it
-is blocked on an argument rather than on work. The prerequisite is a written
-enclosure for the fused form, checked against the `f128` oracle over the
-existing `scale` fuzz. Until that enclosure exists, any change here is a guess
-with a 48 ns/op prize attached. The step count did not change in round 2; what
-changed was the price of a step, which is why the figure moved at all.
+`src/interval.zig`. Verdict: **NO — and now answered rather than merely
+deferred.** An earlier version of this entry said "not without a proof", because the
+sound argument it asked for was missing: a direct formulation needs one outward
+step per endpoint, and nothing established that one step covers the chain of
+roundings the present composition encloses. **The proof was written, and it says
+no.**
+`docs/scale-enclosure.md` works the error budget in exact rational arithmetic over
+IEEE binary64 and closes in its §9, *Verdict*: one step buys half an ULP of the
+endpoint, the fused chain delivers up to one ULP of the midpoint, and the ratio
+`ulp(M) / ulp(L)` is unbounded on the family `[-1, 2^k]` at `G = 1 - 2^-53`. No
+fixed step count repairs it, and the only term that breaks the one-step bound is
+the rounding of the product `fl((hi - lo) * g)`. **So O1 is closed as answered, in
+the negative direction, and it is not to be reopened** — a form that does not
+compute `M - W` from two rounded `f64` intermediates is §8 of that document, and
+§8 is a different piece of work, not this optimisation. No executable line of
+`src/interval.zig` changed; the only edit was the paragraph in `scale`'s doc
+comment that cites the document. The arithmetic behind the verdict is in that
+document and the reasoning this entry was written on is kept here; the step count
+did not change in round 2, and what changed there was the price of a step, which
+is why the figure moved at all.
 
-**O2 — `box` re-deriving all `m` projections from scratch.** `box` in
-`src/lp.zig` calls `bounds(k)` for every `k`, and each call clones and
-eliminates, so the cost is `m` clones and `m * m` eliminations. Verdict: **YES,
-the soundness argument permits it.** Every elimination step is a sound
-over-approximation, so a projection computed from a shared prefix is at least as
-valid as one computed from a private copy; the only question is tightness, since
-the Tupper order is a row-count heuristic and sharing it fixes one order for all
-`m` projections. The `f128` oracle plus the existing lp characterisation tests
-decide it. Acceptance: `box` returns bit-identical or **wider** output against
-the current implementation on a fixed generated corpus, the `bench-lp` geometry
-report stays byte-identical, and the `bounds`-calling rows — 75,219 ns and
-152,932 ns at the round-2 capture — are far enough above the noise floor to be
-measured on a single pair of runs.
+**O2 — DONE: one shared elimination walk in `box`, in place of `m` private
+sweeps.** `box` in `src/lp.zig` used to call `bounds(k)` for every `k`, and each
+call cloned and eliminated, so the cost was `m` clones and `m * m` eliminations.
+The soundness argument that licensed the change is the one this entry gave:
+every elimination step is a sound over-approximation, so a projection computed
+from a shared prefix is at least as valid as one computed from a private copy;
+the only question was tightness, since the Tupper order is a row-count heuristic
+and sharing it fixes one order for all `m` projections. **That question is
+answered by the tree, not by argument.** `System.box` now keeps one chain and
+reads each projection off the state that chain has reached, and the named test
+`box: the shared walk answers exactly what a private sweep per variable answers`
+in `tests/lp_test.zig` pins the result against a re-implementation of the OLD
+two-line form: bit-identity is what the walk achieves, because it runs the same
+elimination order, and the containment assertions are kept as well so the test
+would still hold — the looser one — if a future change to the order made every
+projection merely wider. That was the acceptance, and the `null` cases were
+reasoned through rather than discovered: the doc comment on `box` says why the
+contradiction check the walk adds cannot move a `null`, and why the walk stops one
+variable short.
+
+**What it cost, and it was accepted deliberately.** It altered the elimination
+COUNT — roughly half as many eliminations — and it raised peak memory, because
+the walk holds a chain and one copy alive together where the old form held one.
+The `bench-lp` geometry report is unaffected: it records row counts, first-round
+predictions, chosen orders and boundedness, not the internal clone count.
+**No speed is claimed here.** No
+`ns/op` figure in `docs/performance-handover.md` has been re-measured since the
+2026-09-30 capture, so the `bounds`-calling rows this entry once proposed to
+measure — 75,219 ns and 152,932 ns — are still that capture's numbers and are not
+restated as current.
 
 **O3 — DONE: the `undersized` side channel in `mul` and `div`.** The flag was
 computed eagerly per corner, four byte stores and three unconditional reloads in
@@ -735,12 +808,15 @@ zero. It is gone: the operands are read at the one moment they are needed, by
 `Corners.undersizedAt`. The flag's *meaning* did not change, only *when* it is
 computed, and the widening step count is unchanged. **Claimed: `mul` 11.062 →
 9.639 ns/op, −13 %**, which clears the noise band. The corner tests and the
-underflow reproducers in the oracle are unchanged. This was a tidy-up that turned
-out to be measurable, and it is the only item in this section that has landed.
+underflow reproducers in the oracle are unchanged. This was a tidy-up that
+turned out to be measurable. O3 and O2 are the two items of this section that
+have landed; O1 is answered in the negative and O4 is refused, so none of the
+four is pending.
 
-**O4 — `powf` at 272.5 ns/op, seven interval operations composed.**
-`powerCorner` (`src/interval_ext.zig:351`) and the identity above it. Verdict:
-**NO. Clearly no, and this is settled.** The composition *is* the guarantee:
+**O4 — REFUSED and closed: `powf` at 272.5 ns/op, seven interval operations
+composed.** `powerCorner` (`src/interval_ext.zig`) and the identity above it.
+Verdict: **NO. Clearly no, and this is settled.** The composition *is* the
+guarantee:
 `log` widens three ULP, `mul` widens one, `exp` widens three, and the image of a
 rising function over an enclosure is the enclosure of its two ends. Replacing it
 with `std.math.pow` reintroduces the error that grows with the exponent —
@@ -770,9 +846,9 @@ coefficient whose interval contains zero.
 stops with one variable live, because the last round produces the contradiction
 test. Here `eliminationOrder` is contractually a full permutation and the final
 row count is pinned by tests, so removing the round changes observable behaviour
-and makes it a different function — the finding is recorded at
-`docs/performance-handover.md:375-381` and the tests are the reason it is
-closed.
+and makes it a different function — the finding is recorded in section 9 of
+`docs/performance-handover.md` under "stopping after `n - 1` variables", and the
+tests are the reason it is closed.
 
 **`powf`'s composition stays.** See O4. The composition is the proof; the
 measured 272.5 ns/op is the price and was accepted knowingly.

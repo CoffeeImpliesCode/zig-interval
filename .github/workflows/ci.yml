@@ -8,14 +8,30 @@
 # `zig build test` does not build the benchmarks (nothing in build.zig makes
 # `test_step`, or the install step, depend on `bench_step`, and the comment
 # beside `bench_step` says so) and because nothing ran automatically. The
-# `bench` job below is the fix; the other four jobs are the gate that was
-# already true by hand.
+# `bench` job below is the fix for that regression.
 #
 # The benchmarks matter more than a step name suggests: build.zig.zon:73-81
 # lists the files a published copy of this package carries, and the `bench/`
 # directory is not among them. A consumer never compiles a benchmark, so
 # nothing downstream of this repository will ever report a benchmark that
 # stopped building. It has to be a job.
+#
+# The rest of this file is the gate that was already true by hand, plus the two
+# parts this repository now owns outright: the pinned analyzers (`analyze`) and
+# a cross-test that actually RUNS its targets (`cross`) instead of only
+# compiling them.
+#
+# The analyzers and the cross harness are not downloaded here. Both come from
+# the distribution in tools/quality/ - pinned upstream revisions, reviewed
+# local patches, and a SHA256SUMS covering every file - installed by
+# scripts/install-quality-tools.sh into a prefix this workflow names
+# explicitly. No job below reads a developer's ~/.local/bin, and no job names
+# a moving branch: a tool whose revision is not recorded cannot be a gate,
+# because nobody can say afterwards what actually passed.
+#
+# Every job checks its own tree out. Without that step the workspace is empty
+# and `zig build` below has no build.zig to read. The Zig install steps are
+# unchanged and still digest-checked exactly as before.
 name: CI
 
 on:
@@ -93,6 +109,14 @@ jobs:
       matrix:
         optimize: [Debug, ReleaseSafe, ReleaseFast, ReleaseSmall]
     steps:
+      - name: Check out the repository
+        # Pinned to a COMMIT, not to the moving `v4` tag, for the same reason
+        # the Zig toolchain above is pinned to a digest: a gate that installs
+        # whatever a tag points at today cannot say what ran. This is the commit
+        # the v4 line pointed at when this line was written (a backport on
+        # releases-v4); bumping it is a deliberate edit with a reviewable diff.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
       - name: Install Zig ${{ env.ZIG_VERSION }}
         run: |
           set -euo pipefail
@@ -166,6 +190,9 @@ jobs:
     # mistake and a 329 GB incident.
     timeout-minutes: 30
     steps:
+      - name: Check out the repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
       - name: Install Zig ${{ env.ZIG_VERSION }}
         run: |
           set -euo pipefail
@@ -223,145 +250,134 @@ jobs:
       - name: bench-lp
         run: zig build bench-lp
 
-  # ------------------------------------------------------------------ cross --
-  # BUILD ONLY. Nothing in this job is executed, on any of the four targets,
-  # and the job name says so. A green row means COMPILED, and nothing else.
+  # -------------------------------------------------------------- analyzers --
+  # Reproducible enforcement of the four analyzers, from the pinned
+  # distribution in tools/quality/, installed into a prefix this job names,
+  # and run by the gate that prefix contains.
   #
-  # WHY THIS IS NOT cross-test, THOUGH THE PROJECT HAS A cross-test GATE.
-  # The project's real cross gate is cross-test: it BUILDS AND RUNS the whole
-  # test step under qemu_user and reports 348/348 on aarch64-linux,
-  # riscv64-linux and s390x-linux, and cross-test.profile.sh is that
-  # contract - the five targets, CROSS_TIMEOUT=900, and what its summary line
-  # does and does not mean. A GitHub runner cannot run it, and all three ways
-  # of getting it there are closed by what the thing is, not by taste:
+  # WHY AN INSTALLER AND NOT A BARE `ziglint`. Every analyzer used to be one
+  # developer's ~/.local/bin binary, with no recorded revision, no patch set
+  # and no checksum, so "the analyzers passed" named a set of binaries nobody
+  # else could rebuild or name. tools/quality/manifest.tsv now pins each
+  # upstream revision and each reviewed local patch, SHA256SUMS covers every
+  # file of the distribution, and the installer refuses to install anything
+  # whose hashes or pins do not match. There is no download-at-run-time and no
+  # moving branch in this job.
   #
-  #   (a) Vendor it. 746 lines at ~/.local/bin/cross-test, plus four sibling
-  #       helpers in ~/.local/lib/cross-test/ (~29 KB more, one of them a Zig
-  #       source file). No upstream, no tag, no release, no install recipe -
-  #       `cross-test --help` is its entire documentation. A copy in this tree
-  #       could never be diffed against the script a developer actually runs,
-  #       so it would drift the first time that script changed and CI would
-  #       be gating on an unmaintained fork. It is also five files, and this
-  #       change is one.
-  #   (b) Download it at run time. There is nowhere to download it from that
-  #       is not a developer's home directory, and an unpinned URL breaks
-  #       without notice. A cross gate that rots is not a gate.
-  #   (c) Keep the compile-only job, and say plainly in the file what it is.
-  #       CHOSEN. A CI job that works once and then fails, or that silently
-  #       no-ops, is worse than the build-only job it replaced, and the only
-  #       product of this file is a claim somebody is meant to believe.
+  # HOW THE FOUR ARE BUILT, because one of them is not built like the other
+  # three. The installer reads a NAMED recipe from each manifest row and
+  # dispatches it from a fixed table -- `default` is the tool's own default
+  # step, `cli` is its named install-only step -- and never evaluates that
+  # column as a command: an unrecognised name is exit 2 before anything is
+  # fetched, never a fallback. ziglint, zlint and zwanzig are `default`, a
+  # plain `zig build`. zbc is `cli`.
   #
-  # REVISIT THIS BLOCK WHEN THE HARNESS HAS A HOME. A tagged upstream release
-  # makes (b) honest - install it by tag and digest exactly as the Zig
-  # toolchain is installed above - and this comment wrong. A vendored copy
-  # reviewed into the tree makes (a) honest, and makes it wrong too. Either
-  # is the same amount of work: get the harness out of one person's home
-  # directory, and this whole job collapses into the command the profile
-  # already documents. Until then, the strongest claim CI can make is the
-  # one below, and it is made here rather than left to be guessed at.
+  # WHY zbc IS DIFFERENT, and what is NOT being done about it. zbc's build.zig
+  # leaves upstream's dogfood on the DEFAULT step: `zbc src/` over zbc's own
+  # src/, with a CLI that returns 1 on ANY finding. The pinned, patched tree
+  # reports 75 findings about itself, so a plain `zig build` in that checkout
+  # compiles, links, runs the analyzer over all 153 of its own files, and then
+  # exits 1 -- at every severity setting, upstream's own included. That is a
+  # property of the reviewed source, not a build failure a job can configure
+  # away. `zig build cli` is zbc's own install-only step: it builds and installs
+  # the same `zig-out/bin/zbc` and runs none of the self-check. The dogfood is
+  # NOT removed, weakened or re-severitised -- `b.default_step.dependOn(
+  # &self_check.step)` is upstream's own line and is untouched, and the reviewed
+  # patch that names the step changed only how the artifact install is wired,
+  # leaving the default step's install dependency exactly as upstream had it --
+  # and no rule, severity or finding is suppressed anywhere to make a binary
+  # installable.
   #
-  # HOW THE PROFILE IS CONSULTED, since the harness itself cannot be.
-  # cross-test.profile.sh is in the tree, so it is readable here, and the
-  # step named "the profile is the target contract" sources it as the trusted
-  # bash it is - the same way cross-test sources it - and then requires the
-  # matrix below to be exactly its TARGETS, less the one documented exclusion
-  # (the runner's own triple, which the `test` job already compiles AND runs
-  # in four optimise modes). A GitHub matrix cannot be computed from a file,
-  # so the matrix is a literal and that step is what makes the two provably
-  # the same set: add a target to the profile and this job goes red until
-  # the matrix here is updated on purpose, and it says which side drifted.
-  # The same step asserts CROSS_TIMEOUT is still set and prints it, so the
-  # execution budget a developer runs under is visible in every cross log.
-  # It does NOT bind here and is not silently reinterpreted as a job timeout:
-  # this job executes nothing, so there is nothing for it to bound.
+  # SO WHAT A GREEN INSTALL STEP MEANS, stated before anyone reads it wider: the
+  # pinned tree COMPILES, LINKS and INSTALLS. It says nothing about whether zbc
+  # finds anything in zbc. What this job asserts about findings is the gate run
+  # below, over THIS project's sources. The 75 self-findings are the analyzer's
+  # own outstanding work; they are recorded in tools/quality/PROVENANCE.md
+  # rather than worked around, and closing them is upstream's next step, not a
+  # gate this repository runs. The argv that ran -- step and optimize mode
+  # together -- is recorded per install in install-manifest.tsv and asserted in
+  # the verification step below.
   #
-  # WHAT THIS NOW CATCHES THAT IT DID NOT. Two gains, both compile-time,
-  # neither of them execution:
-  #   * s390x-linux, the project's ONLY byte-order coverage. Before this
-  #     change CI built no big-endian target at all, so a byte-order mistake
-  #     could not fail here even in principle - and the code such a mistake
-  #     breaks is the oracle's own: src/rounding.zig steps f64 neighbours by
-  #     u64 bit pattern, and the NaN contract trap reads bit patterns
-  #     (tests/nan_probe.zig). What this leg proves is that the library
-  #     COMPILES for a big-endian target: LLVM's BE code paths, the non-LE
-  #     object layout, the foreign std surface. It executes nothing, so it is
-  #     NOT evidence about byte-order BEHAVIOUR. That is the local harness's
-  #     to prove, and the profile says the same in its own words.
-  #   * Drift between the target set a developer verifies and the one CI
-  #     builds. Nothing in CI read that profile before, so a target could be
-  #     added to the harness set, or dropped from it, with this job still
-  #     green about a set nobody was building.
+  # ZIG_GATE_PREFIX IS SET EXPLICITLY, which is the point of naming it: with a
+  # prefix named, the installed gate resolves ziglint, zlint, zbc, zwanzig and
+  # cross-test to $prefix/bin/<name> and to nothing else - no PATH lookup, no
+  # $HOME/.local/bin - and a missing analyzer exits 2 naming the file. So
+  # "the tool was not found, carry on" is not a state this job can reach, and a
+  # green row means those exact four binaries ran.
   #
-  # HOW A GREEN ROW IS PRODUCED. The default `install` step is the one step
-  # in this build system that compiles the library and launches nothing, so
-  # it is the whole of what can honestly be claimed: every file src/root.zig
-  # reaches is compiled for the target, and no binary is run. That is a real
-  # gate - it is how a target-dependent @intCast, a float-format assumption
-  # or an alignment assumption gets caught - and it is not a runtime check.
+  # WHAT THE GATE ASSERTS is unchanged: ziglint, zlint and zwanzig fail on ANY
+  # finding, and zbc fails on any finding of severity ERROR. Every finding is
+  # printed by rule; no rule is disabled and nothing is excluded.
   #
-  # ReleaseSafe, not Debug: it is the mode the consumer fixture builds
-  # (`run_consumer` in build.zig passes -Doptimize=ReleaseSafe itself), and
-  # the mode a real consumer gets. The checked modes are already covered
-  # natively by the four-way matrix in the `test` job.
+  # ZBC_STRICT IS UNSET HERE, and that is the whole of the policy: **zbc splits
+  # by severity, warnings are advisory, and ZBC_STRICT=1 is the single knob that
+  # makes them fail.** There is no whitelist of permitted findings, no
+  # per-rule exception list and no file/line carve-out in this file or in the
+  # gate, so this job does NOT promise that any fixed set of warnings is
+  # tolerated.
   #
-  # WHY THE FOREIGN TESTS ARE NOT RUN BY HAND HERE, since a Linux runner
-  # could execute those binaries under QEMU and this build can be told to
-  # hand the same emulator to its own child probes (CROSS_TEST_RUNNER_KIND,
-  # CROSS_TEST_RUNNER; build.zig:7-18). The blocker is the harness's verdict
-  # logic, not the emulator: a bare `zig build` exit status cannot tell "this
-  # host cannot execute that target" from "a test failed", and cross-test
-  # separates them by classifying the `--summary all` output - compiled but
-  # unspawnable is runtime_unavailable, a run that happened and failed is
-  # tests_failed, and a build with no executed checks is never a pass. A
-  # hand-rolled version of that step reports a missing emulator as a red cross
-  # job, and on a runner where qemu IS installed it is a slower, less
-  # informative copy of the local gate. A gate that cannot tell a timeout
-  # from a wrong answer is precisely the confusion cross-test.profile.sh
-  # warns about in its opening section; do not reintroduce it here with less
-  # information. The NaN probe is the concrete cost of guessing: a cross run
-  # that silently cannot launch its probe is worse than no cross run, because
-  # the trap is the contract and the probe keeps well-formed controls exactly
-  # so a failed launch cannot be mistaken for a clean one.
+  # What is expected on THIS tree: **three reviewed zbc warnings**, the
+  # float-to-integer conversions without a clamp, each read and answered with
+  # the range proofs at criticalRange in src/interval_ext.zig and expRef in
+  # tests/soundness_shared.zig. Those three stay advisory.
   #
-  # build_only IS NOT A FAILURE, AND THE PROFILE AGREES. On a host with no
-  # Wine, cross-test records x86_64-windows as build_only/runtime_unavailable,
-  # never counts it as a pass, and still exits 0 - `status=partial pass=4
-  # fail=0 build_only=1` is this project's normal clean result, and
-  # --require-runners would invert it and is not usable here. This job prints
-  # no status line, because nothing here runs the harness: its entire verdict
-  # is the exit status of one compile per leg, and the x86_64-windows leg
-  # must produce a compiled library and nothing more. The two documents
-  # agree on the only point that matters: compiled is not passed, and a
-  # target with no runtime is not a failure.
+  # And to be plain about what this job does NOT promise: **this is not a
+  # warning-only run.** An ERROR from ANY zbc rule fails the analyze job, and
+  # that now includes the six rules the pinned source carries at upstream
+  # severity -- memset_undef_after_len_truncation,
+  # f32_narrowing_int_to_float, index_minus_one_without_zero_guard,
+  # index_type_narrowing_wraparound, intcast_of_negated_signed and
+  # midpoint_addition_overflow -- which were downgraded to warning by an
+  # unreviewed capture and have been restored on purpose. A numeric library of
+  # this shape can legitimately trip index-type-narrowing-wraparound or
+  # intcast-of-negated-signed, and if it does the remedy is a fix in src/,
+  # never a severity edit. As an instance of the SHAPE, not a finding here: a
+  # ReleaseFast build of the patched analyzer dogfooding itself with `zbc src/`
+  # reported index-type-narrowing-wraparound in the analyzer's own
+  # src/type_engine/segmented_list.zig -- that path is in the pinned zbc tree,
+  # NOT in this repository, which has no src/type_engine/ at all. Whether
+  # zig-interval trips any of the six is a separate question this file does not
+  # answer. Do not read a green row as "only the three warnings are
+  # outstanding"; read the per-rule histograms the gate prints.
   #
-  # SO A READER SHOULD HOLD EXACTLY THIS. `cross` proves the library compiles
-  # for four foreign targets, one of them big-endian, and proves the target
-  # set has not drifted from cross-test.profile.sh. It proves nothing about
-  # how the library BEHAVES on any of them. For that, run cross-test; only
-  # its own summary can upgrade a row, and a build_only or no_test_results
-  # entry in it is not soundness evidence either.
-  cross:
-    name: cross ${{ matrix.target }} (build only, never run)
+  # The other honest limit: with STRICT unset, a FOURTH warning would print and
+  # would not fail the job, which is why setting ZBC_STRICT=1 is the right move
+  # the moment a new warning appears that nobody has read. Changing interval
+  # arithmetic to satisfy a caller-insensitive analysis is not the alternative.
+  #
+  # The gate's fmt / build / test / ast-check sections run too.
+  #
+  # --no-cross drops section 9 and nothing else. That section is the `cross`
+  # job below: same harness, same five profile targets, same verdicts, with the
+  # per-target runtime result asserted rather than summarised. Running it here
+  # as well would double the most expensive thing in this file.
+  #
+  # NO PERFORMANCE THRESHOLD: the gate prints timings, and none of them is a gate.
+  analyze:
+    name: analyzers (ziglint, zlint, zbc, zwanzig)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # s390x-linux is the big-endian row, and it is the reason the guard
-        # step below exists: the profile lists it, and a matrix written by
-        # hand drifts from the profile silently. x86_64-linux is in the
-        # profile too and is deliberately NOT a leg here - it is this
-        # runner's own triple, and the `test` job compiles and runs it four
-        # times over. The guard step names that exclusion in the one place
-        # it is written down.
-        target: [aarch64-linux, riscv64-linux, s390x-linux, x86_64-windows]
+    # Generous, because the four analyzers are BUILT from pinned source here,
+    # and then the gate builds and runs the suite on top of that. It is a
+    # budget, not a target: nothing in this job compares a number to a limit.
+    timeout-minutes: 90
     env:
-      # This job's own view of the legs above, for the guard step: a matrix
-      # cannot be read back from inside a step, and the guard needs the whole
-      # set to compare against the profile. The step also checks that this
-      # leg is one of them, so the matrix, this list and the profile are all
-      # tied together by one comparison rather than by three copies agreeing.
-      CROSS_LEGS: aarch64-linux riscv64-linux s390x-linux x86_64-windows
+      # Absolute, runner-local, created by this job. Never $HOME, never a
+      # default, never NFS: /tmp on this runner is the runner's own local
+      # volume, and both the installer and the gate refuse a network
+      # filesystem for a cache.
+      QUALITY_TOOLS_PREFIX: /tmp/zig-interval-quality/prefix
+      QUALITY_TOOLS_WORK_ROOT: /tmp/zig-interval-quality/work
+      # The same directory as QUALITY_TOOLS_PREFIX, named a second time because
+      # it is a different piece of the harness's interface: it is how the
+      # installed gate is told to resolve its tools inside the prefix.
+      ZIG_GATE_PREFIX: /tmp/zig-interval-quality/prefix
+      GATE_SCRATCH: /tmp/zig-interval-quality/scratch
+      GATE_CACHE_DIR: /tmp/zig-interval-quality/zig-cache
+      GATE_GLOBAL_CACHE_DIR: /tmp/zig-interval-quality/zig-global-cache
     steps:
+      - name: Check out the repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
       - name: Install Zig ${{ env.ZIG_VERSION }}
         run: |
           set -euo pipefail
@@ -373,81 +389,595 @@ jobs:
           tar -xf "/tmp/${tgz}" --strip-components=1 -C "/tmp/zig-${ZIG_VERSION}"
           test "$(/tmp/zig-${ZIG_VERSION}/zig version)" = "${ZIG_VERSION}"
           echo "/tmp/zig-${ZIG_VERSION}" >> "$GITHUB_PATH"
+          # ZIG as an ABSOLUTE path rather than a PATH lookup: the installer
+          # refuses a compiler it did not test, and the gate runs `zig fmt` and
+          # `zig build` through it. A version-selecting shim on PATH would build
+          # and lint with something this workflow never pinned.
+          echo "ZIG=/tmp/zig-${ZIG_VERSION}/zig" >> "$GITHUB_ENV"
 
-      - name: the profile is the target contract
-        env:
-          CROSS_TARGET: ${{ matrix.target }}
+      - name: Restore the pinned quality-tool sources
+        uses: actions/cache@v4
+        with:
+          path: /tmp/zig-interval-quality/work
+          # The work root, and only the work root. It holds fetched upstream
+          # sources and their build caches, and it is re-used only when four
+          # things hold. The first three are BINDINGS: the revision, the ordered
+          # patch hashes and the src source digest recorded in the restored
+          # stamp must be the ones THIS job's manifest.tsv rows list -- a stamp
+          # that only agrees with its own checkout is not evidence of which tree
+          # it is about, and an unpatched tool whose pin had since moved would
+          # otherwise be reused as though it were the new pin. The fourth is the
+          # disk re-derivation, and it is what stops a restored work root from
+          # running an edit to a build script that no revision pin covers: the
+          # checked-out commit is the bound revision, a freshly computed src
+          # digest is the bound digest, and a digest of the BUILD INPUTS
+          # (build.zig, build.zig.zon, @embedFile targets, top-level build
+          # files) still matches what the stamp recorded for them. Anything
+          # short of all four re-fetches, so a restored entry is either the
+          # pinned tree or is discarded.
+          # The install PREFIX is deliberately NOT cached: those binaries are
+          # this job's product, not an input to it.
+          key: quality-tools-${{ env.ZIG_VERSION }}-${{ runner.os }}-${{ runner.arch }}-analyzers-${{ hashFiles('tools/quality/manifest.tsv', 'tools/quality/SHA256SUMS', 'tools/quality/harness/**', 'tools/quality/patches/**') }}
+
+      - name: Install the pinned analyzers and the gate
         run: |
           set -euo pipefail
-          # Sourced as trusted bash, which is how cross-test itself reads it.
-          # Sourced AFTER the shell options are set, and the profile is not
-          # allowed to change them: cross-test runs without -e and forbids a
-          # profile from touching shell options, traps or the working
-          # directory, so nothing in that file can quietly disarm this step.
+          # analyzers for the four tools, zig-gate for the runner. The installer
+          # adds cross-test because the gate's section 9 executes it and prints
+          # that it did; this job then runs the gate with --no-cross, so that
+          # binary is installed rather than built twice for nothing.
+          # No -Doptimize, so every analyzer builds in the installer's default
+          # ReleaseFast; which STEP each one is built by is the manifest's
+          # recipe column, not this file's, and is checked against the
+          # installed manifest below.
+
+          bash scripts/install-quality-tools.sh \
+            --prefix "$QUALITY_TOOLS_PREFIX" \
+            --work-root "$QUALITY_TOOLS_WORK_ROOT" \
+            --zig "$ZIG" \
+            --only analyzers,zig-gate
+
+      - name: the installed prefix matches the install manifest, and the tree matches SHA256SUMS
+        run: |
+          set -euo pipefail
+          # TWO DIFFERENT CHECKS, and they are not interchangeable.
+          #
+          # --verify-only hashes what is CHECKED IN: tools/quality/SHA256SUMS
+          # against every file under tools/quality/, and nothing else. It never
+          # opens $QUALITY_TOOLS_PREFIX, it creates no prefix and no work root,
+          # and a green run says the distribution this job checked out is
+          # intact. It is the right check for that and no evidence at all about
+          # what landed in the prefix -- which is what the second half below
+          # is for. Claiming otherwise here would have made the step assert a
+          # guarantee it does not provide.
+          bash scripts/install-quality-tools.sh \
+            --prefix "$QUALITY_TOOLS_PREFIX" \
+            --work-root "$QUALITY_TOOLS_WORK_ROOT" \
+            --zig "$ZIG" \
+            --verify-only
+
+          # All four analyzers must be present AND executable. Present but not
+          # executable is the state a truncated copy or a bad mode leaves, and
+          # a bare `test` would say nothing about which file was wrong.
+          for tool in ziglint zlint zbc zwanzig; do
+            if [ ! -x "$QUALITY_TOOLS_PREFIX/bin/$tool" ]; then
+              printf 'analyze: %s/bin/%s is missing or not executable.\n' \
+                "$QUALITY_TOOLS_PREFIX" "$tool" >&2
+              exit 1
+            fi
+          done
+
+          # EVERY row of the INSTALLED manifest is re-hashed against the file
+          # it names. This reads the manifest the installer actually wrote --
+          # it is not re-derived, classified or reconstructed here -- and turns
+          # the install_sha256 column from something the installer recorded and
+          # nobody read into the check it was written to be. --strict is what
+          # makes a MISSING file a failure instead of a skip, so a truncated or
+          # deleted binary cannot pass by being absent.
+          manifest="$QUALITY_TOOLS_PREFIX/install-manifest.tsv"
+          if [ ! -s "$manifest" ]; then
+            printf 'analyze: %s is missing or empty; there is nothing to re-hash.\n' \
+              "$manifest" >&2
+            exit 1
+          fi
+          rows=$(awk -F'\t' '!/^#/ && NF { n++ } END { print n + 0 }' "$manifest")
+          if [ "$rows" -lt 1 ]; then
+            printf 'analyze: %s lists no installed files.\n' "$manifest" >&2
+            exit 1
+          fi
+          printf 'analyze: re-hashing %s installed files against %s\n' "$rows" "$manifest"
+          (
+            cd "$QUALITY_TOOLS_PREFIX"
+            awk -F'\t' '!/^#/ && NF { print $8 "  " $7 }' install-manifest.tsv |
+              sha256sum --check --strict --quiet -
+          )
+          printf 'analyze: every installed payload file matches its recorded sha256 (the manifest excludes itself).\n'
+
+          # WHAT ACTUALLY BUILT EACH BINARY is column 10 of the manifest the
+          # installer wrote, and it is checked here rather than assumed. This
+          # step installs with no -Doptimize, so all four rows must record
+          # ReleaseFast, and zbc must be the one recording the `cli` step. A
+          # silent revert to a plain `zig build` for zbc would still produce a
+          # working binary and pass every hash above -- the dogfood is a
+          # property of the analyzer's own checkout and never runs in this job
+          # either way -- so the recorded recipe is the only thing that tells
+          # the two apart. Four rows is the count too: a manifest missing an
+          # analyzer fails here rather than shrinking the gate.
+          awk -F'\t' '
+            !/^#/ && NF == 12 && $2 == "analyzer" {
+              n++
+              want = ($1 == "zbc") ? "zig build cli -Doptimize=ReleaseFast" \
+                                    : "zig build -Doptimize=ReleaseFast"
+              if ($10 != want) {
+                printf "analyze: %s records build_recipe [%s], expected [%s]\n", $1, $10, want
+                bad = 1
+              }
+            }
+            END {
+              if (n != 4) { printf "analyze: %d analyzer rows in the installed manifest, expected 4\n", n; bad = 1 }
+              exit bad + 0
+            }
+          ' "$manifest" || exit 1
+          printf 'analyze: every analyzer row records the recipe it was built by.\n'
+
+          # LICENSING, asserted rather than assumed. Every bin/ and
+          # lib/cross-test/ file this job installs is first-party and ships
+          # under this repository's own MIT, so the notice that covers them must
+          # be IN the prefix -- and the re-hash above already proved the file is
+          # there and is byte-for-byte what was shipped, because a missing row
+          # would fail --strict. Naming it here makes the guarantee legible in
+          # the log instead of something a reader has to infer from a directory
+          # listing, and keeps the four upstream notices on the same footing.
+          notice="$QUALITY_TOOLS_PREFIX/share/zig-interval-quality/licenses"
+          for f in harness.LICENSE zbc.LICENSE ziglint.LICENSE zlint.LICENSE zwanzig.LICENSE; do
+            if ! [ -r "$notice/$f" ]; then
+              printf 'analyze: %s/%s is missing; the prefix carries unlabelled files.\n' \
+                "$notice" "$f" >&2
+              exit 1
+            fi
+          done
+          printf 'analyze: licences present in the prefix: harness.LICENSE (this repository, MIT) and the four upstream analyser notices.\n'
+          printf 'analyze: installed tools, as recorded in install-manifest.tsv:\n'
+          cat "$manifest"
+
+      - name: Create the runner-local scratch root
+        run: |
+          set -euo pipefail
+          # GATE_SCRATCH has to EXIST before the gate is started: an explicitly
+          # named scratch directory is validated as an existing, writable,
+          # non-symlink directory, and the gate stops with exit 2 rather than
+          # creating one behind an operator's back. The Zig cache directories
+          # do not need this - the gate validates their location and Zig
+          # creates them - but their parent has to exist either way, which is
+          # what this mkdir gives them.
+          # /tmp is accepted here because this runner is not a managed cluster
+          # host: the portable rule is a writable local path that is not NFS,
+          # and on a buildhost host the same variable must name a directory under
+          # /home/tmp{,2}. This job does not decide which mode applies; it
+          # names a path the runner owns.
+          mkdir -p -- "$GATE_SCRATCH" "$GATE_CACHE_DIR" "$GATE_GLOBAL_CACHE_DIR"
+          df -h -- "$GATE_SCRATCH" | tail -1
+
+      - name: zig-gate from the installed prefix
+        run: |
+          set -euo pipefail
+          # The exit status is classified rather than passed on blindly,
+          # because the gate's contract is 0 = every section passed, 1 = a
+          # section that asserts findings did, 2 = setup or a missing tool. 2
+          # is NOT a findings result and must not be read as one.
+          gate_exit=0
+          "$QUALITY_TOOLS_PREFIX/bin/zig-gate" --no-cross || gate_exit=$?
+          case "$gate_exit" in
+            0)
+              printf 'analyze: every gate section passed, zero findings in ziglint, zlint and zwanzig.\n'
+              ;;
+            1)
+              printf 'analyze: exit 1 - a section that asserts findings did; the per-rule\n' >&2
+              printf 'analyze: histograms above name which tool and which rules.\n' >&2
+              ;;
+            2)
+              printf 'analyze: exit 2 - setup failed, or a required tool is missing from %s.\n' \
+                "$ZIG_GATE_PREFIX" >&2
+              printf 'analyze: this is not a findings result, and nothing was skipped silently.\n' >&2
+              ;;
+            *)
+              printf 'analyze: exit %s is outside the gate contract (0 pass, 1 findings, 2 setup).\n' \
+                "$gate_exit" >&2
+              ;;
+          esac
+          exit "$gate_exit"
+
+  # ------------------------------------------------------------------ cross --
+  # The project's real cross gate, run for real: cross-test builds AND runs the
+  # whole test step for every target in cross-test.profile.sh - x86_64-linux
+  # natively, aarch64-linux, riscv64-linux and s390x-linux under qemu_user, and
+  # x86_64-windows as compile-only coverage, because this job installs no wine.
+  #
+  # WHY THE SHAPE CHANGED. This job used to be a four-leg matrix that compiled
+  # one target per leg and then explained, at length, why it could not execute
+  # them: the harness lived only in one developer's home directory, so there was
+  # nothing CI could install and a compile-only row was the only honest claim
+  # available. The harness is now a pinned, checksummed distribution in
+  # tools/quality/ that scripts/install-quality-tools.sh installs into
+  # $QUALITY_TOOLS_PREFIX, so there is something to run, and "compiled" is no
+  # longer the strongest thing this job can say. Only the harness subset is
+  # installed here: the four analyzers are four source builds and nothing in
+  # this job uses them.
+  #
+  # THE VERDICT IS THE HARNESS'S, NEVER THIS FILE'S. cross-test separates
+  # "compiled but this host cannot execute it" from "a test failed" by
+  # classifying what it actually ran - the first is runtime_unavailable and
+  # becomes build_only, the second is a failure, and a build with no executed
+  # checks is never a pass. This job reads that classification out of the
+  # summary the harness wrote. There is no exit-status heuristic here, and a
+  # missing emulator cannot be mistaken for a green row: the step before the run
+  # requires each foreign Linux runner to be installed and executable.
+  #
+  # WHAT A GREEN ROW MEANS, read from
+  # $CROSS_PREFIX/runs/$CROSS_RUN_ID/summary.json - the run-scoped summary; the
+  # atomically replaced $CROSS_PREFIX/cross-test-summary.json holds the same
+  # document:
+  #   x86_64-linux    build pass, run pass, tests > 0
+  #   aarch64-linux   build pass, run pass, tests > 0   (qemu_user)
+  #   riscv64-linux   build pass, run pass, tests > 0   (qemu_user)
+  #   s390x-linux     build pass, run pass, tests > 0   (qemu_user, and
+  #                   BIG-ENDIAN: the project's only byte-order coverage, which
+  #                   the compile-only matrix never executed either, in a
+  #                   repository whose src/rounding.zig steps f64 neighbours by
+  #                   u64 bit pattern)
+  #   x86_64-windows  compiles, and is NOT counted as a pass. With no wine
+  #                   installed that is build_only/runtime_unavailable, which the
+  #                   harness reports as compile coverage and never as a runtime
+  #                   result. --require-runners is deliberately NOT passed: it
+  #                   would turn this project's normal clean result into a
+  #                   failure, exactly as the profile says.
+  #
+  # The NaN probe is not special-cased away. build.zig hands the detected
+  # user-mode emulator to the child probe the soundness reproducers spawn, so a
+  # probe that could not launch fails instead of passing quietly.
+  #
+  # THE PROFILE IS THE CONTRACT, so it is READ rather than retyped. The guard
+  # step sources ./cross-test.profile.sh - trusted bash, exactly as cross-test
+  # does - and requires its TARGETS, its CROSS_TIMEOUT and its concurrency to
+  # be the ones written below. A workflow cannot be computed from a file, so a
+  # target added to or dropped from the profile turns this job red until the two
+  # lists agree on purpose, and the message says which side drifted.
+  #
+  # No performance threshold here either: the per-target wall clock is printed
+  # as information and bounded only by the profile's own budget.
+  cross:
+    name: cross-test (every profile target, executed)
+    runs-on: ubuntu-latest
+    # A budget, not a target. Four Linux targets are built and run, three of
+    # them under emulation, at the profile's CROSS_TIMEOUT=900 s per target run
+    # with two targets in flight and one build job each. 120 minutes leaves room
+    # for a cold cache without turning a slow shared runner into a red gate:
+    # cross-test's own per-target deadline still reports a timeout as a timeout,
+    # which is what the profile's opening section asks a reader to look for
+    # first, and it says so in the log rather than in this job's exit status.
+    timeout-minutes: 120
+    env:
+      QUALITY_TOOLS_PREFIX: /tmp/zig-interval-quality/prefix
+      QUALITY_TOOLS_WORK_ROOT: /tmp/zig-interval-quality/work
+      # cross-test REFUSES to start without TMPDIR and keeps its own state
+      # there, so it is named here rather than inherited from the shell: /tmp on
+      # this runner is the runner's own local volume, and nothing under /vol is
+      # used, because a Zig cache on that NFS mount dies on renameat2.
+      TMPDIR: /tmp/zig-interval-quality/tmp
+      ZIG_GLOBAL_CACHE_DIR: /tmp/zig-interval-quality/zig-global-cache
+      # An absolute output prefix on a local volume. cross-test keeps the
+      # per-target logs and both summaries here and rejects an NFS root.
+      CROSS_PREFIX: /tmp/zig-interval-quality/cross-out
+      # Named, so the verdict is read from THIS run's summary file rather than
+      # from whichever file happens to be newest in the tree.
+      CROSS_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}
+      # THE AMBIENT CONCURRENCY IS CLEARED, DELIBERATELY, IN BOTH NAMES
+      # cross-test reads. It resolves, in order:
+      #     CROSS_JOBS      = $CLI_JOBS       ?: $CROSS_JOBS      ?: $MAX_JOBS ?: 2
+      #     CROSS_BUILD_JOBS= $CLI_BUILD_JOBS ?: $CROSS_BUILD_JOBS?: $ZIG_JOBS  ?: 1
+      # and cross-test.profile.sh sets neither CROSS_JOBS nor CROSS_BUILD_JOBS.
+      # So the guard step's `${CROSS_JOBS:-2}` check used to pass VACUOUSLY --
+      # it could not see the value the harness would actually take -- and an
+      # inherited MAX_JOBS or ZIG_JOBS silently decided the fan-out. The only
+      # symptom appeared two hours later, in the summary's target_jobs field,
+      # which is a two-hour failure to learn that an environment variable was
+      # set. Empty is not unset to `${var:-}`: it falls through to the built-in
+      # default, which is the one this job asserts.
+      MAX_JOBS: ""
+      ZIG_JOBS: ""
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        run: |
+          set -euo pipefail
+          tgz="zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSL --retry 3 --retry-delay 2 -o "/tmp/${tgz}" \
+            "https://ziglang.org/download/${ZIG_VERSION}/${tgz}"
+          echo "${ZIG_SHA256}  /tmp/${tgz}" | sha256sum --check -
+          mkdir -p "/tmp/zig-${ZIG_VERSION}"
+          tar -xf "/tmp/${tgz}" --strip-components=1 -C "/tmp/zig-${ZIG_VERSION}"
+          test "$(/tmp/zig-${ZIG_VERSION}/zig version)" = "${ZIG_VERSION}"
+          echo "/tmp/zig-${ZIG_VERSION}" >> "$GITHUB_PATH"
+          # Pinned by path, for cross-test: it starts from "${ZIG:-zig}" and
+          # probes that executable, so a bare name would take whatever the
+          # runner's PATH happened to offer.
+          echo "ZIG=/tmp/zig-${ZIG_VERSION}/zig" >> "$GITHUB_ENV"
+
+      - name: Install the QEMU user-mode runtimes
+        run: |
+          set -euo pipefail
+          # The standard Ubuntu package, one package for every foreign Linux
+          # triple in the profile. The guard step below then checks each runner
+          # by name, so an apt change that renames or drops one of these binaries
+          # fails the job HERE instead of quietly demoting a foreign target to
+          # build_only - the one failure mode a cross gate cannot have.
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends qemu-user-static
+
+      - name: Restore the pinned harness sources
+        uses: actions/cache@v4
+        with:
+          path: /tmp/zig-interval-quality/work
+          # Same work root and same pin hash as the analyze job, with its own
+          # key dimension for the reason the .zig-cache keys below carry one:
+          # GitHub reserves a key on the first save and refuses a second save
+          # for it, so two jobs sharing one key would make it warm only when one
+          # of them runs.
+          key: quality-tools-${{ env.ZIG_VERSION }}-${{ runner.os }}-${{ runner.arch }}-harness-${{ hashFiles('tools/quality/manifest.tsv', 'tools/quality/SHA256SUMS', 'tools/quality/harness/**', 'tools/quality/patches/**') }}
+
+      - name: Install the pinned cross-test harness
+        run: |
+          set -euo pipefail
+          # --only cross-test, not --only all: this job runs no analyzer, and
+          # installing one here would cost four source builds for nothing.
+          bash scripts/install-quality-tools.sh \
+            --prefix "$QUALITY_TOOLS_PREFIX" \
+            --work-root "$QUALITY_TOOLS_WORK_ROOT" \
+            --zig "$ZIG" \
+            --only cross-test
+          # The helper is not optional decoration: cross-test's scratch policy
+          # lives in it, and a cross-test without it is not the harness this job
+          # claims to run. Both checks say what is missing rather than exiting
+          # silently on a bare `test`.
+          if [ ! -x "$QUALITY_TOOLS_PREFIX/bin/cross-test" ]; then
+            printf 'cross: %s/bin/cross-test is missing or not executable after the install.\n' \
+              "$QUALITY_TOOLS_PREFIX" >&2
+            exit 1
+          fi
+          if [ ! -r "$QUALITY_TOOLS_PREFIX/lib/cross-test/scratch-contract.sh" ]; then
+            printf 'cross: %s/lib/cross-test/scratch-contract.sh is missing after the install.\n' \
+              "$QUALITY_TOOLS_PREFIX" >&2
+            exit 1
+          fi
+
+      - name: the profile is the target contract, and every runner is installed
+        env:
+          # The profile's TARGETS, restated so the two can be compared. Update
+          # this on purpose when the profile changes; the harness, not this job,
+          # decides what actually runs.
+          EXPECTED_TARGETS: x86_64-linux aarch64-linux riscv64-linux s390x-linux x86_64-windows
+        run: |
+          set -euo pipefail
+          # Sourced AFTER the shell options are set and as trusted bash, which is
+          # how cross-test itself reads it. The profile may not change shell
+          # options, traps or the working directory, so nothing in that file can
+          # quietly disarm this step.
           source ./cross-test.profile.sh
           if ! declare -p TARGETS >/dev/null 2>&1; then
-            printf 'cross: ./cross-test.profile.sh did not define TARGETS as a bash array.\n' >&2
+            printf 'cross: ./cross-test.profile.sh no longer defines TARGETS as a bash array.\n' >&2
             printf 'cross: this job is built on that file, so it cannot pick a target set on its own.\n' >&2
             exit 1
           fi
-          if [[ -z ${CROSS_TIMEOUT:-} ]]; then
-            printf 'cross: ./cross-test.profile.sh no longer sets CROSS_TIMEOUT. This job executes\n' >&2
-            printf 'cross: nothing, so it cannot notice the execution budget going missing.\n' >&2
-            exit 1
-          fi
-          # The one documented exclusion: the runner's own triple. The `test`
-          # job compiles and runs x86_64-linux in four optimise modes, so a
-          # fifth build-only native leg would cost a runner and add no
-          # evidence about a foreign target.
-          covered_by_test=(x86_64-linux)
-          read -ra legs <<<"${CROSS_LEGS}"
-          expected=()
-          for t in "${TARGETS[@]}"; do
-            keep=1
-            for c in "${covered_by_test[@]}"; do
-              if [[ ${t} == "${c}" ]]; then keep=0; fi
-            done
-            if (( keep )); then expected+=("${t}"); fi
-          done
-          missing=() extra=()
-          for t in "${expected[@]}"; do
-            if [[ " ${CROSS_LEGS} " != *" ${t} "* ]]; then missing+=("${t}"); fi
-          done
-          for l in "${legs[@]}"; do
-            if [[ " ${expected[*]} " != *" ${l} "* ]]; then extra+=("${l}"); fi
-          done
-          if (( ${#missing[@]} + ${#extra[@]} > 0 )); then
+          read -ra expected <<<"$EXPECTED_TARGETS"
+          if [[ " ${TARGETS[*]} " != " ${expected[*]} " ]]; then
             printf 'cross: this job and cross-test.profile.sh disagree about the target set.\n' >&2
-            printf 'cross:   in the profile, not built here: %s\n' "${missing[*]:-(none)}" >&2
-            printf 'cross:   built here, not in the profile: %s\n' "${extra[*]:-(none)}" >&2
-            printf 'cross: The profile is the contract; update the matrix in this job on purpose.\n' >&2
+            printf 'cross:   in the profile: %s\n' "${TARGETS[*]}" >&2
+            printf 'cross:   expected here: %s\n' "${expected[*]}" >&2
+            printf 'cross: The profile is the contract; update EXPECTED_TARGETS on purpose.\n' >&2
             exit 1
           fi
-          case " ${CROSS_LEGS} " in
-            *" ${CROSS_TARGET} "*) ;;
-            *)
-              printf 'cross: this leg builds %s, which is not in CROSS_LEGS (%s).\n' \
-                "${CROSS_TARGET}" "${CROSS_LEGS}" >&2
+          if [[ ${CROSS_TIMEOUT:-} != 900 ]]; then
+            printf 'cross: profile CROSS_TIMEOUT is %s, not the 900 this job asserts.\n' \
+              "${CROSS_TIMEOUT:-unset}" >&2
+            exit 1
+          fi
+          if [[ ${CROSS_JOBS:-2} != 2 || ${CROSS_BUILD_JOBS:-1} != 1 ]]; then
+            printf 'cross: profile concurrency is targets=%s builds=%s, not 2 targets / 1 build job.\n' \
+              "${CROSS_JOBS:-unset}" "${CROSS_BUILD_JOBS:-unset}" >&2
+            exit 1
+          fi
+          # ... AND the value the harness will actually resolve to. The check
+          # above reads the profile's own declaration; this one reproduces the
+          # harness's resolution order exactly -- CLI flags first, and this job
+          # passes none, then the profile variable, then the ambient one the
+          # job env empties, then the built-in default. Asserting only the
+          # declaration is how an inherited MAX_JOBS used to survive this guard
+          # and surface as a red job two hours into the emulated runs.
+          resolved_target_jobs=${CROSS_JOBS:-${MAX_JOBS:-2}}
+          resolved_build_jobs=${CROSS_BUILD_JOBS:-${ZIG_JOBS:-1}}
+          if [[ $resolved_target_jobs != 2 || $resolved_build_jobs != 1 ]]; then
+            printf 'cross: cross-test will resolve targets=%s builds=%s, not 2 targets / 1 build job.\n' \
+              "$resolved_target_jobs" "$resolved_build_jobs" >&2
+            printf 'cross: the job environment carries MAX_JOBS=%s ZIG_JOBS=%s.\n' \
+              "${MAX_JOBS:-unset}" "${ZIG_JOBS:-unset}" >&2
+            exit 1
+          fi
+          # A PREREQUISITE check, not a verdict: every foreign Linux row must
+          # have its user-mode emulator present before the run, so a missing
+          # package is a red job instead of a build_only row that reads like
+          # coverage. The harness's own detection still decides what runs; this
+          # only refuses to start without the emulator.
+          host_arch=$(uname -m)
+          for t in "${TARGETS[@]}"; do
+            [[ "$t" == "${host_arch}-linux" ]] && continue
+            case "$t" in
+              *-linux) ;;
+              *) continue ;;
+            esac
+            arch=${t%%-*}
+            if command -v -- "qemu-$arch" >/dev/null 2>&1; then
+              runner=$(command -v -- "qemu-$arch")
+            elif command -v -- "qemu-$arch-static" >/dev/null 2>&1; then
+              runner=$(command -v -- "qemu-$arch-static")
+            else
+              runner=
+            fi
+            if [ -z "$runner" ]; then
+              printf 'cross: no qemu user-mode runner for %s (looked for qemu-%s and qemu-%s-static).\n' \
+                "$t" "$arch" "$arch" >&2
+              printf 'cross: a missing emulator must not be reported as compile coverage.\n' >&2
               exit 1
-              ;;
-          esac
-          printf 'cross: %d target(s) agree with cross-test.profile.sh: %s\n' \
-            "${#legs[@]}" "${CROSS_LEGS}"
-          printf 'cross: profile execution budget is CROSS_TIMEOUT=%ss; it does not bind here, this job runs nothing.\n' \
-            "${CROSS_TIMEOUT}"
+            fi
+            printf 'cross: %s will run under %s\n' "$t" "$runner"
+          done
+          printf 'cross: %d profile targets, CROSS_TIMEOUT=%ss, %s target jobs x %s build job; host arch %s.\n' \
+            "${#TARGETS[@]}" "${CROSS_TIMEOUT}" "$resolved_target_jobs" "$resolved_build_jobs" "$host_arch"
 
-      - name: Restore the Zig local cache
-        uses: actions/cache@v4
-        with:
-          path: .zig-cache
-          # The matrix target is in the key. Not only for contention: a
-          # manifest written for aarch64-linux is not the entry the riscv64
-          # or x86_64-windows leg wants, and target-dependent codegen is
-          # precisely what this job exists to catch.
-          key: zig-${{ env.ZIG_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ hashFiles('build.zig', 'build.zig.zon', 'src/**') }}
+      - name: cross-test, then the per-target verdict from its own summary
+        run: |
+          set -euo pipefail
+          # No --timeout and no --targets: the profile owns both. --output is
+          # named here rather than left to the default, because the default is
+          # zig-out/cross-test inside this checkout and the run's evidence
+          # belongs on the runner's own local volume, named by CROSS_PREFIX.
+          ct_exit=0
+          "$QUALITY_TOOLS_PREFIX/bin/cross-test" --output "$CROSS_PREFIX" || ct_exit=$?
+          summary="$CROSS_PREFIX/runs/$CROSS_RUN_ID/summary.json"
+          if [ ! -r "$summary" ]; then
+            printf 'cross: cross-test exited %s and wrote no summary at %s.\n' "$ct_exit" "$summary" >&2
+            printf 'cross: run directories under %s/runs: %s\n' \
+              "$CROSS_PREFIX" "$(ls -1 "$CROSS_PREFIX/runs" 2>&1)" >&2
+            exit 1
+          fi
+          python3 - "$summary" "$ct_exit" <<'PY'
+          import json
+          import sys
 
-      - name: zig build -Dtarget=${{ matrix.target }} (no run)
-        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+          # The four Linux rows must each show a build that passed, a run that
+          # passed, and a positive executed-test count. A build_only or
+          # no_test_results row is compile coverage, not a pass, and that
+          # distinction is the whole reason this step exists.
+          # The same five names as the guard step's EXPECTED_TARGETS, restated
+          # because this step asserts per-target verdicts and a set comparison
+          # needs a set of its own. Moving a target in the profile means moving
+          # it in BOTH places on purpose: half of the change fails loudly here
+          # rather than quietly dropping a row from the verdict.
+          LINUX = ("x86_64-linux", "aarch64-linux", "riscv64-linux", "s390x-linux")
+          WINDOWS = "x86_64-windows"
+
+          path = sys.argv[1]
+          ct_exit = int(sys.argv[2])
+          with open(path, encoding="utf-8") as handle:
+              doc = json.load(handle)
+
+          rows = {row["target"]: row for row in doc["targets"]}
+          problems = []
+          if len(rows) != len(doc["targets"]):
+              problems.append("summary contains duplicate target rows")
+
+          for row in doc["targets"]:
+              print("cross: %-14s build=%-6s run=%-12s tests=%-5s reason=%-22s status=%s" % (
+                  row["target"], row["build"]["status"], row["run"]["status"],
+                  row["run"]["tests"], row["reason"], row["status"]))
+
+          if doc["schema"] != 2:
+              problems.append("summary schema is %r, not 2" % (doc["schema"],))
+          if doc["zig_version"] != "0.16.0":
+              problems.append("cross-test used Zig %r, not the pinned 0.16.0" % (doc["zig_version"],))
+          if doc["run_timeout_seconds"] != 900:
+              problems.append("run_timeout_seconds=%r, not the profile's CROSS_TIMEOUT=900"
+                              % (doc["run_timeout_seconds"],))
+          if doc["target_jobs"] != 2 or doc["jobs_per_build"] != 1:
+              problems.append("concurrency was targets=%r builds=%r, not 2 targets / 1 build job"
+                              % (doc["target_jobs"], doc["jobs_per_build"]))
+          if doc["target_count"] != len(doc["targets"]):
+              problems.append("target_count=%d but %d target rows"
+                              % (doc["target_count"], len(doc["targets"])))
+          if sorted(rows) != sorted(LINUX + (WINDOWS,)):
+              problems.append("summary rows %s, expected %s"
+                              % (sorted(rows), sorted(LINUX + (WINDOWS,))))
+          if doc["bookkeeping_failure"]:
+              problems.append("cross-test reported bookkeeping_failure")
+          if doc["exit_code"] != ct_exit:
+              problems.append("summary exit_code=%r but the process exited %d"
+                              % (doc["exit_code"], ct_exit))
+
+          for target in LINUX:
+              row = rows.get(target)
+              if row is None:
+                  continue
+              tests = row["run"]["tests"]
+              if row["build"]["status"] != "pass":
+                  problems.append("%s did not build: build=%s" % (target, row["build"]["status"]))
+              if (row["status"] != "pass" or row["run"]["status"] != "pass"
+                      or type(tests) is not int or tests <= 0):
+                  problems.append(
+                      "%s has no runtime pass: status=%s run=%s reason=%s tests=%s"
+                      % (target, row["status"], row["run"]["status"], row["reason"],
+                         row["run"]["tests"]))
+
+          # The Windows row, judged on what it actually says. The claim printed
+          # at the end of this step used to be a constant -- "is compile-only
+          # coverage" -- regardless of the row, so a run that found a wine
+          # runner and executed the suite would still have been announced as
+          # untested coverage. The verdict is the harness's; the sentence is
+          # this step's, so the sentence follows the row.
+          windows_claim = "%s has no row in the summary" % WINDOWS
+          row = rows.get(WINDOWS)
+          if row is not None:
+              if row["build"]["status"] != "pass":
+                  problems.append("%s did not compile: build=%s" % (WINDOWS, row["build"]["status"]))
+              if row["status"] == "build_only":
+                  # Compile coverage with no runtime. Reported as exactly that,
+                  # and the counts check below proves it was not counted as a
+                  # pass. A row that claims compile-only while reporting an
+                  # executed run is internally inconsistent, and believing the
+                  # claim would understate the coverage rather than overstate
+                  # it -- which is why it is still a failure and not a note.
+                  if row["run"]["status"] == "pass" or (row["run"]["tests"] or 0) > 0:
+                      problems.append(
+                          "%s claims compile-only coverage but reports run=%s tests=%s"
+                          % (WINDOWS, row["run"]["status"], row["run"]["tests"]))
+                  windows_claim = (
+                      "%s is compile-only coverage: build=%s run=%s tests=%s reason=%s"
+                      % (WINDOWS, row["build"]["status"], row["run"]["status"],
+                         row["run"]["tests"], row["reason"]))
+              elif row["status"] == "pass":
+                  if (row["run"]["status"] != "pass"
+                          or type(row["run"]["tests"]) is not int or row["run"]["tests"] <= 0):
+                      problems.append("%s claims pass without an executed run" % WINDOWS)
+                  windows_claim = (
+                      "%s built AND ran: run=%s tests=%s"
+                      % (WINDOWS, row["run"]["status"], row["run"]["tests"]))
+              else:
+                  problems.append("%s is neither a runtime pass nor compile-only coverage: %s"
+                                  % (WINDOWS, row["status"]))
+                  windows_claim = "%s is status=%s, which is neither" % (WINDOWS, row["status"])
+
+          counts = doc["counts"]
+          passed_rows = sum(1 for row in doc["targets"] if row["status"] == "pass")
+          if counts["fail"] != 0:
+              problems.append("counts.fail=%d" % counts["fail"])
+          if counts["pass"] != passed_rows:
+              problems.append("counts.pass=%d but %d target rows say pass"
+                              % (counts["pass"], passed_rows))
+          if doc["status"] not in ("pass", "partial"):
+              problems.append("overall status is %r, not pass or partial" % (doc["status"],))
+          if ct_exit != 0:
+              problems.append("cross-test exited %d" % ct_exit)
+
+          print("cross: status=%s pass=%d fail=%d build_only=%d partial=%d exit=%d summary=%s"
+                % (doc["status"], counts["pass"], counts["fail"], counts["build_only"],
+                   counts["partial"], ct_exit, path))
+          if problems:
+              for problem in problems:
+                  print("cross: FAIL %s" % problem, file=sys.stderr)
+              sys.exit(1)
+          print("cross: every Linux target in the profile built AND ran; %s." % windows_claim)
+          PY
+
 
   # ------------------------------------------------------------------- fmt --
   # The argument list is exactly the tracked Zig source roots, taken from
@@ -466,6 +996,9 @@ jobs:
     name: zig fmt --check
     runs-on: ubuntu-latest
     steps:
+      - name: Check out the repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
       - name: Install Zig ${{ env.ZIG_VERSION }}
         run: |
           set -euo pipefail
@@ -494,6 +1027,9 @@ jobs:
     name: zig build docs
     runs-on: ubuntu-latest
     steps:
+      - name: Check out the repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
       - name: Install Zig ${{ env.ZIG_VERSION }}
         run: |
           set -euo pipefail
@@ -509,37 +1045,65 @@ jobs:
       - name: zig build docs
         run: zig build docs
 
-# The cache, in one place, because it is one decision.
+# The caches, in one place, because there are exactly two decisions here.
 #
-# WHAT IS CACHED, AND WHY IT IS SAFE. Only the LOCAL cache, `.zig-cache`,
-# which is where `addRunArtifact` launches the test binaries and the benchmark
-# binaries from. Zig's local cache is content-addressed: a restored manifest is
-# used only when every input file's hash matches what that manifest recorded.
-# A restore can therefore save work; it cannot substitute a stale binary for a
-# changed source. A too-narrow key costs runtime, never correctness - which is
-# the only sense in which the question "is this key precise enough" has an
-# answer for a build system that hashes its own inputs.
+# WHAT IS CACHED, AND WHY IT IS SAFE. Two different things, and the difference
+# matters. (1) The LOCAL Zig cache, `.zig-cache`, where `addRunArtifact` launches
+# the test binaries and the benchmark binaries from. Zig's local cache is
+# content-addressed: a restored manifest is used only when every input file's
+# hash matches what that manifest recorded, so a restore can save work and
+# cannot substitute a stale binary for a changed source. A too-narrow key costs
+# runtime, never correctness. (2) The installer work root of the `analyze` and
+# `cross` jobs, which is the quality-tool SOURCES keyed by their pins - see THE
+# SECOND CACHE below, which is a different decision with a different key.
 #
-# WHAT THE KEY IS. The toolchain version, the runner platform, one dimension
-# naming the job's own compilation, and the hash of build.zig, build.zig.zon
-# and src/. The version is in the key because a manifest written by 0.16.0
-# means nothing to any other release.
+# WHAT THE .zig-cache KEY IS. The toolchain version, the runner platform, one
+# dimension naming the job's own compilation, and the hash of build.zig,
+# build.zig.zon and src/. The version is in the key because a manifest written
+# by 0.16.0 means nothing to any other release.
 #
 # THE JOB DIMENSION, AND WHY IT MUST NOT BE TIDIED AWAY. The optimise value in
-# the `test` job, the target value in `cross`, and a literal `bench` in the job
-# that has no matrix. Not for tidiness. GitHub Actions reserves a cache key
-# the first time one job saves it and refuses every save that arrives for a
-# key already reserved, so a key shared by a matrix is a key that works only
-# while one leg is running. Without this dimension the four test legs, the
-# four cross legs and the bench job - nine jobs, in the very runs the cache
-# exists to make cheap - all wrote one key, and the cache was warm only on a
-# quiet commit.
+# the `test` job, and a literal `bench` in the job that has no matrix. Not for
+# tidiness. GitHub Actions reserves a cache key the first time one job saves it
+# and refuses every save that arrives for a key already reserved, so a key
+# shared by a matrix is a key that works only while one leg is running. When
+# this file's `cross` job was a four-leg matrix, the four test legs, the four
+# cross legs and the bench job - nine jobs, in the very runs the cache exists to
+# make cheap - all wrote one key, and the cache was warm only on a quiet commit.
 # If you are reading this and about to drop the matrix value from the key
 # because the legs look alike: four optimise modes are four compilations and
 # four different .zig-cache contents, and a manifest written for one mode
 # means nothing to the next.
 #
-# WHAT IS DELIBERATELY NOT IN IT, AND WHY. `tests/` and `bench/`. They change
+# THE SECOND CACHE, AND WHY IT IS A DIFFERENT KEY. `analyze` and `cross` cache
+# $QUALITY_TOOLS_WORK_ROOT and nothing else. That root holds the upstream
+# sources the installer fetched at their pinned revisions and the patches
+# applied to them, so its key is the quality distribution and nothing else:
+# tools/quality/manifest.tsv, tools/quality/SHA256SUMS, the harness under
+# tools/quality/harness/** and the reviewed patches under tools/quality/patches/**
+# - the pins, the checksums, and the local source changes the installer applies.
+# Two properties make a restore sound rather than
+# merely convenient: the installer re-uses a fetched tree only when all four
+# recorded facts match exactly -- pinned revision, ordered patch hashes, the
+# src source digest, and a digest of the BUILD INPUTS (build.zig, build.zig.zon,
+# @embedFile targets, top-level build files) -- and re-fetches otherwise, so a
+# stale entry is discarded instead of trusted; and a key names WHICH entry, so a
+# narrower key costs a fetch and never a wrong binary. The two jobs carry
+# different key dimensions (`-analyzers-` and `-harness-`) for the reservation
+# reason above, because they run on the same push.
+#
+# WHAT IS DELIBERATELY NOT CACHED, AND WHY. (a) The install prefix. Those
+# binaries are the job's output; caching them would make a run assert tools it
+# did not install. (b) .zig-cache for `analyze` and `cross`. Neither job builds
+# through the workspace cache: the gate is given GATE_CACHE_DIR and
+# GATE_GLOBAL_CACHE_DIR outside the checkout, and cross-test creates a fresh
+# cache under TMPDIR and removes it on exit, because a cross cache is
+# target-specific and a stale one is not a thing this job wants to reason
+# about. Caching either would put gigabytes of per-target state behind a key
+# that would have to encode the target set to stay correct - and the target set
+# is the profile's, not this file's.
+#
+# ALSO NOT IN THAT KEY: `tests/` and `bench/`. They change
 # far more often than `src/`, and a key that moved with them would miss on
 # every test edit - which is exactly the edit a developer most wants to be
 # fast. Leaving them out means a test-only or benchmark-only change restores

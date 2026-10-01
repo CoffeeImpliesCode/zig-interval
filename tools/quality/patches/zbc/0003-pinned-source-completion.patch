@@ -1,0 +1,404 @@
+# zbc: pinned-source completion on top of 0001 + 0002.
+#
+# NOT a capture from a moving working copy. 0001 and 0002 are the verbatim
+# local captures and are left byte-for-byte untouched; this patch is authored
+# against the exact tree they produce, and says here what it changes and why.
+#
+# Base: upstream 419d153ca411d1698899992d86c51eb9a7e14919 + 0001 + 0002.
+#       That base was re-derived from a pristine `git checkout` of the pinned
+#       commit and reproduces source digest
+#       bf5331d664e70890356797a1daaa2113efeb36fcb10d906760530c26ab0c07df,
+#       the value manifest.tsv carried before this patch existed.
+# Apply with: git -C <checkout> apply -p1 <this file>   AFTER 0001 and 0002.
+# Authored: 2026-10-02T01:28:36Z (items 1-4), 2026-10-02T04:12Z (items 5-6).
+# Resulting source digest (zbc source_digest in manifest.tsv):
+#   b794e308392834b79892e36078c49cfd74598f67b26e069cd47a864013e5e3d2
+#
+# 1. COMPILE. Three defects made the pinned tree unbuildable under Zig 0.16.0.
+#    src/lib.zig opened a `.{ … }` anonymous struct literal for writeFile's
+#    options and closed it with `);`, so the parser reached the end of the test
+#    still expecting `}`. src/type_engine/document_store.zig called the private
+#    `requireAddressableSource` unqualified from DocumentStore, a different type
+#    in the same file — Zig does not put one type's private members in another
+#    type's scope; the call is now `Handle.requireAddressableSource`. In
+#    src/flow/cfg_builder.zig the `LoweringError` set omitted
+#    `error.SourceTooWide`, which `FileCache.init` already returns for a source
+#    whose length is not representable as the `u32` token offsets `std.zig.Ast`
+#    uses, so the `LoweringError!void` entry points could not `try` the
+#    inferred `!void` helpers they delegate to.
+#
+# 2. RULE REGISTRATION. 0001 deleted the `double_optional_ptr` enum member,
+#    shortened `all_invariants` from 113 to 112, and dropped the rule's catalog
+#    entry, module import, dispatch row and `refAllDecls` pin, while leaving its
+#    `.zig` and `.md` in the tree as unreferenced dead files. All of it is
+#    restored from upstream 419d153 verbatim — the dispatch row uses 0001's
+#    single-space table formatting like every neighbouring row — so `?*?T`
+#    out-params are reported again.
+#
+# 3. SEVERITIES. 0001 downgraded seven rules from error to warning. Six go back
+#    to upstream's `.@"error"`: memset_undef_after_len_truncation,
+#    f32_narrowing_int_to_float, index_minus_one_without_zero_guard,
+#    index_type_narrowing_wraparound, intcast_of_negated_signed and
+#    midpoint_addition_overflow. The seventh, intfromfloat_without_clamp, STAYS
+#    `.warning`: that is a pre-existing, explicitly accepted gate policy whose
+#    three findings were each reviewed with a numeric-range proof in hand
+#    (criticalRange, expRef) before this patch existed. It is now disclosed at
+#    the call site and in tools/quality/PROVENANCE.md instead of passing for an
+#    upstream default. No rule is disabled, no ZBC_STRICT is set, and no
+#    interval arithmetic is altered to quiet anything.
+#
+# 4. SOURCE SELECTION. `SourceSelection.collect` had exactly one rejection path
+#    that recorded nothing: an explicitly named input the policy refuses was
+#    dropped with a bare `continue`, so `zbc vendor/thing.zig` analysed nothing,
+#    printed nothing and exited 0 while the gate printed `zbc: OK`. All three
+#    explicit-input rejections now record `error.SourceExcluded`, which prints
+#    `zbc: cannot select <path>: SourceExcluded` and drives exit 2. The
+#    discovery-driven exclusions in `walk()` are untouched and still silent:
+#    there the operator named the parent directory, not the skipped entry, and
+#    dropping dependency/vendor/build/out trees there is the policy working.
+#
+# 5. HEAP OWNERSHIP IN THE LIVENESS SOLVER. Before this, the tree compiled and
+#    linked but the binary corrupted the heap on every file in its own src/.
+#    `zig build -Doptimize=ReleaseFast` on a tree carrying items 1-4 reported
+#    `run exe zbc failure / process terminated with signal SEGV`, and running the
+#    binary over its own source killed all 152 files with SIGSEGV or SIGABRT and
+#    stderr naming `double free or corruption (out)`, `realloc(): invalid
+#    pointer` and `mremap_chunk(): invalid pointer`. A gdb backtrace pointed at
+#    one place, with a null source and a non-zero length:
+#      #4 array_list.ensureTotalCapacityPrecise (std/array_list.zig:1236)
+#      #6 array_list.addOne   #7 array_list.append (item=1)
+#      #8 flow.worklist.computeLiveness  (src/flow/worklist.zig:143)
+#      #9 flow.worklist.Solver.init      (src/flow/worklist.zig:338)
+#     #10 flow.worklist.check            (src/flow/worklist.zig:291)
+#     #11 lib.analyzeEscape              (src/lib.zig:142)
+#    computeLiveness does
+#      var predecessors: std.ArrayListUnmanaged(std.ArrayListUnmanaged(BlockId)) = .empty;
+#      try predecessors.resize(gpa, block_count);
+#      … predecessors.items[successor].append(gpa, block.id);
+#    and Zig 0.16's `ArrayListUnmanaged.resize` is only
+#      try self.ensureTotalCapacity(gpa, new_len);
+#      self.items.len = new_len;
+#    (std/array_list.zig:1111-1114) — it grows the buffer and sets the length
+#    and writes none of the new slots. Every element of `predecessors` was
+#    therefore whatever the allocator returned; the first `append` grew that
+#    garbage list and the deferred `deinit` freed it. It is a 0.17→0.16
+#    semantics difference, and `predecessors` does not exist upstream at all.
+#    The fix is the 0.16 idiom: `resize`, then initialise every element to
+#    `.empty` before the first `append`.
+#
+#    VERIFIED: with this item in place the same `zig build -Doptimize=ReleaseFast`
+#    gets past compile and the analyzer runs to completion —
+#    `zbc: selected=153 analyzed=153 failed=0 findings=75` — with no SIGSEGV, no
+#    SIGABRT and no allocator diagnostic on any file.
+#
+# 6. WHAT THAT BUILD THEN SHOWED, RECORDED AND NOT WORKED AROUND. The build's
+#    remaining failure is `run exe zbc failure / process exited with error code
+#    1`, and it is NOT a severity-policy consequence. build.zig:59-62 is
+#    upstream's dogfood: `self_check.addDirectoryArg(b.path("src/"))` plus
+#    `b.default_step.dependOn(&self_check.step)`, so every `zig build` runs
+#    `zbc src/` on zbc itself, and main.zig:306 is
+#      return if (all_problems.items.len != 0) 1 else 0;
+#    — exit 1 on ANY finding, warning or error. This tree reports 75 findings on
+#    its own source, so the self-check cannot pass for it at any severity
+#    setting, including upstream's and including the one accepted advisory.
+#    Nothing here suppresses, re-severitises, excludes or reinterprets a finding
+#    to make that go away; the discrepancy between this captured source and
+#    upstream's clean-dogfood expectation is recorded for whoever owns the next
+#    decision. Restoring the six severities in item 3 does not create this: the
+#    accepted `.warning` alone is already enough to fail the self-check.
+#
+#    The same audit should be applied to the one other uninitialised `resize` in
+#    this tree: src/type_engine/analysis.zig:4166 resizes an `ArrayMap`'s entry
+#    list and then writes only the key half of each entry. That is upstream code
+#    at 419d153 and it is deliberately left untouched here.
+#
+# 7. A NAMED INSTALL-ONLY STEP. build.zig gains
+#      const cli_step = b.step("cli", "Build and install the zbc CLI only");
+#      cli_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
+#   so `zig build cli` compiles and installs the binary and nothing else. It
+#   exists because the dogfood in item 6 analyzes this tree with this tree:
+#   upstream puts `zbc src/` on the default step, so a plain `zig build` cannot
+#   install the artifact while the analyzer has findings about its own source.
+#   The dogfood is NOT weakened, shortened or removed: `b.default_step.dependOn
+#   (&self_check.step)` is left exactly as upstream declares it, bare `zig build`
+#   still runs it, and only an installer that names `cli` gets the install-only
+#   path. `b.installArtifact(exe)` and the `run`/`test`/`fuzz` steps are
+#   untouched. This is a build.zig hunk, so it does not move `source_digest`,
+#   which is computed over src/**/*.zig only.
+diff --git a/src/config.zig b/src/config.zig
+index b6b1349..60b864c 100644
+--- a/src/config.zig
++++ b/src/config.zig
+@@ -760,6 +760,11 @@ pub const Invariant = enum {
+     /// `if (map.getEntry(key)) |e| { … }` or `orelse return`.
+     /// Catches oven-sh/bun#14606 (H2 stream forced-unwrap after callback dispatch).
+     hashmap_getentry_forced_unwrap,
++    /// `?*?T` — doubly-optional pointer type; almost always a copy-paste error
++    /// where one `?` was duplicated.  The correct form for a nullable out-param
++    /// is `?*T`; for a non-null pointer to an optional it is `*?T`.
++    /// Catches oven-sh/bun#13955 (NAPI out-param corrupted caller stack).
++    double_optional_ptr,
+     /// `@alignCast(x.?)` — forced optional unwrap inside an alignment assertion;
+     /// two panic sources in one expression: `.?` panics on null, `@alignCast`
+     /// panics on misalignment.  Use a non-optional type or guard with `orelse`.
+@@ -820,7 +825,7 @@ pub const Invariant = enum {
+     clamp_wrong_direction,
+ };
+ 
+-pub const all_invariants: [112]Invariant = .{
++pub const all_invariants: [113]Invariant = .{
+     .arena_escape,
+     .stack_escape,
+     .use_undefined,
+@@ -920,6 +925,7 @@ pub const all_invariants: [112]Invariant = .{
+     .lessthan_uses_leq,
+     .duplicate_defer_free,
+     .hashmap_getentry_forced_unwrap,
++    .double_optional_ptr,
+     .aligncast_on_optional_unwrap,
+     .adjacent_decl_same_source_field,
+     .intcast_of_negated_signed,
+diff --git a/src/flow/cfg_builder.zig b/src/flow/cfg_builder.zig
+index 637c30b..421bd0a 100644
+--- a/src/flow/cfg_builder.zig
++++ b/src/flow/cfg_builder.zig
+@@ -27,7 +27,13 @@ const BasicBlock = cfg_types.BasicBlock;
+ const Cfg = cfg_types.Cfg;
+ const LocalInfo = cfg_types.LocalInfo;
+ const InitHint = cfg_types.InitHint;
+-const LoweringError = error{ OutOfMemory, AnalysisBudgetExceeded };
++// `error.SourceTooWide` is not an extra failure mode invented here: it is
++// what `FileCache.init` already returns for a source whose length is not
++// representable as the `u32` token offsets `std.zig.Ast` uses, and the
++// lowering walks reach it through that cache.  Without it in this set the
++// `LoweringError!void` entry points below cannot `try` the inferred
++// `!void` helpers they delegate to.
++const LoweringError = error{ OutOfMemory, AnalysisBudgetExceeded, SourceTooWide };
+ 
+ /// Bounds on the per-expression walks below.  Named so the recorded
+ /// diagnostic and the enforced check cannot drift apart.
+diff --git a/src/flow/worklist.zig b/src/flow/worklist.zig
+index 0de1c1d..f98c005 100644
+--- a/src/flow/worklist.zig
++++ b/src/flow/worklist.zig
+@@ -137,7 +137,12 @@ fn computeLiveness(gpa: std.mem.Allocator, cfg: *const Cfg) !Liveness {
+         for (predecessors.items) |*list| list.deinit(gpa);
+         predecessors.deinit(gpa);
+     }
++    // `ArrayListUnmanaged.resize` grows the buffer and sets `items.len`; it does
++    // NOT write the new slots.  Under Zig 0.16 every element is therefore
++    // whatever the allocator handed back, and the first `append` below would
++    // grow that garbage list (and the deferred `deinit` would free it).
+     try predecessors.resize(gpa, block_count);
++    for (predecessors.items) |*list| list.* = .empty;
+     for (cfg.blocks) |block| {
+         for (block.successors) |successor| {
+             try predecessors.items[@intFromEnum(successor)].append(gpa, block.id);
+diff --git a/src/lib.zig b/src/lib.zig
+index 7db0930..c4b5d54 100644
+--- a/src/lib.zig
++++ b/src/lib.zig
+@@ -604,7 +604,7 @@ test "an imported namespace callee keeps its first declared parameter" {
+         \\    gpa.free(slice);
+         \\}
+         \\
+-    );
++    });
+     // `lib` is a namespace, not an instance: declared param 0 is the
+     // FIRST ARGUMENT.  Reading it as a method receiver frees the
+     // allocator here and condemns every later use of it.
+diff --git a/src/main.zig b/src/main.zig
+index eaf7ce0..95f99d5 100644
+--- a/src/main.zig
++++ b/src/main.zig
+@@ -376,14 +376,28 @@ const SourceSelection = struct {
+         try self.normalizeExclusions(cwd);
+         var inputs: std.ArrayListUnmanaged(Input) = .empty;
+         defer inputs.deinit(self.gpa);
++        // Every path in `paths` was NAMED on the command line, so a policy
++        // rejection of one is a selection failure the operator has to see, not
++        // a file that quietly disappears from the analysed set: `self.fail`
++        // prints `zbc: cannot select <path>: SourceExcluded` and `failed`
++        // then makes zbc exit 2.  The discovery-driven exclusions further
++        // down (dependency/vendor/build/out directories reached through a
++        // named parent) stay silent, because there the operator named the
++        // parent and not the entry that was skipped.
+         for (paths) |path| {
+             const lexical = try std.fs.path.resolve(self.arena.allocator(), &.{ cwd, path });
+-            if (self.policy().excludesPath(lexical)) continue;
++            if (self.policy().excludesPath(lexical)) {
++                try self.fail(path, error.SourceExcluded);
++                continue;
++            }
+             const absolute = self.canonical(lexical) catch |err| {
+                 try self.fail(path, err);
+                 continue;
+             };
+-            if (self.policy().excludesPath(absolute)) continue;
++            if (self.policy().excludesPath(absolute)) {
++                try self.fail(path, error.SourceExcluded);
++                continue;
++            }
+             const stat = std.Io.Dir.cwd().statFile(self.io, absolute, .{}) catch |err| {
+                 try self.fail(path, err);
+                 continue;
+@@ -413,7 +427,10 @@ const SourceSelection = struct {
+             if (self.policy().rootFor(parent) == null) try self.roots.put(self.gpa, parent, {});
+         }
+         for (inputs.items) |input| {
+-            if (!self.policy().allowsAbsolutePath(input.path)) continue;
++            if (!self.policy().allowsAbsolutePath(input.path)) {
++                try self.fail(input.path, error.SourceExcluded);
++                continue;
++            }
+             if (input.directory) try self.walk(input.path) else try self.files.put(self.gpa, input.path, {});
+         }
+     }
+diff --git a/src/rule_catalog.zig b/src/rule_catalog.zig
+index 816f1fe..9f795fb 100644
+--- a/src/rule_catalog.zig
++++ b/src/rule_catalog.zig
+@@ -520,6 +520,11 @@ pub const all = [_]Rule{
+         .title = "`.getEntry(key).?` — `HashMap.getEntry` returns `?Entry`; forced `.?` panics when key is absent; use `if`/`orelse` guard instead",
+         .body = @embedFile("rules/collection/hashmap-getentry-forced-unwrap.md"),
+     },
++    .{
++        .id = "double-optional-ptr",
++        .title = "`?*?T` — doubly-optional pointer; almost always a copy-paste error; for nullable out-params use `?*T`, for non-null pointer to optional use `*?T`",
++        .body = @embedFile("rules/misc/double-optional-ptr.md"),
++    },
+     .{
+         .id = "aligncast-on-optional-unwrap",
+         .title = "`@alignCast(x.?)` — forced `.?` panics on null; alignment assertion panics on misalignment; two panic sources in one expression",
+@@ -649,6 +654,7 @@ const memcpy_overlapping_slices_mod = @import("rules/misc/memcpy_overlapping_sli
+ const cmpxchgweak_orelse_break_mod = @import("rules/misc/cmpxchgweak_orelse_break.zig");
+ const slice_write_at_len_mod = @import("rules/misc/slice_write_at_len.zig");
+ const clamp_wrong_direction_mod = @import("rules/misc/clamp_wrong_direction.zig");
++const double_optional_ptr_mod = @import("rules/misc/double_optional_ptr.zig");
+ const aligncast_on_optional_unwrap_mod = @import("rules/misc/aligncast_on_optional_unwrap.zig");
+ const adjacent_decl_same_source_field_mod = @import("rules/misc/adjacent_decl_same_source_field.zig");
+ const intcast_of_negated_signed_mod = @import("rules/misc/intcast_of_negated_signed.zig");
+@@ -755,6 +761,7 @@ const escape_detectors = [_]Detector{
+     .{ .id = "lessthan-uses-leq", .check = lessthan_uses_leq_mod.check },
+     .{ .id = "duplicate-defer-free", .check = duplicate_defer_free_mod.check },
+     .{ .id = "hashmap-getentry-forced-unwrap", .check = hashmap_getentry_forced_unwrap_mod.check },
++    .{ .id = "double-optional-ptr", .check = double_optional_ptr_mod.check },
+     .{ .id = "aligncast-on-optional-unwrap", .check = aligncast_on_optional_unwrap_mod.check },
+     .{ .id = "adjacent-decl-same-source-field", .check = adjacent_decl_same_source_field_mod.check },
+     .{ .id = "intcast-of-negated-signed", .check = intcast_of_negated_signed_mod.check },
+@@ -918,6 +925,7 @@ test "registry: pull in every rule module so inline tests run" {
+     _ = lessthan_uses_leq_mod;
+     _ = duplicate_defer_free_mod;
+     _ = hashmap_getentry_forced_unwrap_mod;
++    _ = double_optional_ptr_mod;
+     _ = aligncast_on_optional_unwrap_mod;
+     _ = adjacent_decl_same_source_field_mod;
+     _ = intcast_of_negated_signed_mod;
+diff --git a/src/rules/collection/memset_undef_after_len_truncation.zig b/src/rules/collection/memset_undef_after_len_truncation.zig
+index 8f10890..c1c128c 100644
+--- a/src/rules/collection/memset_undef_after_len_truncation.zig
++++ b/src/rules/collection/memset_undef_after_len_truncation.zig
+@@ -129,7 +129,7 @@ fn checkPair(
+     const token = tree.nodeMainToken(fill);
+     try problems.append(gpa, .{
+         .rule_id = R,
+-        .severity = .warning,
++        .severity = .@"error",
+         .start = problem.Pos.fromTokenStart(tree, token),
+         .end = problem.Pos.fromTokenEnd(tree, token),
+         .message = message,
+diff --git a/src/rules/misc/f32_narrowing_int_to_float.zig b/src/rules/misc/f32_narrowing_int_to_float.zig
+index 6315af5..a9a7e22 100644
+--- a/src/rules/misc/f32_narrowing_int_to_float.zig
++++ b/src/rules/misc/f32_narrowing_int_to_float.zig
+@@ -44,7 +44,7 @@ pub fn check(
+         errdefer gpa.free(message);
+         try problems.append(gpa, .{
+             .rule_id = R,
+-            .severity = .warning,
++            .severity = .@"error",
+             .start = Pos.fromTokenStart(tree, token),
+             .end = Pos.fromTokenEnd(tree, tree.lastToken(node)),
+             .message = message,
+diff --git a/src/rules/misc/index_minus_one_without_zero_guard.zig b/src/rules/misc/index_minus_one_without_zero_guard.zig
+index 1298bca..0b9d83d 100644
+--- a/src/rules/misc/index_minus_one_without_zero_guard.zig
++++ b/src/rules/misc/index_minus_one_without_zero_guard.zig
+@@ -63,7 +63,7 @@ fn report(
+     errdefer gpa.free(message);
+     try problems.append(gpa, .{
+         .rule_id = R,
+-        .severity = .warning,
++        .severity = .@"error",
+         .start = Pos.fromTokenStart(tree, tree.nodeMainToken(access)),
+         .end = Pos.fromTokenEnd(tree, tree.lastToken(access)),
+         .message = message,
+diff --git a/src/rules/misc/index_type_narrowing_wraparound.zig b/src/rules/misc/index_type_narrowing_wraparound.zig
+index 25141ab..c0e8a7f 100644
+--- a/src/rules/misc/index_type_narrowing_wraparound.zig
++++ b/src/rules/misc/index_type_narrowing_wraparound.zig
+@@ -44,7 +44,7 @@ pub fn check(
+         errdefer gpa.free(message);
+         try problems.append(gpa, .{
+             .rule_id = R,
+-            .severity = .warning,
++            .severity = .@"error",
+             .start = Pos.fromTokenStart(tree, token),
+             .end = Pos.fromTokenEnd(tree, tree.lastToken(node)),
+             .message = message,
+diff --git a/src/rules/misc/intcast_of_negated_signed.zig b/src/rules/misc/intcast_of_negated_signed.zig
+index 9a6f15f..6b54901 100644
+--- a/src/rules/misc/intcast_of_negated_signed.zig
++++ b/src/rules/misc/intcast_of_negated_signed.zig
+@@ -53,7 +53,7 @@ pub fn check(
+         errdefer gpa.free(message);
+         try problems.append(gpa, .{
+             .rule_id = R,
+-            .severity = .warning,
++            .severity = .@"error",
+             .start = Pos.fromTokenStart(tree, token),
+             .end = Pos.fromTokenEnd(tree, tree.lastToken(node)),
+             .message = message,
+diff --git a/src/rules/misc/intfromfloat_without_clamp.zig b/src/rules/misc/intfromfloat_without_clamp.zig
+index 985408a..33c5a25 100644
+--- a/src/rules/misc/intfromfloat_without_clamp.zig
++++ b/src/rules/misc/intfromfloat_without_clamp.zig
+@@ -39,6 +39,12 @@ pub fn check(
+         }
+         const message = try gpa.dupe(u8, "a finite value within the destination conversion range was not proved for `@intFromFloat`; NaN, infinity, or an out-of-range value traps in Debug/ReleaseSafe and causes undefined behavior in unchecked builds");
+         errdefer gpa.free(message);
++        // Advisory severity is an accepted, reviewed exception, not the
++        // upstream default: the three findings this rule produces on the
++        // pinned tree were each reviewed with a numeric-range proof in hand
++        // (criticalRange, expRef) and accepted.  Every other rule in this
++        // port keeps its upstream .@"error" severity; see
++        // tools/quality/PROVENANCE.md for the receipt.
+         try problems.append(gpa, .{
+             .rule_id = R,
+             .severity = .warning,
+diff --git a/src/rules/misc/midpoint_addition_overflow.zig b/src/rules/misc/midpoint_addition_overflow.zig
+index 05e6098..7aaf1f5 100644
+--- a/src/rules/misc/midpoint_addition_overflow.zig
++++ b/src/rules/misc/midpoint_addition_overflow.zig
+@@ -52,7 +52,7 @@ pub fn check(
+         errdefer gpa.free(message);
+         try problems.append(gpa, .{
+             .rule_id = R,
+-            .severity = .warning,
++            .severity = .@"error",
+             .start = Pos.fromTokenStart(tree, token),
+             .end = Pos.fromTokenEnd(tree, tree.lastToken(node)),
+             .message = message,
+diff --git a/src/type_engine/document_store.zig b/src/type_engine/document_store.zig
+index dd5a994..b6094ad 100644
+--- a/src/type_engine/document_store.zig
++++ b/src/type_engine/document_store.zig
+@@ -895,7 +895,7 @@ pub fn openLspSyncedDocument(self: *DocumentStore, uri: Uri, text: []const u8) e
+ 
+     // Client text is not capped by `SourcePolicy` the way file reads are,
+     // so reject a source the engine cannot address before it is copied.
+-    try requireAddressableSource(text);
++    try Handle.requireAddressableSource(text);
+ 
+     const duped_text = try self.allocator.dupeSentinel(u8, text, 0);
+     _ = self.createAndStoreDocument(

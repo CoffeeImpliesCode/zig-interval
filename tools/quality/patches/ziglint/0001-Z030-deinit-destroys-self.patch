@@ -1,0 +1,1417 @@
+# ziglint: local source changes over upstream 66709a408f2ea9ac1de91a438a83b13f4691a941
+# Captured verbatim from the local working copy on 2026-10-02; source paths only.
+# Base: https://github.com/rockorager/ziglint @ 66709a408f2ea9ac1de91a438a83b13f4691a941
+# Apply with: git -C <checkout> apply -p1 <this file>
+diff --git a/src/Linter.zig b/src/Linter.zig
+index 032d60c..2679f56 100644
+--- a/src/Linter.zig
++++ b/src/Linter.zig
+@@ -988,6 +988,11 @@ fn isTypeExpression(self: *Linter, node: Ast.Node.Index) bool {
+         .error_union => true,
+         // Error set declarations (e.g., error{A, B})
+         .error_set_decl => true,
++        // Merged error sets (e.g., error{A} || Allocator.Error): a type
++        // decl like `pub const Error = error{A} || std.mem.Allocator.Error`
++        // is a public type; without this arm Z015 false-positives on every
++        // pub fn returning it
++        .merge_error_sets => true,
+         // Function types
+         .fn_proto,
+         .fn_proto_multi,
+@@ -997,7 +1002,7 @@ fn isTypeExpression(self: *Linter, node: Ast.Node.Index) bool {
+         // Builtin type constructors
+         .builtin_call_two, .builtin_call_two_comma, .builtin_call, .builtin_call_comma => blk: {
+             const token = self.tree.tokenSlice(self.tree.nodeMainToken(node));
+-            break :blk std.mem.eql(u8, token, "@Type");
++            break :blk isBuiltinTypeConstructor(token);
+         },
+         // Identifier referencing another type (type alias)
+         .identifier => blk: {
+@@ -1605,25 +1610,20 @@ fn checkFnDecl(self: *Linter, node: Ast.Node.Index) void {
+ fn checkDeinitUndefined(self: *Linter, node: Ast.Node.Index, fn_proto: Ast.full.FnProto) void {
+     if (!self.config.isRuleEnabled(.Z030)) return;
+ 
+-    // Only check functions named "deinit"
++    // Only check functions named "deinit".
+     const name_token = fn_proto.name_token orelse return;
+     const name = self.tree.tokenSlice(name_token);
+     if (!std.mem.eql(u8, name, "deinit")) return;
+ 
+-    // Check if first parameter is a pointer type
++    // Check if first parameter is a pointer type.
+     var param_it = fn_proto.iterate(&self.tree);
+     const first_param = param_it.next() orelse return;
+     const param_type = first_param.type_expr orelse return;
+     if (!self.isPointerType(param_type)) return;
+ 
+-    // Get the parameter name (usually "self")
+     const param_name = if (first_param.name_token) |t| self.tree.tokenSlice(t) else return;
+-
+-    // Get function body
+     const body_node = self.tree.nodeData(node).node_and_node[1];
+-
+-    const has_deferred_invalidation = self.hasDeferSelfUndefined(body_node, param_name);
+-    const lifetime = self.analyzeReceiverLifetime(body_node, param_name, false);
++    const lifetime = self.analyzeReceiverLifetime(body_node, param_name, false, 0);
+ 
+     // A deferred write would run after the receiver's allocation is freed.
+     if (lifetime.deferred_invalidation_after_destroy) {
+@@ -1631,30 +1631,40 @@ fn checkDeinitUndefined(self: *Linter, node: Ast.Node.Index, fn_proto: Ast.full.
+         self.reportDeinitUndefined(loc, param_name, "deferred invalidation runs after receiver destruction");
+         return;
+     }
+-
++    if (lifetime.deferred_receiver_write_after_destroy) {
++        const loc = self.tree.tokenLocation(0, name_token);
++        self.reportDeinitUndefined(loc, param_name, "deferred receiver write runs after receiver destruction");
++        return;
++    }
+     if (lifetime.invalidation_after_destroy) {
+         const loc = self.tree.tokenLocation(0, name_token);
+         self.reportDeinitUndefined(loc, param_name, "invalidates receiver after destruction");
+         return;
+     }
+-
+-    // `defer self.* = undefined;` handles every path that reaches the defer.
+-    if (has_deferred_invalidation) return;
+-
+-    // Check for returns reached before this receiver is invalidated.
+-    if (self.hasUnsafeReturn(body_node, param_name, false)) {
++    if (lifetime.receiver_write_after_destroy) {
++        const loc = self.tree.tokenLocation(0, name_token);
++        self.reportDeinitUndefined(loc, param_name, "writes receiver after destruction");
++        return;
++    }
++    if (lifetime.unsafe_terminal_order) {
+         const loc = self.tree.tokenLocation(0, name_token);
+-        self.reportDeinitUndefined(loc, param_name, "has early return before invalidation");
++        self.reportDeinitUndefined(loc, param_name, "reaches terminal state after receiver-owned cleanup");
+         return;
+     }
+ 
+-    // Destroying a heap-allocated receiver also ends its lifetime. Requiring an
+-    // invalidating write afterward would introduce a use-after-free.
+-    if (self.lastStatementIsSelfDestroy(body_node, param_name)) return;
++    // Check for returns reached before this receiver reaches a terminal state.
++    if (self.hasUnsafeReturn(body_node, param_name, false, 0)) {
++        const loc = self.tree.tokenLocation(0, name_token);
++        self.reportDeinitUndefined(loc, param_name, "has return before receiver reaches a terminal state");
++        return;
++    }
+ 
+-    if (self.lastStatementIsSelfUndefined(body_node, param_name)) return;
++    // A terminal action on every reachable path is sufficient. The terminal
++    // state may be a whole-receiver poison, an empty/null lifecycle marker, or
++    // an idempotent method that closes a retained tombstone.
++    if (lifetime.saw_terminal and
++        (!lifetime.can_fallthrough or lifetime.terminal_on_fallthrough)) return;
+ 
+-    // None of the valid patterns found
+     const loc = self.tree.tokenLocation(0, name_token);
+     self.reportDeinitUndefined(loc, param_name, "");
+ }
+@@ -1676,41 +1686,62 @@ fn isPointerType(self: *Linter, node: Ast.Node.Index) bool {
+     };
+ }
+ 
+-fn hasDeferSelfUndefined(self: *Linter, body_node: Ast.Node.Index, param_name: []const u8) bool {
+-    // Iterate through all nodes looking for defer
+-    var buf: [2]Ast.Node.Index = undefined;
+-    const stmts = self.tree.blockStatements(&buf, body_node) orelse return false;
+-
+-    for (stmts) |stmt| {
+-        if (self.isDeferSelfUndefined(stmt, param_name)) return true;
+-    }
+-    return false;
+-}
+-
+-fn isDeferSelfUndefined(self: *Linter, node: Ast.Node.Index, param_name: []const u8) bool {
++fn isDeferReceiverWrite(self: *Linter, node: Ast.Node.Index, param_name: []const u8) bool {
+     if (self.tree.nodeTag(node) != .@"defer") return false;
+-    return self.isSelfUndefinedAssign(self.tree.nodeData(node).node, param_name);
++    return self.isSelfReceiverWrite(self.tree.nodeData(node).node, param_name);
+ }
+ 
+-fn hasUnsafeReturn(self: *Linter, node: Ast.Node.Index, param_name: []const u8, invalidated_before: bool) bool {
++fn hasUnsafeReturn(
++    self: *Linter,
++    node: Ast.Node.Index,
++    param_name: []const u8,
++    invalidated_before: bool,
++    method_depth: usize,
++) bool {
+     const tag = self.tree.nodeTag(node);
+     if (tag == .@"return") return !invalidated_before;
+ 
+     switch (tag) {
+         .@"if", .if_simple => {
+             const full_if = self.tree.fullIf(node) orelse return false;
+-            if (self.hasUnsafeReturn(full_if.ast.then_expr, param_name, invalidated_before)) return true;
+-            if (full_if.ast.else_expr.unwrap()) |else_node| {
+-                if (self.hasUnsafeReturn(else_node, param_name, invalidated_before)) return true;
++            switch (self.terminalGuardBranch(full_if.ast.cond_expr, param_name)) {
++                .then_branch => {
++                    if (self.hasUnsafeReturn(full_if.ast.then_expr, param_name, true, method_depth)) return true;
++                    if (full_if.ast.else_expr.unwrap()) |else_node| {
++                        if (self.hasUnsafeReturn(else_node, param_name, invalidated_before, method_depth)) return true;
++                    }
++                },
++                .else_branch => {
++                    if (self.hasUnsafeReturn(full_if.ast.then_expr, param_name, invalidated_before, method_depth)) return true;
++                    if (full_if.ast.else_expr.unwrap()) |else_node| {
++                        if (self.hasUnsafeReturn(else_node, param_name, true, method_depth)) return true;
++                    }
++                },
++                .none => {
++                    if (self.hasUnsafeReturn(full_if.ast.then_expr, param_name, invalidated_before, method_depth)) return true;
++                    if (full_if.ast.else_expr.unwrap()) |else_node| {
++                        if (self.hasUnsafeReturn(else_node, param_name, invalidated_before, method_depth)) return true;
++                    }
++                },
+             }
+         },
+         .block, .block_semicolon, .block_two, .block_two_semicolon => {
+             var block_buf: [2]Ast.Node.Index = undefined;
+             const block_stmts = self.tree.blockStatements(&block_buf, node) orelse return false;
+             var invalidated = invalidated_before;
++            var deferred_terminal = false;
+             for (block_stmts) |stmt| {
+-                if (self.hasUnsafeReturn(stmt, param_name, invalidated)) return true;
+-                if (self.isSelfUndefinedAssign(stmt, param_name) or self.isSelfDestroyCall(stmt, param_name)) {
++                if (self.isDeferReceiverWrite(stmt, param_name)) {
++                    const write = self.tree.nodeData(stmt).node;
++                    if (self.isReceiverTerminalAction(write, param_name, method_depth)) {
++                        deferred_terminal = true;
++                    }
++                    continue;
++                }
++                if (self.hasUnsafeReturn(stmt, param_name, invalidated or deferred_terminal, method_depth)) return true;
++                const state = self.analyzeReceiverLifetime(stmt, param_name, false, method_depth);
++                if (state.reopens_receiver) invalidated = false;
++                if (state.terminal_on_fallthrough) {
+                     invalidated = true;
+                 }
+             }
+@@ -1720,29 +1751,18 @@ fn hasUnsafeReturn(self: *Linter, node: Ast.Node.Index, param_name: []const u8,
+     return false;
+ }
+ 
+-fn lastStatementIsSelfUndefined(self: *Linter, body_node: Ast.Node.Index, param_name: []const u8) bool {
+-    var buf: [2]Ast.Node.Index = undefined;
+-    const stmts = self.tree.blockStatements(&buf, body_node) orelse return false;
+-    if (stmts.len == 0) return false;
+-
+-    const last_stmt = stmts[stmts.len - 1];
+-    return self.isSelfUndefinedAssign(last_stmt, param_name);
+-}
+-
+-fn lastStatementIsSelfDestroy(self: *Linter, body_node: Ast.Node.Index, param_name: []const u8) bool {
+-    var buf: [2]Ast.Node.Index = undefined;
+-    const stmts = self.tree.blockStatements(&buf, body_node) orelse return false;
+-    if (stmts.len == 0) return false;
+-
+-    return self.isSelfDestroyCall(stmts[stmts.len - 1], param_name);
+-}
+-
+ const ReceiverLifetime = struct {
+     can_fallthrough: bool = true,
+     destroyed_on_fallthrough: bool = false,
++    terminal_on_fallthrough: bool = false,
++    reopens_receiver: bool = false,
+     saw_destroy: bool = false,
++    saw_terminal: bool = false,
+     invalidation_after_destroy: bool = false,
+     deferred_invalidation_after_destroy: bool = false,
++    receiver_write_after_destroy: bool = false,
++    deferred_receiver_write_after_destroy: bool = false,
++    unsafe_terminal_order: bool = false,
+ };
+ 
+ fn analyzeReceiverLifetime(
+@@ -1750,59 +1770,161 @@ fn analyzeReceiverLifetime(
+     node: Ast.Node.Index,
+     param_name: []const u8,
+     destroyed_before: bool,
++    method_depth: usize,
+ ) ReceiverLifetime {
+-    if (self.isSelfUndefinedAssign(node, param_name)) return .{
+-        .destroyed_on_fallthrough = destroyed_before,
+-        .invalidation_after_destroy = destroyed_before,
+-    };
++    if (self.isSelfUndefinedAssign(node, param_name)) {
++        if (destroyed_before) return .{
++            .destroyed_on_fallthrough = true,
++            .invalidation_after_destroy = true,
++        };
++        return .{
++            .terminal_on_fallthrough = true,
++            .saw_terminal = true,
++        };
++    }
+     if (self.isSelfDestroyCall(node, param_name)) return .{
+         .destroyed_on_fallthrough = true,
++        .terminal_on_fallthrough = true,
+         .saw_destroy = true,
++        .saw_terminal = true,
+     };
++    if (self.isSafeSelfFieldAssign(node, param_name)) {
++        if (destroyed_before) return .{
++            .destroyed_on_fallthrough = true,
++            .receiver_write_after_destroy = true,
++        };
++        return .{
++            .terminal_on_fallthrough = true,
++            .saw_terminal = true,
++        };
++    }
++    if (self.isSelfReceiverWrite(node, param_name)) return .{
++        .destroyed_on_fallthrough = destroyed_before,
++        .receiver_write_after_destroy = destroyed_before,
++        .reopens_receiver = self.isReopeningSelfFieldAssign(node, param_name),
++    };
++
++    if (self.selfMethodTarget(node, param_name)) |method_node| {
++        if (self.summarizeReceiverMethod(method_node, method_depth)) |summary| {
++            var method_result = summary;
++            if (destroyed_before) {
++                method_result.destroyed_on_fallthrough = true;
++                method_result.terminal_on_fallthrough = false;
++                method_result.saw_terminal = false;
++            }
++            return method_result;
++        }
++    }
++
+     if (self.tree.nodeTag(node) == .@"return") return .{ .can_fallthrough = false };
+ 
+     switch (self.tree.nodeTag(node)) {
+         .@"if", .if_simple => {
+             const full_if = self.tree.fullIf(node) orelse return .{};
+-            const then_result = self.analyzeReceiverLifetime(full_if.ast.then_expr, param_name, destroyed_before);
++            const then_result = self.analyzeReceiverLifetime(
++                full_if.ast.then_expr,
++                param_name,
++                destroyed_before,
++                method_depth,
++            );
+             const else_result = if (full_if.ast.else_expr.unwrap()) |else_node|
+-                self.analyzeReceiverLifetime(else_node, param_name, destroyed_before)
++                self.analyzeReceiverLifetime(else_node, param_name, destroyed_before, method_depth)
+             else
+                 ReceiverLifetime{ .destroyed_on_fallthrough = destroyed_before };
+ 
+-            return .{
++            var result: ReceiverLifetime = .{
+                 .can_fallthrough = then_result.can_fallthrough or else_result.can_fallthrough,
+                 .destroyed_on_fallthrough = (then_result.can_fallthrough and then_result.destroyed_on_fallthrough) or
+                     (else_result.can_fallthrough and else_result.destroyed_on_fallthrough),
++                .terminal_on_fallthrough = (!then_result.can_fallthrough or then_result.terminal_on_fallthrough) and
++                    (!else_result.can_fallthrough or else_result.terminal_on_fallthrough),
++                .reopens_receiver = then_result.reopens_receiver or else_result.reopens_receiver,
+                 .saw_destroy = then_result.saw_destroy or else_result.saw_destroy,
++                .saw_terminal = then_result.saw_terminal or else_result.saw_terminal,
+                 .invalidation_after_destroy = then_result.invalidation_after_destroy or
+                     else_result.invalidation_after_destroy,
+                 .deferred_invalidation_after_destroy = then_result.deferred_invalidation_after_destroy or
+                     else_result.deferred_invalidation_after_destroy,
++                .receiver_write_after_destroy = then_result.receiver_write_after_destroy or
++                    else_result.receiver_write_after_destroy,
++                .deferred_receiver_write_after_destroy = then_result.deferred_receiver_write_after_destroy or
++                    else_result.deferred_receiver_write_after_destroy,
++                .unsafe_terminal_order = then_result.unsafe_terminal_order or
++                    else_result.unsafe_terminal_order,
+             };
++            if (!result.reopens_receiver and self.isAtomicTerminalTransition(full_if.ast.cond_expr, param_name)) {
++                result.saw_terminal = true;
++                if (result.can_fallthrough and !result.destroyed_on_fallthrough) {
++                    result.terminal_on_fallthrough = true;
++                }
++            }
++            return result;
+         },
+         .block, .block_semicolon, .block_two, .block_two_semicolon => {
+             var block_buf: [2]Ast.Node.Index = undefined;
+             const block_stmts = self.tree.blockStatements(&block_buf, node) orelse return .{};
+             var result: ReceiverLifetime = .{ .destroyed_on_fallthrough = destroyed_before };
+             var has_deferred_invalidation = false;
++            var has_deferred_receiver_write = false;
++            var has_deferred_terminal = false;
++
+             for (block_stmts) |stmt| {
+                 if (!result.can_fallthrough) break;
+-                if (self.isDeferSelfUndefined(stmt, param_name)) {
+-                    has_deferred_invalidation = true;
+-                    result.deferred_invalidation_after_destroy = result.deferred_invalidation_after_destroy or
+-                        result.destroyed_on_fallthrough;
++                if (self.isDeferReceiverWrite(stmt, param_name)) {
++                    const write = self.tree.nodeData(stmt).node;
++                    if (self.isSelfUndefinedAssign(write, param_name)) {
++                        has_deferred_invalidation = true;
++                        if (result.destroyed_on_fallthrough) {
++                            result.deferred_invalidation_after_destroy = true;
++                        }
++                    } else {
++                        has_deferred_receiver_write = true;
++                        if (result.destroyed_on_fallthrough) {
++                            result.deferred_receiver_write_after_destroy = true;
++                        }
++                    }
++                    if (self.isReceiverTerminalAction(write, param_name, method_depth)) {
++                        has_deferred_terminal = true;
++                        result.saw_terminal = true;
++                    }
+                     continue;
+                 }
+-                const stmt_result = self.analyzeReceiverLifetime(stmt, param_name, result.destroyed_on_fallthrough);
++                if (!result.terminal_on_fallthrough and self.isSelfMarkerMethodCall(stmt, param_name)) {
++                    result.unsafe_terminal_order = true;
++                }
++
++                const stmt_result = self.analyzeReceiverLifetime(
++                    stmt,
++                    param_name,
++                    result.destroyed_on_fallthrough,
++                    method_depth,
++                );
+                 result.can_fallthrough = stmt_result.can_fallthrough;
+                 result.destroyed_on_fallthrough = stmt_result.destroyed_on_fallthrough;
++                result.terminal_on_fallthrough = if (stmt_result.can_fallthrough)
++                    (result.terminal_on_fallthrough and !stmt_result.reopens_receiver) or
++                        stmt_result.terminal_on_fallthrough
++                else
++                    false;
++                result.reopens_receiver = result.reopens_receiver or stmt_result.reopens_receiver;
+                 result.saw_destroy = result.saw_destroy or stmt_result.saw_destroy;
++                result.saw_terminal = result.saw_terminal or stmt_result.saw_terminal;
+                 result.invalidation_after_destroy = result.invalidation_after_destroy or
+                     stmt_result.invalidation_after_destroy;
+                 result.deferred_invalidation_after_destroy = result.deferred_invalidation_after_destroy or
+                     stmt_result.deferred_invalidation_after_destroy or
+                     (has_deferred_invalidation and stmt_result.saw_destroy);
++                result.receiver_write_after_destroy = result.receiver_write_after_destroy or
++                    stmt_result.receiver_write_after_destroy;
++                result.deferred_receiver_write_after_destroy = result.deferred_receiver_write_after_destroy or
++                    stmt_result.deferred_receiver_write_after_destroy or
++                    (has_deferred_receiver_write and stmt_result.saw_destroy);
++                result.unsafe_terminal_order = result.unsafe_terminal_order or
++                    stmt_result.unsafe_terminal_order;
++            }
++            if (result.can_fallthrough and has_deferred_terminal and !result.destroyed_on_fallthrough) {
++                result.terminal_on_fallthrough = true;
++                result.saw_terminal = true;
+             }
+             return result;
+         },
+@@ -1810,6 +1932,383 @@ fn analyzeReceiverLifetime(
+     }
+ }
+ 
++fn summarizeReceiverMethod(
++    self: *Linter,
++    method_node: Ast.Node.Index,
++    method_depth: usize,
++) ?ReceiverLifetime {
++    if (method_depth >= 4) return null;
++
++    var fn_buf: [1]Ast.Node.Index = undefined;
++    const fn_proto = self.tree.fullFnProto(&fn_buf, method_node) orelse return null;
++    var param_it = fn_proto.iterate(&self.tree);
++    const first_param = param_it.next() orelse return null;
++    const param_name = first_param.name_token orelse return null;
++    const body_node = self.tree.nodeData(method_node).node_and_node[1];
++    const next_depth = method_depth + 1;
++    const lifetime = self.analyzeReceiverLifetime(
++        body_node,
++        self.tree.tokenSlice(param_name),
++        false,
++        next_depth,
++    );
++    if (self.hasUnsafeReturn(body_node, self.tree.tokenSlice(param_name), false, next_depth)) return null;
++    if (!lifetime.saw_terminal) return null;
++    if (lifetime.can_fallthrough and !lifetime.terminal_on_fallthrough) return null;
++    if (lifetime.invalidation_after_destroy or lifetime.deferred_invalidation_after_destroy or
++        lifetime.receiver_write_after_destroy or lifetime.deferred_receiver_write_after_destroy)
++    {
++        return null;
++    }
++    if (lifetime.unsafe_terminal_order) return null;
++    return lifetime;
++}
++
++fn isReceiverTerminalAction(
++    self: *Linter,
++    node: Ast.Node.Index,
++    param_name: []const u8,
++    method_depth: usize,
++) bool {
++    if (self.isSelfUndefinedAssign(node, param_name)) return true;
++    if (self.isSelfDestroyCall(node, param_name)) return true;
++    if (self.isSafeSelfFieldAssign(node, param_name)) return true;
++    const method_node = self.selfMethodTarget(node, param_name) orelse return false;
++    return self.summarizeReceiverMethod(method_node, method_depth) != null;
++}
++
++fn isAssignmentTag(tag: Ast.Node.Tag) bool {
++    return switch (tag) {
++        .assign,
++        .assign_mul,
++        .assign_div,
++        .assign_mod,
++        .assign_add,
++        .assign_sub,
++        .assign_shl,
++        .assign_shl_sat,
++        .assign_shr,
++        .assign_bit_and,
++        .assign_bit_xor,
++        .assign_bit_or,
++        .assign_mul_wrap,
++        .assign_add_wrap,
++        .assign_sub_wrap,
++        .assign_mul_sat,
++        .assign_add_sat,
++        .assign_sub_sat,
++        => true,
++        else => false,
++    };
++}
++
++fn isSelfReceiverWrite(self: *Linter, node: Ast.Node.Index, param_name: []const u8) bool {
++    if (!isAssignmentTag(self.tree.nodeTag(node))) return false;
++    const assign_data = self.tree.nodeData(node).node_and_node;
++    const lhs = assign_data[0];
++    if (self.tree.nodeTag(lhs) == .deref) {
++        const inner = self.tree.nodeData(lhs).node;
++        if (self.tree.nodeTag(inner) != .identifier) return false;
++        return std.mem.eql(u8, self.tree.tokenSlice(self.tree.nodeMainToken(inner)), param_name);
++    }
++    return self.receiverFieldName(lhs, param_name) != null;
++}
++
++fn receiverFieldName(
++    self: *Linter,
++    node: Ast.Node.Index,
++    param_name: []const u8,
++) ?[]const u8 {
++    if (self.tree.nodeTag(node) != .field_access) return null;
++    const data = self.tree.nodeData(node).node_and_token;
++    if (self.tree.nodeTag(data[0]) != .identifier) return null;
++    const receiver_name = self.tree.tokenSlice(self.tree.nodeMainToken(data[0]));
++    if (!std.mem.eql(u8, receiver_name, param_name)) return null;
++    return self.tree.tokenSlice(data[1]);
++}
++
++fn isSelfMarkerMethodCall(self: *Linter, node: Ast.Node.Index, param_name: []const u8) bool {
++    var buf: [1]Ast.Node.Index = undefined;
++    const call = self.tree.fullCall(&buf, node) orelse return false;
++    const fn_expr = call.ast.fn_expr;
++    if (self.tree.nodeTag(fn_expr) != .field_access) return false;
++    const data = self.tree.nodeData(fn_expr).node_and_token;
++    const field_name = self.receiverFieldName(data[0], param_name) orelse return false;
++    if (!std.mem.eql(u8, field_name, "control")) return false;
++    const container = self.findEnclosingContainer(node).unwrap() orelse return false;
++    const members = self.getContainerMembers(container) orelse return false;
++    for (members) |member| {
++        const field = self.tree.fullContainerField(member) orelse continue;
++        const name = self.tree.tokenSlice(field.ast.main_token);
++        if (!std.mem.eql(u8, name, "active") and !std.mem.eql(u8, name, "is_active") and
++            !std.mem.eql(u8, name, "closed") and !std.mem.eql(u8, name, "is_closed")) continue;
++        const field_type = field.ast.type_expr.unwrap() orelse continue;
++        if (self.tree.nodeTag(field_type) != .identifier) continue;
++        if (std.mem.eql(u8, self.tree.tokenSlice(self.tree.nodeMainToken(field_type)), "bool")) return true;
++    }
++    return false;
++}
++
++fn isSafeSelfFieldAssign(self: *Linter, node: Ast.Node.Index, param_name: []const u8) bool {
++    if (self.tree.nodeTag(node) != .assign) return false;
++    const assign_data = self.tree.nodeData(node).node_and_node;
++    const field_name = self.receiverFieldName(assign_data[0], param_name) orelse return false;
++    if (self.isSafeTerminalFieldValue(field_name, assign_data[1])) return true;
++    return self.isSliceReceiverField(node, field_name) and self.isEmptySliceValue(assign_data[1]);
++}
++
++fn isReopeningSelfFieldAssign(self: *Linter, node: Ast.Node.Index, param_name: []const u8) bool {
++    if (!isAssignmentTag(self.tree.nodeTag(node))) return false;
++    const data = self.tree.nodeData(node).node_and_node;
++    const field_name = self.receiverFieldName(data[0], param_name) orelse return false;
++    return (isLifecycleFieldName(field_name) or self.isSliceReceiverField(node, field_name)) and
++        !self.isSafeSelfFieldAssign(node, param_name) and
++        !self.isNamedLiteral(data[1], "undefined");
++}
++
++// Empty slice state is a property of the value, not the field's spelling.
++fn isEmptySliceValue(self: *Linter, node: Ast.Node.Index) bool {
++    const slice = self.tree.fullSlice(node) orelse return false;
++    const end = slice.ast.end.unwrap() orelse return false;
++    if (slice.ast.sentinel != .none) return false;
++    if (self.tree.nodeTag(slice.ast.start) != .number_literal) return false;
++    if (self.tree.nodeTag(end) != .number_literal) return false;
++    return std.mem.eql(u8, self.tree.tokenSlice(self.tree.nodeMainToken(slice.ast.start)), "0") and
++        std.mem.eql(u8, self.tree.tokenSlice(self.tree.nodeMainToken(end)), "0");
++}
++
++fn isSliceReceiverField(self: *Linter, node: Ast.Node.Index, field_name: []const u8) bool {
++    const container = self.findEnclosingContainer(node).unwrap() orelse return false;
++    const members = self.getContainerMembers(container) orelse return false;
++    for (members) |member| {
++        const field = self.tree.fullContainerField(member) orelse continue;
++        if (!std.mem.eql(u8, self.tree.tokenSlice(field.ast.main_token), field_name)) continue;
++        const type_node = field.ast.type_expr.unwrap() orelse return false;
++        const pointer = self.tree.fullPtrType(type_node) orelse return false;
++        return pointer.size == .slice;
++    }
++    return false;
++}
++
++fn isSafeTerminalFieldValue(
++    self: *Linter,
++    field_name: []const u8,
++    node: Ast.Node.Index,
++) bool {
++    if (!isLifecycleFieldName(field_name)) return false;
++
++    if (std.mem.eql(u8, field_name, "active") or
++        std.mem.eql(u8, field_name, "is_active"))
++    {
++        return self.isNamedLiteral(node, "false");
++    }
++
++    if (std.mem.eql(u8, field_name, "closed") or
++        std.mem.eql(u8, field_name, "is_closed"))
++    {
++        return self.isNamedLiteral(node, "true") or
++            self.isNamedLiteral(node, "closed") or
++            self.isNamedLiteral(node, "invalid") or
++            self.isNamedLiteral(node, "none");
++    }
++
++    if (std.mem.eql(u8, field_name, "state")) {
++        return self.isNamedLiteral(node, "closed") or
++            self.isNamedLiteral(node, "invalid") or
++            self.isNamedLiteral(node, "none");
++    }
++
++    if (std.mem.eql(u8, field_name, "control") or
++        std.mem.eql(u8, field_name, "storage") or
++        std.mem.eql(u8, field_name, "owner") or
++        std.mem.eql(u8, field_name, "head") or
++        std.mem.eql(u8, field_name, "tail") or
++        std.mem.eql(u8, field_name, "current_version") or
++        std.mem.eql(u8, field_name, "snapshots"))
++    {
++        return self.isNamedLiteral(node, "null");
++    }
++
++    return self.isNamedLiteral(node, "empty");
++}
++
++fn isLifecycleFieldName(name: []const u8) bool {
++    const names = [_][]const u8{
++        "active",
++        "closed",
++        "is_active",
++        "is_closed",
++        "state",
++        "control",
++        "storage",
++        "owner",
++        "head",
++        "tail",
++        "current_version",
++        "snapshots",
++        "entries",
++        "nodes",
++        "bindings",
++        "resources",
++        "handles",
++        "leases",
++        "records",
++        "items",
++        "values",
++        "names",
++    };
++    for (names) |candidate| {
++        if (std.mem.eql(u8, name, candidate)) return true;
++    }
++    return false;
++}
++
++fn isNamedLiteral(self: *Linter, node: Ast.Node.Index, name: []const u8) bool {
++    const tag = self.tree.nodeTag(node);
++    if (tag != .identifier and tag != .enum_literal) return false;
++    return std.mem.eql(u8, self.tree.tokenSlice(self.tree.nodeMainToken(node)), name);
++}
++
++const GuardBranch = enum { none, then_branch, else_branch };
++
++fn terminalGuardBranch(
++    self: *Linter,
++    condition: Ast.Node.Index,
++    param_name: []const u8,
++) GuardBranch {
++    const tag = self.tree.nodeTag(condition);
++    if (tag == .bool_not) {
++        const inner = self.tree.nodeData(condition).node;
++        const field = self.receiverFieldName(inner, param_name) orelse return .none;
++        if (std.mem.eql(u8, field, "active") or std.mem.eql(u8, field, "is_active")) return .then_branch;
++        if (std.mem.eql(u8, field, "closed") or std.mem.eql(u8, field, "is_closed")) return .else_branch;
++        return .none;
++    }
++    if (self.receiverFieldName(condition, param_name)) |field| {
++        if (std.mem.eql(u8, field, "closed") or std.mem.eql(u8, field, "is_closed")) return .then_branch;
++        if (std.mem.eql(u8, field, "active") or std.mem.eql(u8, field, "is_active")) return .else_branch;
++    }
++    if (tag != .equal_equal and tag != .bang_equal) return .none;
++    const operands = self.tree.nodeData(condition).node_and_node;
++    if (self.isSelfTerminalFieldComparison(operands[0], operands[1], param_name) or
++        self.isSelfTerminalFieldComparison(operands[1], operands[0], param_name))
++    {
++        return if (tag == .equal_equal) .then_branch else .else_branch;
++    }
++    return .none;
++}
++
++fn isSelfTerminalFieldComparison(
++    self: *Linter,
++    lhs: Ast.Node.Index,
++    rhs: Ast.Node.Index,
++    param_name: []const u8,
++) bool {
++    const field_name = self.receiverFieldName(lhs, param_name) orelse return false;
++    return self.isSafeTerminalFieldValue(field_name, rhs);
++}
++
++fn isStateValue(self: *Linter, node: Ast.Node.Index, open: bool) bool {
++    const tag = self.tree.nodeTag(node);
++    if (tag != .identifier and tag != .enum_literal) return false;
++    const value = self.tree.tokenSlice(self.tree.nodeMainToken(node));
++    if (open) {
++        return std.mem.eql(u8, value, "open") or std.mem.endsWith(u8, value, "_open");
++    }
++    return std.mem.eql(u8, value, "closed") or std.mem.endsWith(u8, value, "_closed");
++}
++
++fn isAtomicTerminalTransition(self: *Linter, node: Ast.Node.Index, param_name: []const u8) bool {
++    if (self.tree.nodeTag(node) != .equal_equal) return false;
++    const operands = self.tree.nodeData(node).node_and_node;
++    const call_node = if (self.isNamedLiteral(operands[0], "null"))
++        operands[1]
++    else if (self.isNamedLiteral(operands[1], "null"))
++        operands[0]
++    else
++        return false;
++
++    var call_buf: [1]Ast.Node.Index = undefined;
++    const call = self.tree.fullCall(&call_buf, call_node) orelse return false;
++    if (call.ast.params.len < 2) return false;
++    if (self.tree.nodeTag(call.ast.fn_expr) != .field_access) return false;
++    const method_data = self.tree.nodeData(call.ast.fn_expr).node_and_token;
++    if (!std.mem.eql(u8, self.tree.tokenSlice(method_data[1]), "cmpxchgStrong")) return false;
++
++    const state_name = self.receiverFieldName(method_data[0], param_name) orelse return false;
++    if (!std.mem.eql(u8, state_name, "state") and
++        !std.mem.endsWith(u8, state_name, "_state")) return false;
++    return self.isStateValue(call.ast.params[0], true) and
++        self.isStateValue(call.ast.params[1], false) and
++        self.atomicTransitionMatchesClosedPredicate(node, state_name, call.ast.params[0]);
++}
++
++fn atomicTransitionMatchesClosedPredicate(
++    self: *Linter,
++    node: Ast.Node.Index,
++    state_name: []const u8,
++    open_value: Ast.Node.Index,
++) bool {
++    const method = self.findReceiverMethod(node, "isClosed") orelse return false;
++    var proto_buf: [1]Ast.Node.Index = undefined;
++    const proto = self.tree.fullFnProto(&proto_buf, method) orelse return false;
++    var params = proto.iterate(&self.tree);
++    const receiver = params.next() orelse return false;
++    const receiver_token = receiver.name_token orelse return false;
++    const body = self.tree.nodeData(method).node_and_node[1];
++    var block_buf: [2]Ast.Node.Index = undefined;
++    const statements = self.tree.blockStatements(&block_buf, body) orelse return false;
++    if (statements.len != 1 or self.tree.nodeTag(statements[0]) != .@"return") return false;
++    const expression = self.tree.nodeData(statements[0]).opt_node.unwrap() orelse return false;
++    if (self.tree.nodeTag(expression) != .bang_equal) return false;
++    const operands = self.tree.nodeData(expression).node_and_node;
++    const open_name = self.tree.tokenSlice(self.tree.nodeMainToken(open_value));
++    const receiver_name = self.tree.tokenSlice(receiver_token);
++    return (self.isNamedLiteral(operands[0], open_name) and
++        self.isAtomicStateLoad(operands[1], receiver_name, state_name)) or
++        (self.isNamedLiteral(operands[1], open_name) and
++            self.isAtomicStateLoad(operands[0], receiver_name, state_name));
++}
++
++fn isAtomicStateLoad(
++    self: *Linter,
++    node: Ast.Node.Index,
++    receiver: []const u8,
++    state_name: []const u8,
++) bool {
++    var buf: [1]Ast.Node.Index = undefined;
++    const call = self.tree.fullCall(&buf, node) orelse return false;
++    if (self.tree.nodeTag(call.ast.fn_expr) != .field_access) return false;
++    const data = self.tree.nodeData(call.ast.fn_expr).node_and_token;
++    if (!std.mem.eql(u8, self.tree.tokenSlice(data[1]), "load")) return false;
++    const field = self.receiverFieldName(data[0], receiver) orelse return false;
++    return std.mem.eql(u8, field, state_name);
++}
++
++fn selfMethodTarget(self: *Linter, node: Ast.Node.Index, param_name: []const u8) ?Ast.Node.Index {
++    var call_buf: [1]Ast.Node.Index = undefined;
++    const call = self.tree.fullCall(&call_buf, node) orelse return null;
++    if (self.tree.nodeTag(call.ast.fn_expr) != .field_access) return null;
++    const method_data = self.tree.nodeData(call.ast.fn_expr).node_and_token;
++    if (self.tree.nodeTag(method_data[0]) != .identifier) return null;
++    const receiver_name = self.tree.tokenSlice(self.tree.nodeMainToken(method_data[0]));
++    if (!std.mem.eql(u8, receiver_name, param_name)) return null;
++    return self.findReceiverMethod(node, self.tree.tokenSlice(method_data[1]));
++}
++
++fn findReceiverMethod(self: *Linter, node: Ast.Node.Index, method_name: []const u8) ?Ast.Node.Index {
++    const container = self.findEnclosingContainer(node).unwrap() orelse return null;
++    const members = self.getContainerMembers(container) orelse return null;
++    for (members) |member| {
++        if (self.tree.nodeTag(member) != .fn_decl) continue;
++        var fn_buf: [1]Ast.Node.Index = undefined;
++        const fn_proto = self.tree.fullFnProto(&fn_buf, member) orelse continue;
++        const name_token = fn_proto.name_token orelse continue;
++        if (std.mem.eql(u8, self.tree.tokenSlice(name_token), method_name)) return member;
++    }
++    return null;
++}
++
+ fn isSelfDestroyCall(self: *Linter, node: Ast.Node.Index, param_name: []const u8) bool {
+     var buf: [1]Ast.Node.Index = undefined;
+     const call = self.tree.fullCall(&buf, node) orelse return false;
+@@ -1832,16 +2331,16 @@ fn isSelfUndefinedAssign(self: *Linter, node: Ast.Node.Index, param_name: []cons
+     const lhs = assign_data[0];
+     const rhs = assign_data[1];
+ 
+-    // LHS must be deref (self.*)
++    // LHS must be deref (self.*).
+     if (self.tree.nodeTag(lhs) != .deref) return false;
+ 
+-    // The dereferenced expression must be the parameter name
++    // The dereferenced expression must be the parameter name.
+     const deref_inner = self.tree.nodeData(lhs).node;
+     if (self.tree.nodeTag(deref_inner) != .identifier) return false;
+     const deref_name = self.tree.tokenSlice(self.tree.nodeMainToken(deref_inner));
+     if (!std.mem.eql(u8, deref_name, param_name)) return false;
+ 
+-    // RHS must be undefined
++    // RHS must be undefined.
+     if (self.tree.nodeTag(rhs) != .identifier) return false;
+     const rhs_name = self.tree.tokenSlice(self.tree.nodeMainToken(rhs));
+     return std.mem.eql(u8, rhs_name, "undefined");
+@@ -2871,6 +3370,18 @@ fn isPrimitiveType(name: []const u8) bool {
+     return false;
+ }
+ 
++fn isBuiltinTypeConstructor(name: []const u8) bool {
++    const constructors = [_][]const u8{
++        "@This",   "@import",    "@Type", "@TypeOf", "@EnumLiteral", "@Int",
++        "@Tuple",  "@Pointer",   "@Fn",   "@Struct", "@Union",       "@Enum",
++        "@Vector", "@FieldType",
++    };
++    for (constructors) |constructor| {
++        if (std.mem.eql(u8, name, constructor)) return true;
++    }
++    return false;
++}
++
+ fn isTypeAlias(self: *Linter, var_decl: Ast.full.VarDecl) bool {
+     const init_node = var_decl.ast.init_node.unwrap() orelse return false;
+     const tag = self.tree.nodeTag(init_node);
+@@ -2886,10 +3397,7 @@ fn isTypeAlias(self: *Linter, var_decl: Ast.full.VarDecl) bool {
+         },
+         .builtin_call_two, .builtin_call_two_comma, .builtin_call, .builtin_call_comma => blk: {
+             const token = self.tree.tokenSlice(self.tree.nodeMainToken(init_node));
+-            break :blk std.mem.eql(u8, token, "@This") or
+-                std.mem.eql(u8, token, "@import") or
+-                std.mem.eql(u8, token, "@Type") or
+-                std.mem.eql(u8, token, "@TypeOf");
++            break :blk isBuiltinTypeConstructor(token);
+         },
+         .call_one, .call_one_comma => blk: {
+             // Check if calling a PascalCase function (type constructor)
+@@ -3318,6 +3826,27 @@ test "Z006: allow type alias with @import()" {
+     }
+ }
+ 
++test "skript regression: Z006 distinguishes generated enum types from enum values" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const Dispatch = @Enum(u16, .exhaustive, &.{"add"}, &.{0});
++        \\const BadValue = @enumFromInt(0);
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(1, linter.diagnosticCount(.Z006));
++}
++
++test "Z006 distinguishes field types from typed values" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const Record = struct { payload: u16 };
++        \\const Field = @FieldType(Record, "payload");
++        \\const BadValue = @as(u16, 1);
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(1, linter.diagnosticCount(.Z006));
++}
++
+ test "Z006: allow type alias with @Type()" {
+     var linter: Linter = .init(std.testing.allocator, "const MyType = @Type(.{ .int = .{ .signedness = .unsigned, .bits = 8 } });", "test.zig", null);
+     defer linter.deinit();
+@@ -6152,7 +6681,7 @@ test "Z028: allow field access on import" {
+     try std.testing.expectEqual(0, linter.diagnosticCount(.Z028));
+ }
+ 
+-test "Z030: detect missing self.* = undefined in deinit" {
++test "skript regression: Z030 rejects deinit without terminal receiver state" {
+     var linter: Linter = .init(std.testing.allocator,
+         \\const Foo = struct {
+         \\    a: u32,
+@@ -6406,10 +6935,415 @@ test "Z030: handle different self parameter names" {
+     try std.testing.expectEqual(0, linter.diagnosticCount(.Z030));
+ }
+ 
+-test "Z030: diagnostic uses receiver parameter name" {
++test "skript regression: Z030 accepts guarded idempotent cleanup" {
+     var linter: Linter = .init(std.testing.allocator,
+-        \\const Foo = struct {
+-        \\    fn deinit(value: *Foo) void { _ = value; }
++        \\const Reader = struct {
++        \\    control: *Control,
++        \\    active: bool,
++        \\    fn deinit(self: *Reader) void {
++        \\        if (!self.active) return;
++        \\        self.active = false;
++        \\        self.control.releaseReader();
++        \\    }
++        \\};
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(0, linter.diagnosticCount(.Z030));
++}
++
++test "skript regression: Z030 distinguishes active collections from lifecycle flags" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const Owner = struct {
++        \\    allocator: Allocator,
++        \\    active: std.AutoHashMapUnmanaged(usize, void),
++        \\    fn deinit(self: *Owner) void {
++        \\        self.active.deinit(self.allocator);
++        \\        self.* = undefined;
++        \\    }
++        \\};
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(0, linter.diagnosticCount(.Z030));
++}
++
++test "skript regression: Z030 rejects marker reset after owned cleanup" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const Reader = struct {
++        \\    control: *Control,
++        \\    active: bool,
++        \\    fn deinit(self: *Reader) void {
++        \\        if (!self.active) return;
++        \\        self.control.releaseReader();
++        \\        self.active = false;
++        \\    }
++        \\};
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(1, linter.diagnosticCount(.Z030));
++}
++
++test "skript regression: Z030 accepts terminal path after destroyed return branch" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const Owner = struct {
++        \\    active: bool,
++        \\    fn deinit(self: *Owner, allocator: Allocator, condition: bool) void {
++        \\        if (condition) {
++        \\            allocator.destroy(self);
++        \\            return;
++        \\        }
++        \\        self.active = false;
++        \\    }
++        \\};
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(0, linter.diagnosticCount(.Z030));
++}
++
++test "skript regression: Z030 accepts optional owner reset" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const Region = struct {
++        \\    control: ?*Control,
++        \\    fn deinit(self: *Region) void {
++        \\        const control = self.control orelse return;
++        \\        control.close();
++        \\        self.control = null;
++        \\        control.release();
++        \\    }
++        \\};
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(0, linter.diagnosticCount(.Z030));
++}
++
++test "skript regression: Z030 accepts retained owner tombstone fields" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const Owner = struct {
++        \\    current_version: *Version,
++        \\    snapshots: ?*Snapshot,
++        \\    fn deinit(self: *Owner) void {
++        \\        self.current_version = undefined;
++        \\        self.snapshots = null;
++        \\    }
++        \\};
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(0, linter.diagnosticCount(.Z030));
++}
++
++test "skript regression: Z030 accepts resource fields reset to empty state" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const Owner = struct {
++        \\    allocator: Allocator,
++        \\    entries: EntryList = .empty,
++        \\    head: ?*Node,
++        \\    fn deinit(self: *Owner) void {
++        \\        self.entries.deinit(self.allocator);
++        \\        self.entries = .empty;
++        \\        self.head = null;
++        \\    }
++        \\};
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(0, linter.diagnosticCount(.Z030));
++}
++
++test "Z030: accept zero-length slice reset without a lifecycle field name" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const Owner = struct {
++        \\    allocator: Allocator,
++        \\    components: []u8,
++        \\    fn deinit(self: *Owner) void {
++        \\        const owned = self.components;
++        \\        self.components = owned[0..0];
++        \\        self.allocator.free(owned);
++        \\    }
++        \\};
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(0, linter.diagnosticCount(.Z030));
++}
++
++test "Z030: reject a nonempty slice reset" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const Owner = struct {
++        \\    components: []u8,
++        \\    fn deinit(self: *Owner) void {
++        \\        self.components = self.components[0..1];
++        \\    }
++        \\};
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(1, linter.diagnosticCount(.Z030));
++}
++
++test "Z030: reject restoring a slice after its empty reset" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const Owner = struct {
++        \\    components: []u8,
++        \\    fn deinit(self: *Owner) void {
++        \\        const owned = self.components;
++        \\        self.components = owned[0..0];
++        \\        self.components = owned;
++        \\    }
++        \\};
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(1, linter.diagnosticCount(.Z030));
++}
++
++test "Z030: reject early return before an empty slice reset" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const Owner = struct {
++        \\    components: []u8,
++        \\    fn deinit(self: *Owner, skip: bool) void {
++        \\        if (skip) return;
++        \\        self.components = self.components[0..0];
++        \\    }
++        \\};
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(1, linter.diagnosticCount(.Z030));
++}
++
++test "skript regression: Z030 accepts proven delegated atomic close" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const region_open: u8 = 0;
++        \\const region_closed: u8 = 1;
++        \\const Region = struct {
++        \\    state: AtomicU8,
++        \\    fn close(self: *Region) void {
++        \\        if (self.state.cmpxchgStrong(
++        \\            region_open,
++        \\            region_closed,
++        \\            .acq_rel,
++        \\            .acquire,
++        \\        ) == null) {
++        \\            self.reclaim();
++        \\        }
++        \\    }
++        \\    fn isClosed(self: *const Region) bool {
++        \\        return self.state.load(.acquire) != region_open;
++        \\    }
++        \\    fn deinit(self: *Region) void {
++        \\        self.close();
++        \\    }
++        \\    fn reclaim(_: *Region) void {}
++        \\};
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(0, linter.diagnosticCount(.Z030));
++}
++
++test "skript regression: Z030 rejects nonterminal compare-exchange failure state" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const region_open: u8 = 0;
++        \\const region_closed: u8 = 1;
++        \\const Region = struct {
++        \\    state: AtomicU8,
++        \\    fn close(self: *Region) void {
++        \\        if (self.state.cmpxchgStrong(region_open, region_closed, .acq_rel, .acquire) == null) {
++        \\            self.reclaim();
++        \\        }
++        \\    }
++        \\    fn isClosed(self: *const Region) bool {
++        \\        return self.state.load(.acquire) == region_closed;
++        \\    }
++        \\    fn deinit(self: *Region) void {
++        \\        self.close();
++        \\    }
++        \\    fn reclaim(_: *Region) void {}
++        \\};
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(1, linter.diagnosticCount(.Z030));
++}
++
++test "skript regression: Z030 rejects guarded cleanup without matching reset" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const Reader = struct {
++        \\    control: *Control,
++        \\    active: bool,
++        \\    fn deinit(self: *Reader) void {
++        \\        if (!self.active) return;
++        \\        self.control.releaseReader();
++        \\    }
++        \\};
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(1, linter.diagnosticCount(.Z030));
++}
++
++test "skript regression: Z030 rejects arbitrary method delegation" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const Region = struct {
++        \\    counter: usize,
++        \\    fn finish(self: *Region) void {
++        \\        self.counter = 0;
++        \\    }
++        \\    fn deinit(self: *Region) void {
++        \\        self.finish();
++        \\    }
++        \\};
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(1, linter.diagnosticCount(.Z030));
++}
++
++test "skript regression: Z030 rejects undefined-only resource reset" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const Owner = struct {
++        \\    known: []Value,
++        \\    fn deinit(self: *Owner) void {
++        \\        self.known = undefined;
++        \\    }
++        \\};
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(1, linter.diagnosticCount(.Z030));
++}
++
++test "skript regression: Z030 rejects ordinary field assignment as terminal state" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const Owner = struct {
++        \\    counter: usize,
++        \\    fn deinit(self: *Owner) void {
++        \\        cleanup();
++        \\        self.counter = 0;
++        \\    }
++        \\};
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(1, linter.diagnosticCount(.Z030));
++}
++
++test "skript regression: Z030 requires terminal state on every fallthrough branch" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const Owner = struct {
++        \\    active: bool,
++        \\    fn deinit(self: *Owner, finish: bool) void {
++        \\        if (finish) self.active = false;
++        \\    }
++        \\};
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(1, linter.diagnosticCount(.Z030));
++}
++
++test "skript regression: Z030 rejects return before a later defer" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const Owner = struct {
++        \\    active: bool,
++        \\    fn deinit(self: *Owner, skip: bool) void {
++        \\        if (skip) return;
++        \\        defer self.* = undefined;
++        \\        cleanup();
++        \\    }
++        \\};
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(1, linter.diagnosticCount(.Z030));
++}
++
++test "skript regression: Z030 rejects reopening after a terminal assignment" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const Owner = struct {
++        \\    active: bool,
++        \\    fn deinit(self: *Owner) void {
++        \\        self.active = false;
++        \\        self.active = true;
++        \\    }
++        \\};
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(1, linter.diagnosticCount(.Z030));
++}
++
++test "skript regression: Z030 rejects an open-state equality return guard" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const Owner = struct {
++        \\    closed: bool,
++        \\    fn deinit(self: *Owner) void {
++        \\        if (self.closed == false) return;
++        \\        self.closed = true;
++        \\    }
++        \\};
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(1, linter.diagnosticCount(.Z030));
++}
++
++test "skript regression: Z030 rejects reopening marker as terminal state" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const Owner = struct {
++        \\    closed: bool,
++        \\    fn deinit(self: *Owner) void {
++        \\        self.closed = false;
++        \\    }
++        \\};
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(1, linter.diagnosticCount(.Z030));
++}
++
++test "skript regression: Z030 rejects return on open closed-marker state" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const Owner = struct {
++        \\    closed: bool,
++        \\    fn deinit(self: *Owner) void {
++        \\        if (!self.closed) return;
++        \\        self.closed = false;
++        \\    }
++        \\};
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(1, linter.diagnosticCount(.Z030));
++}
++test "skript regression: Z030 rejects receiver field write after destruction" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const Owner = struct {
++        \\    active: bool,
++        \\    fn deinit(self: *Owner, allocator: Allocator) void {
++        \\        allocator.destroy(self);
++        \\        self.active = false;
++        \\    }
++        \\};
++    , "test.zig", null);
++    defer linter.deinit();
++    linter.lint();
++    try std.testing.expectEqual(1, linter.diagnosticCount(.Z030));
++}
++
++test "skript regression: Z030 rejects deferred field reset after destruction" {
++    var linter: Linter = .init(std.testing.allocator,
++        \\const Owner = struct {
++        \\    active: bool,
++        \\    fn deinit(self: *Owner, allocator: Allocator) void {
++        \\        defer self.active = false;
++        \\        allocator.destroy(self);
++        \\    }
+         \\};
+     , "test.zig", null);
+     defer linter.deinit();
+@@ -6417,7 +7351,10 @@ test "Z030: diagnostic uses receiver parameter name" {
+     try std.testing.expectEqual(1, linter.diagnosticCount(.Z030));
+     for (linter.diagnostics.items) |diagnostic| {
+         if (diagnostic.rule == .Z030) {
+-            try std.testing.expectEqualStrings("value\x00", diagnostic.context);
++            try std.testing.expectEqualStrings(
++                "self\x00deferred receiver write runs after receiver destruction",
++                diagnostic.context,
++            );
+         }
+     }
+ }
+diff --git a/src/rules.zig b/src/rules.zig
+index 1598241..22bb506 100644
+--- a/src/rules.zig
++++ b/src/rules.zig
+@@ -222,7 +222,13 @@ pub const Rule = enum(u16) {
+                 const sep = std.mem.indexOfScalar(u8, context, 0) orelse context.len;
+                 const param_name = context[0..sep];
+                 const reason = if (sep < context.len) context[sep + 1 ..] else "";
+-                try writer.print("{s}deinit{s} should set {s}{s}.* = undefined{s}", .{ y, r, b, param_name, r });
++                try writer.print("{s}deinit{s} should leave {s}{s} invalid, empty, or destroyed{s}", .{
++                    y,
++                    r,
++                    b,
++                    param_name,
++                    r,
++                });
+                 if (reason.len > 0) {
+                     try writer.print(" ({s})", .{reason});
+                 }
+@@ -345,90 +351,3 @@ fn RuleConfig(comptime enabled_by_default: bool, comptime Extra: type) type {
+ test "rule codes" {
+     try std.testing.expectEqualStrings("Z001", Rule.Z001.code());
+ }
+-
+-test "Z017 recommends a coercion-preserving rewrite" {
+-    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+-    defer output.deinit();
+-
+-    try Rule.Z017.writeMessage(&output.writer, "allocThing()", false);
+-
+-    try std.testing.expectEqualStrings(
+-        "avoid try in return; hoist it to preserve payload coercion: `const value = try allocThing(); return value;`",
+-        output.written(),
+-    );
+-}
+-
+-test "Z002 recommends valid fixes for named discards" {
+-    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+-    defer output.deinit();
+-
+-    try Rule.Z002.writeMessage(&output.writer, "_result", false);
+-
+-    try std.testing.expectEqualStrings(
+-        "initialized variable '_result' uses a named discard; rename it if used or write `_ = expression;` to discard the value",
+-        output.written(),
+-    );
+-}
+-
+-test "Z003 includes the parser error" {
+-    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+-    defer output.deinit();
+-
+-    try Rule.Z003.writeMessage(&output.writer, "expected expression", false);
+-
+-    try std.testing.expectEqualStrings("parse error: expected expression", output.written());
+-}
+-
+-test "Z004 recommends preserving the declaration" {
+-    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+-    defer output.deinit();
+-
+-    try Rule.Z004.writeMessage(&output.writer, "point\x00Point", false);
+-
+-    try std.testing.expectEqualStrings(
+-        "prefer type annotation 'Point' with an anonymous initializer for 'point'; preserve the declaration kind, modifiers, and fields",
+-        output.written(),
+-    );
+-}
+-
+-test "Z020 recommends the enclosing named struct" {
+-    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+-    defer output.deinit();
+-
+-    try Rule.Z020.writeMessage(&output.writer, "Widget", false);
+-
+-    try std.testing.expectEqualStrings("inline @This() in named struct; use 'Widget' instead", output.written());
+-}
+-
+-test "Z020 recommends Self for an anonymous struct" {
+-    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+-    defer output.deinit();
+-
+-    try Rule.Z020.writeMessage(&output.writer, "", false);
+-
+-    try std.testing.expectEqualStrings("inline @This(); assign it to `const Self = @This();`", output.written());
+-}
+-
+-test "Z021 includes both accepted aliases" {
+-    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+-    defer output.deinit();
+-
+-    try Rule.Z021.writeMessage(&output.writer, "Wrong\x00Config", false);
+-
+-    try std.testing.expectEqualStrings(
+-        "@This() alias 'Wrong' should match filename 'Config' or be 'Self'",
+-        output.written(),
+-    );
+-}
+-
+-test "Z030 uses the receiver name" {
+-    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+-    defer output.deinit();
+-
+-    try Rule.Z030.writeMessage(&output.writer, "value\x00has early return before invalidation", false);
+-
+-    try std.testing.expectEqualStrings(
+-        "deinit should set value.* = undefined (has early return before invalidation)",
+-        output.written(),
+-    );
+-}

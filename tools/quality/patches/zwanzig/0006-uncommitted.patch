@@ -1,0 +1,2535 @@
+# zwanzig: uncommitted source changes on top of local-sync 956bc69cafd4c5fcce25b05f2fdf116500d45d34
+# Captured verbatim from the local working copy at 2026-10-01T23:43:14Z; source paths only.
+# docs/, CHANGELOG.md, justfile, AGENTS.md, CLAUDE.md, GEMINI.md and .zig-cache/ are NOT archived.
+# Apply with: git -C <checkout> apply -p1 <this file>
+diff --git a/src/analysis_cache.zig b/src/analysis_cache.zig
+index cc9634e..3991e76 100644
+--- a/src/analysis_cache.zig
++++ b/src/analysis_cache.zig
+@@ -9,6 +9,56 @@ const ids = @import("ids.zig");
+ 
+ pub const AnalysisMode = enum { configured, plain };
+ 
++/// A function whose analysis engine stopped at a configured budget. Findings
++/// that need a complete dataflow analysis of that function are missing, not
++/// absent, so the report has to say so instead of leaving the gap implicit.
++pub const limit_rule_id = "analysis-limit-exceeded";
++
++fn reportLimitExceeded(
++    allocator: std.mem.Allocator,
++    diagnostics: *std.ArrayList(checker_mod.Diagnostic),
++    source: *Source,
++    cfg: *const Cfg,
++    engine: *const AnalysisEngine,
++) std.mem.Allocator.Error!void {
++    const Budget = struct { name: []const u8, value: u64, remedy: []const u8 };
++    // Both budgets abort `run` with one error, and `run` records the one that
++    // fired, so this only names the configured ceiling that was reached.
++    const budget: Budget = switch (engine.limit_kind orelse .worklist_steps) {
++        .worklist_steps => .{
++            .name = "worklist step",
++            .value = engine.max_worklist_steps,
++            .remedy = "--max-steps or max_worklist_steps",
++        },
++        .states_per_point => .{
++            .name = "per-point state",
++            .value = engine.getGraph().max_states_per_point,
++            .remedy = "--max-states-per-point or max_states_per_point",
++        },
++    };
++    const message = try std.fmt.allocPrint(
++        allocator,
++        "analysis limit exceeded: {s} limit {d} reached while analyzing `{s}`; " ++
++            "findings that require a complete dataflow analysis of this function were not produced. Raise {s}.",
++        .{ budget.name, budget.value, cfg.fn_name orelse "<anonymous>", budget.remedy },
++    );
++    errdefer allocator.free(message);
++
++    var location: checker_mod.Location = .init(1, 1);
++    if (cfg.fn_ast_node) |fn_node| {
++        const token = (try source.ast()).nodes.items(.main_token)[ids.astIndex(fn_node)];
++        location = try source.tokenLocation(token);
++    }
++    const diagnostic: checker_mod.Diagnostic = .{
++        .file_path = source.getFilePath(),
++        .rule_id = limit_rule_id,
++        .severity = .err,
++        .message = message,
++        .range = .fromSingleLocation(location),
++    };
++    try diagnostics.append(allocator, diagnostic);
++}
++
+ /// An exclusive lease. Do not copy it or keep engine pointers after deinit.
+ /// Graph results remain read-only, but lazy engine query caches may grow.
+ /// The source, CFGs, type context, and optional cache must outlive the lease.
+@@ -189,7 +239,15 @@ pub fn getOrAnalyze(
+     };
+     engine.run() catch |err| switch (err) {
+         error.OutOfMemory => return error.OutOfMemory,
+-        error.AnalysisLimitExceeded => entry.complete = false,
++        error.AnalysisLimitExceeded => {
++            entry.complete = false;
++            // Consumers of this handle drop everything that needs a complete
++            // analysis, so report the gap where the error is swallowed rather
++            // than letting an unanalyzed function read as a clean one.
++            if (context.diagnostics) |list| {
++                try reportLimitExceeded(allocator, list, key.source, key.cfg, engine);
++            }
++        },
+     };
+     if (cache) |owner| return owner.lease(entry);
+     return .{ .engine = engine, .complete = entry.complete, .entry = entry, .cache = null };
+@@ -365,6 +423,70 @@ test "AnalysisCache separates limits and retains incomplete results" {
+     try std.testing.expectEqual(@as(u64, 4), stats.total_runs);
+ }
+ 
++test "AnalysisCache reports an exhausted budget once per incomplete analysis" {
++    const allocator = std.testing.allocator;
++    var source = Source.init(allocator, "reported.zig", "fn foo() void {}");
++    defer source.deinit();
++    var artifacts = checker_mod.CachedArtifacts.init(allocator);
++    defer artifacts.deinit();
++    var cache = AnalysisCache.init(allocator);
++    defer cache.deinit();
++    var stats: checker_mod.AnalysisStats = .{};
++    var diagnostics: std.ArrayList(checker_mod.Diagnostic) = .empty;
++    defer {
++        for (diagnostics.items) |*diagnostic| diagnostic.deinit(allocator);
++        diagnostics.deinit(allocator);
++    }
++    var context: checker_mod.CheckerContext = .{
++        .build_metadata = null,
++        .cached_artifacts = &artifacts,
++        .analysis_cache = &cache,
++        .analysis_stats = &stats,
++        .diagnostics = &diagnostics,
++    };
++    var cfg = try buildTestCfg(&source, context);
++    defer cfg.deinit();
++
++    // A function analyzed to a fixed point must not look like a truncated one.
++    {
++        var complete = try context.getOrAnalyze(allocator, &source, &cfg, "complete", .configured);
++        defer complete.deinit();
++        try std.testing.expect(complete.complete);
++    }
++    try std.testing.expectEqual(@as(usize, 0), diagnostics.items.len);
++
++    context.analysis_limits = .{ .max_worklist_steps = 0 };
++    {
++        var limited = try context.getOrAnalyze(allocator, &source, &cfg, "limited", .configured);
++        defer limited.deinit();
++        try std.testing.expect(!limited.complete);
++    }
++    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
++    {
++        const reported = diagnostics.items[0];
++        try std.testing.expectEqualStrings(limit_rule_id, reported.rule_id);
++        try std.testing.expectEqual(checker_mod.Severity.err, reported.severity);
++        try std.testing.expectEqualStrings("reported.zig", reported.file_path);
++    }
++
++    // A second consumer leasing the same engine reuses the first report rather
++    // than claiming the same gap again.
++    {
++        var again = try context.getOrAnalyze(allocator, &source, &cfg, "other", .configured);
++        defer again.deinit();
++        try std.testing.expect(!again.complete);
++    }
++    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
++
++    context.analysis_limits = .{ .max_states_per_point = 0 };
++    {
++        var capped = try context.getOrAnalyze(allocator, &source, &cfg, "capped", .configured);
++        defer capped.deinit();
++        try std.testing.expect(!capped.complete);
++    }
++    try std.testing.expectEqual(@as(usize, 2), diagnostics.items.len);
++}
++
+ test "AnalysisCache keys borrowed source type metadata and artifact identities" {
+     const allocator = std.testing.allocator;
+     var source = Source.init(allocator, "identity.zig", "fn foo() void {}");
+diff --git a/src/analyzer.zig b/src/analyzer.zig
+index a2ac659..5af68a2 100644
+--- a/src/analyzer.zig
++++ b/src/analyzer.zig
+@@ -561,6 +561,7 @@ pub const Analyzer = struct {
+             .type_context = if (type_ctx) |*ctx| ctx else null,
+             .analysis_cache = &analysis_cache,
+             .analysis_stats = analysis_stats,
++            .diagnostics = diagnostics,
+             .analysis_limits = .{
+                 .max_worklist_steps = self.max_worklist_steps,
+                 .max_states_per_point = self.max_states_per_point,
+diff --git a/src/ast_walk.zig b/src/ast_walk.zig
+index 07876bc..a4685ab 100644
+--- a/src/ast_walk.zig
++++ b/src/ast_walk.zig
+@@ -1,11 +1,6 @@
+ const std = @import("std");
+ 
+ const Ast = std.zig.Ast;
+-const log = std.log.scoped(.ast_walk);
+-
+-/// Maximum number of block statements to process. Blocks exceeding this limit
+-/// will have guard detection truncated with a warning.
+-pub const max_block_statements = 64;
+ 
+ pub fn walk(
+     comptime Visitor: type,
+@@ -508,13 +503,13 @@ fn fillParentMapInternal(tree: *const Ast, node: u32, parent: u32, parent_map: [
+     walkChildren(Builder, tree, node, &builder, Builder.child) catch unreachable;
+ }
+ 
+-/// Extract statements from a block node into a buffer.
+-/// Returns the number of statements, or null if the node is not a block.
++/// Return all statements in a block, or null if the node is not a block.
++/// Regular blocks borrow the AST's extra data; inline blocks borrow inline_buf.
+ pub fn getBlockStatements(
+     tree: *const Ast,
+     block: u32,
+-    stmts_buf: *[max_block_statements]u32,
+-) ?usize {
++    inline_buf: *[2]u32,
++) ?[]const u32 {
+     const tags = tree.nodes.items(.tag);
+     const datas = tree.nodes.items(.data);
+ 
+@@ -527,31 +522,23 @@ pub fn getBlockStatements(
+             const extra = datas[block].extra_range;
+             const start: usize = @intFromEnum(extra.start);
+             const end: usize = @intFromEnum(extra.end);
+-            const total_stmts = end - start;
+-            if (total_stmts > max_block_statements) {
+-                log.warn("block has {d} statements, exceeding limit of {d}; processing may be incomplete", .{ total_stmts, max_block_statements });
+-            }
+-            const len = @min(total_stmts, max_block_statements);
+-            for (0..len) |i| {
+-                stmts_buf[i] = tree.extra_data[start + i];
+-                stmt_count += 1;
+-            }
++            return tree.extra_data[start..end];
+         },
+         .block_two, .block_two_semicolon => {
+             const opt_nodes = datas[block].opt_node_and_opt_node;
+             if (opt_nodes[0].unwrap()) |n| {
+-                stmts_buf[stmt_count] = @intFromEnum(n);
++                inline_buf[stmt_count] = @intFromEnum(n);
+                 stmt_count += 1;
+             }
+             if (opt_nodes[1].unwrap()) |n| {
+-                stmts_buf[stmt_count] = @intFromEnum(n);
++                inline_buf[stmt_count] = @intFromEnum(n);
+                 stmt_count += 1;
+             }
+         },
+         else => return null,
+     }
+ 
+-    return stmt_count;
++    return inline_buf[0..stmt_count];
+ }
+ 
+ /// Check if ancestor_node is an ancestor of descendant_node using a parent map.
+diff --git a/src/checker.zig b/src/checker.zig
+index 588baf6..3bd3fb2 100644
+--- a/src/checker.zig
++++ b/src/checker.zig
+@@ -97,6 +97,12 @@ pub const CheckerContext = struct {
+     cached_artifacts: ?*CachedArtifacts = null,
+     /// Per-file analysis cache. Destroy it before the source, CFGs, and type context.
+     analysis_cache: ?*AnalysisCache = null,
++    /// Diagnostics collected for the file under analysis, and the allocator
++    /// that owns them. `getOrAnalyze` reports an exhausted analysis budget
++    /// here, so a caller that collects diagnostics sees the incompleteness
++    /// instead of only the findings that survived it. A checker must pass the
++    /// same allocator to `getOrAnalyze` that owns this list.
++    diagnostics: ?*std.ArrayList(Diagnostic) = null,
+     /// Directory to dump CFG DOT files for visualization.
+     /// When set, checkers write CFG DOT files to this directory.
+     dump_cfg_dir: ?[]const u8 = null,
+diff --git a/src/checkers/optional_unwrap/guards.zig b/src/checkers/optional_unwrap/guards.zig
+index ac531da..71bdd9c 100644
+--- a/src/checkers/optional_unwrap/guards.zig
++++ b/src/checkers/optional_unwrap/guards.zig
+@@ -29,11 +29,11 @@ pub fn isGuardedByAssertion(
+             else => {},
+         }
+     } else return false;
+-    var statements: [ast_walk.max_block_statements]u32 = undefined;
+-    const count = ast_walk.getBlockStatements(tree, block, &statements) orelse return false;
++    var inline_statements: [2]u32 = undefined;
++    const statements = ast_walk.getBlockStatements(tree, block, &inline_statements) orelse return false;
+     const before = tree.nodeMainToken(@enumFromInt(unwrap_node));
+     var fact = false;
+-    for (statements[0..count]) |statement| {
++    for (statements) |statement| {
+         if (query.firstToken(statement) >= before) break;
+         if (statementMayMutateStorageBefore(query, statement, target, tags, datas, block, unwrap_node, type_context))
+             fact = false;
+@@ -120,12 +120,12 @@ fn scanBlockForLazyInit(
+     const unwrap_pos = token_starts[main_tokens[unwrap_node]];
+ 
+     // Get statements from the block.
+-    var stmts_buf: [ast_walk.max_block_statements]u32 = undefined;
+-    const stmt_count = ast_walk.getBlockStatements(tree, block, &stmts_buf) orelse return false;
++    var inline_statements: [2]u32 = undefined;
++    const statements = ast_walk.getBlockStatements(tree, block, &inline_statements) orelse return false;
+     var fact = false;
+ 
+     // A lazy initialization proof remains valid only until a later storage write.
+-    for (stmts_buf[0..stmt_count]) |stmt| {
++    for (statements) |stmt| {
+         if (stmt >= tags.len or stmt >= main_tokens.len) continue;
+ 
+         const stmt_pos = token_starts[main_tokens[stmt]];
+@@ -370,14 +370,14 @@ fn scanBlockForEarlyExit(
+     const unwrap_pos = token_starts[main_tokens[unwrap_node]];
+ 
+     // Get statements from the block.
+-    var stmts_buf: [ast_walk.max_block_statements]u32 = undefined;
+-    const stmt_count = ast_walk.getBlockStatements(tree, block, &stmts_buf) orelse return false;
++    var inline_statements: [2]u32 = undefined;
++    const statements = ast_walk.getBlockStatements(tree, block, &inline_statements) orelse return false;
+     var fact = false;
+ 
+     // A condition whose true branch exits leaves the false-branch facts in
+     // force.  Use the full boolean expression, not only a direct comparison:
+     // `if (x == null or other_is_invalid) return; x.?` is safe.
+-    for (stmts_buf[0..stmt_count]) |stmt| {
++    for (statements) |stmt| {
+         if (stmt >= tags.len or stmt >= main_tokens.len) continue;
+ 
+         const stmt_pos = token_starts[main_tokens[stmt]];
+@@ -418,11 +418,11 @@ fn scanBlockForSwitchNullCase(
+     if (unwrap_node >= main_tokens.len) return false;
+     const unwrap_pos = token_starts[main_tokens[unwrap_node]];
+ 
+-    var stmts_buf: [ast_walk.max_block_statements]u32 = undefined;
+-    const stmt_count = ast_walk.getBlockStatements(tree, block, &stmts_buf) orelse return false;
++    var inline_statements: [2]u32 = undefined;
++    const statements = ast_walk.getBlockStatements(tree, block, &inline_statements) orelse return false;
+     var fact = false;
+ 
+-    for (stmts_buf[0..stmt_count]) |stmt| {
++    for (statements) |stmt| {
+         if (stmt >= tags.len) continue;
+         if (stmt >= main_tokens.len) continue;
+ 
+@@ -490,9 +490,9 @@ fn isEarlyExitExpr(
+     switch (tags[node]) {
+         .@"continue", .@"break", .@"return" => return true,
+         .block, .block_semicolon, .block_two, .block_two_semicolon => {
+-            var statements: [ast_walk.max_block_statements]u32 = undefined;
+-            const statement_count = ast_walk.getBlockStatements(tree, node, &statements) orelse return false;
+-            for (statements[0..statement_count]) |statement| {
++            var inline_statements: [2]u32 = undefined;
++            const statements = ast_walk.getBlockStatements(tree, node, &inline_statements) orelse return false;
++            for (statements) |statement| {
+                 if (isEarlyExitExpr(tree, statement, tags, datas)) return true;
+             }
+             return false;
+@@ -587,11 +587,11 @@ pub fn isGuardedByPriorUnwrap(
+     if (unwrap_node >= main_tokens.len) return false;
+     const unwrap_pos = token_starts[main_tokens[unwrap_node]];
+ 
+-    var stmts_buf: [ast_walk.max_block_statements]u32 = undefined;
+-    const stmt_count = ast_walk.getBlockStatements(tree, block, &stmts_buf) orelse return false;
++    var inline_statements: [2]u32 = undefined;
++    const statements = ast_walk.getBlockStatements(tree, block, &inline_statements) orelse return false;
+     var fact = false;
+ 
+-    for (stmts_buf[0..stmt_count]) |stmt| {
++    for (statements) |stmt| {
+         if (stmt >= tags.len or stmt >= main_tokens.len) continue;
+         const stmt_pos = token_starts[main_tokens[stmt]];
+         if (stmt_pos >= unwrap_pos) break;
+@@ -622,11 +622,11 @@ fn scanBlockForPriorAssignment(
+     if (block >= tags.len or unwrap_node >= main_tokens.len) return false;
+     const unwrap_pos = token_starts[main_tokens[unwrap_node]];
+ 
+-    var stmts_buf: [ast_walk.max_block_statements]u32 = undefined;
+-    const stmt_count = ast_walk.getBlockStatements(tree, block, &stmts_buf) orelse return false;
++    var inline_statements: [2]u32 = undefined;
++    const statements = ast_walk.getBlockStatements(tree, block, &inline_statements) orelse return false;
+     var fact = false;
+ 
+-    for (stmts_buf[0..stmt_count]) |stmt| {
++    for (statements) |stmt| {
+         if (stmt >= tags.len or stmt >= main_tokens.len) continue;
+         const stmt_pos = token_starts[main_tokens[stmt]];
+         if (stmt_pos >= unwrap_pos) break;
+@@ -1372,7 +1372,7 @@ fn storageWriteMayAffect(query: *const QueryContext, lhs: u32, target: u32, bloc
+     const tags = tree.nodes.items(.tag);
+     if (lhs >= tags.len) return true;
+     if (storageFieldsAreDisjoint(query, lhs, target, type_context)) return false;
+-    if (storageRootMatches(query, lhs, target)) return true;
++    if (storageRootsMayAlias(query, lhs, target, type_context)) return true;
+     return switch (tags[lhs]) {
+         .deref, .address_of, .field_access, .array_access => !localSlotHasNoAliases(query, target, block, type_context),
+         .identifier => false,
+@@ -1425,13 +1425,13 @@ fn localSlotHasNoAliases(query: *const QueryContext, target: u32, block: u32, ty
+         if (start < function_start or start >= reference) continue;
+         if (tag == .@"asm" or tag == .asm_simple) return false;
+         if (start <= binding) continue;
+-        if (tag == .address_of and storageRootMatches(query, @intFromEnum(tree.nodeData(node).node), target)) return false;
++        if (tag == .address_of and storageRootsMayAlias(query, @intFromEnum(tree.nodeData(node).node), target, type_context)) return false;
+         if (call_resolver.isCallNode(tag)) {
+             var buffer: [1]std.zig.Ast.Node.Index = undefined;
+             const call = tree.fullCall(&buffer, node) orelse return false;
+             const callee = call.ast.fn_expr;
+             if (tree.nodeTag(callee) == .field_access and
+-                storageRootMatches(query, @intFromEnum(tree.nodeData(callee).node_and_token[0]), target))
++                storageRootsMayAlias(query, @intFromEnum(tree.nodeData(callee).node_and_token[0]), target, type_context))
+                 return false;
+         }
+         switch (tag) {
+@@ -1439,7 +1439,7 @@ fn localSlotHasNoAliases(query: *const QueryContext, target: u32, block: u32, ty
+                 var buffer: [2]std.zig.Ast.Node.Index = undefined;
+                 const params = tree.builtinCallParams(&buffer, node) orelse return false;
+                 for (params) |param| {
+-                    if (storageRootMatches(query, @intFromEnum(param), target)) return false;
++                    if (storageRootsMayAlias(query, @intFromEnum(param), target, type_context)) return false;
+                 }
+             },
+             else => {},
+@@ -1465,7 +1465,7 @@ fn callMayMutateStorage(
+     if (tags[callee] == .field_access) {
+         const receiver = @intFromEnum(datas[callee].node_and_token[0]);
+         if (receiver >= tags.len) return true;
+-        if (tags[receiver] != .unwrap_optional and storageRootMatches(query, receiver, target)) {
++        if (tags[receiver] != .unwrap_optional and storageRootsMayAlias(query, receiver, target, type_context)) {
+             return true;
+         }
+     }
+@@ -1536,18 +1536,18 @@ fn argumentMayMutateStorage(
+                 argument = @intFromEnum(datas[argument].node_and_token[0]);
+             },
+             .identifier => {
+-                if (!storageRootMatches(query, argument, target)) return false;
++                if (!storageRootsMayAlias(query, argument, target, type_context)) return false;
+                 return argumentExpressionMayEscape(type_context, argument);
+             },
+             .address_of => {
+                 const pointee = @intFromEnum(datas[argument].node);
+                 if (storageFieldsAreDisjoint(query, pointee, target, type_context)) return false;
+-                return storageRootMatches(query, argument, target);
++                return storageRootsMayAlias(query, argument, target, type_context);
+             },
+-            .deref => return storageRootMatches(query, argument, target),
++            .deref => return storageRootsMayAlias(query, argument, target, type_context),
+             .array_access => {
+                 const base = @intFromEnum(datas[argument].node_and_node[0]);
+-                if (storageRootMatches(query, base, target)) return true;
++                if (storageRootsMayAlias(query, base, target, type_context)) return true;
+                 argument = base;
+             },
+             .call, .call_comma, .call_one, .call_one_comma => {
+@@ -1556,7 +1556,7 @@ fn argumentMayMutateStorage(
+                 const callee = @intFromEnum(full.ast.fn_expr);
+                 if (callee < tags.len and tags[callee] == .field_access) {
+                     const receiver = @intFromEnum(datas[callee].node_and_token[0]);
+-                    if (storageRootMatches(query, receiver, target)) return true;
++                    if (storageRootsMayAlias(query, receiver, target, type_context)) return true;
+                 }
+                 for (full.ast.params) |param| {
+                     if (argumentMayMutateStorage(query, @intFromEnum(param), target, tags, datas, type_context)) return true;
+@@ -1641,6 +1641,209 @@ fn sameIdentifierBinding(query: *const QueryContext, left: u32, right: u32) bool
+     return left_binding == right_binding;
+ }
+ 
++/// `storageRootMatches` plus the locals that reach the target root through a
++/// pointer view: a pointer copy such as `const alias = holder;`, however many
++/// hops or rebindings deep, still designates the same object, so a different
++/// name never proves non-aliasing.
++fn storageRootsMayAlias(
++    query: *const QueryContext,
++    node: u32,
++    target: u32,
++    type_context: ?*TypeContext,
++) bool {
++    if (storageRootMatches(query, node, target)) return true;
++    const left = storageRootIdentifier(query, node) orelse return false;
++    const right = storageRootIdentifier(query, target) orelse return false;
++    if (left == right) return true;
++    const target_binding = query.resolveIdentifierBinding(right) orelse return false;
++    // Only initialisation that already reached the use site can have made
++    // the left binding designate the target object there.
++    return bindingDerivedFrom(query, left, target_binding, query.firstToken(target), type_context);
++}
++
++fn storageRootIdentifier(query: *const QueryContext, node: u32) ?u32 {
++    const tree = query.tree;
++    const tags = tree.nodes.items(.tag);
++    const datas = tree.nodes.items(.data);
++    var current = node;
++    var depth: u32 = 0;
++    while (depth < 32) : (depth += 1) {
++        if (current >= tags.len) return null;
++        switch (tags[current]) {
++            .grouped_expression, .unwrap_optional, .field_access => current = @intFromEnum(datas[current].node_and_token[0]),
++            .deref, .address_of => current = @intFromEnum(datas[current].node),
++            .array_access => current = @intFromEnum(datas[current].node_and_node[0]),
++            .identifier => return current,
++            else => return null,
++        }
++    }
++    return null;
++}
++
++/// A binding reaches the target object when one of the expressions that give
++/// it a value re-reads an already known alias through a pointer view. Chains
++/// are followed to a fixpoint and a rebinding counts like a declaration, so
++/// `var p = holder; const q = p; const r = q;` and `alias = holder;` still
++/// designate the same object, while a plain value copy (`const copy =
++/// holder.list;`) initialises an independent one. Only initialisation that
++/// already reached the use site counts. The discriminator is always the
++/// alias's own initializer, never the target's type: `&root` shares the
++/// object, a struct copy does not.
++fn bindingDerivedFrom(
++    query: *const QueryContext,
++    node: u32,
++    target_binding: u32,
++    use_token: u32,
++    type_context: ?*TypeContext,
++) bool {
++    const tree = query.tree;
++    const tags = tree.nodes.items(.tag);
++    const datas = tree.nodes.items(.data);
++    const binding = query.resolveIdentifierBinding(node) orelse return false;
++    if (binding == target_binding) return true;
++
++    // Bindings already known to designate the target object. Chains grow it
++    // one hop at a time; more than the worklist holds is reported as aliasing
++    // because claiming independence would hide a real mutation.
++    var known: [32]u32 = undefined;
++    var known_len: usize = 1;
++    known[0] = target_binding;
++    var next: usize = 0;
++    while (next < known_len) : (next += 1) {
++        const source = known[next];
++        for (tags, 0..) |tag, index| {
++            var destination: u32 = 0;
++            var value_expr: u32 = 0;
++            switch (tag) {
++                .assign => {
++                    value_expr = @intFromEnum(datas[index].node_and_node[1]);
++                },
++                else => {
++                    if (!import_resolver.isVarDeclTag(tag)) continue;
++                    const full = tree.fullVarDecl(@enumFromInt(index)) orelse continue;
++                    destination = full.ast.mut_token + 1;
++                    value_expr = @intFromEnum(full.ast.init_node.unwrap() orelse {
++                        // A declaration with no value at all still names the slot.
++                        if (destination == binding) return true;
++                        continue;
++                    });
++                },
++            }
++            // A declaration or rebinding written after the use site cannot
++            // have shaped the value that site reads.
++            if (query.firstToken(index) >= use_token) continue;
++            if (value_expr == 0 or value_expr >= tags.len) continue;
++            if (!expressionNamesBinding(query, value_expr, source)) continue;
++            if (!expressionMentionsBinding(query, value_expr, source)) continue;
++            if (!initializerCarriesPointer(query, value_expr, type_context)) continue;
++            if (destination == 0) {
++                const lhs = @intFromEnum(datas[index].node_and_node[0]);
++                if (lhs >= tags.len or tags[lhs] != .identifier) continue;
++                destination = query.resolveIdentifierBinding(lhs) orelse continue;
++            }
++            if (destination == binding) return true;
++            if (std.mem.indexOfScalar(u32, known[0..known_len], destination) == null) {
++                if (known_len == known.len) return true;
++                known[known_len] = destination;
++                known_len += 1;
++            }
++        }
++    }
++    return false;
++}
++
++fn initializerCarriesPointer(
++    query: *const QueryContext,
++    init: u32,
++    type_context: ?*TypeContext,
++) bool {
++    const tags = query.tree.nodes.items(.tag);
++    if (init >= tags.len) return true;
++    switch (tags[init]) {
++        .address_of, .deref => return true,
++        else => {},
++    }
++    // A declared by-value container proves that the new slot owns an
++    // independent copy; every other shape keeps the pointer reading.
++    if (declaredByValueContainer(query, init)) return false;
++    const ctx = type_context orelse return true;
++    var info = ctx.getExpressionTypeStrict(init) orelse return true;
++    for (0..8) |_| {
++        switch (info.kind) {
++            .pointer, .slice => return true,
++            .optional, .error_union => {
++                info.kind = info.payload_kind orelse return true;
++                info.payload_kind = null;
++            },
++            else => return false,
++        }
++    }
++    return true;
++}
++
++/// True when the initializer reads a binding whose declared type is a
++/// by-value `std` container, so the copy initialises an independent object
++/// instead of designating the original one. The evidence is the binding's
++/// own declared type, verified through its `@import`, never its name; a
++/// pointer or slice layer keeps the conservative reading.
++fn declaredByValueContainer(query: *const QueryContext, expr: u32) bool {
++    const tree = query.tree;
++    const tags = tree.nodes.items(.tag);
++    const datas = tree.nodes.items(.data);
++    if (expr >= tags.len or tags[expr] != .identifier) return false;
++    const declared = bindingTypeExprNode(query, expr) orelse return false;
++    var node = declared;
++    for (0..8) |_| {
++        if (node >= tags.len) return false;
++        switch (tags[node]) {
++            // `*T` and `[]T` keep sharing the original storage.
++            .ptr_type, .ptr_type_aligned, .ptr_type_bit_range, .ptr_type_sentinel => return false,
++            // `?T` and `E!T` carry the value itself.
++            .optional_type => node = datas[node].node,
++            .error_union => node = datas[node].node_and_node[1],
++            else => break,
++        }
++    }
++    return isVerifiedStdArrayListValueTypeNode(query, tree, node, tags, datas);
++}
++
++fn expressionMentionsBinding(query: *const QueryContext, expression: u32, binding: u32) bool {
++    const tree = query.tree;
++    const Visitor = struct {
++        query: *const QueryContext,
++        binding: u32,
++        found: bool = false,
++        stop: bool = false,
++
++        const Self = @This();
++
++        pub fn visit(self: *Self, _: *const std.zig.Ast, node: u32, tag: std.zig.Ast.Node.Tag) !void {
++            if (tag != .identifier) return;
++            if (self.query.resolveIdentifierBinding(node) != self.binding) return;
++            self.found = true;
++            self.stop = true;
++        }
++    };
++
++    var visitor = Visitor{ .query = query, .binding = binding };
++    ast_walk.walk(Visitor, tree, expression, &visitor) catch return true;
++    return visitor.found;
++}
++
++/// Cheap pre-filter for the exact resolution in `expressionMentionsBinding`:
++/// the binding's own name has to occur in the expression's tokens, so the
++/// unrelated declarations of a file cost one substring search each.
++fn expressionNamesBinding(query: *const QueryContext, expression: u32, name_token: u32) bool {
++    const tree = query.tree;
++    if (expression >= tree.nodes.len or name_token >= tree.tokens.len) return true;
++    const first = query.firstToken(expression);
++    const last = query.lastToken(expression);
++    if (first > last or last >= tree.tokens.len) return true;
++    const starts = tree.tokens.items(.start);
++    const bytes = tree.source[starts[first] .. starts[last] + tree.tokenSlice(last).len];
++    return std.mem.indexOf(u8, bytes, tree.tokenSlice(name_token)) != null;
++}
++
+ pub fn isGuardedByMethodCallWithCatch(
+     query: *const QueryContext,
+     unwrap_node: u32,
+@@ -1725,10 +1928,10 @@ fn scanBlockForMethodCallWithCatch(
+ 
+     // A successful method guard remains valid only until a later storage write.
+     var fact = false;
+-    var stmts_buf: [ast_walk.max_block_statements]u32 = undefined;
+-    const stmt_count = ast_walk.getBlockStatements(tree, block, &stmts_buf) orelse return false;
++    var inline_statements: [2]u32 = undefined;
++    const statements = ast_walk.getBlockStatements(tree, block, &inline_statements) orelse return false;
+ 
+-    for (stmts_buf[0..stmt_count]) |stmt| {
++    for (statements) |stmt| {
+         if (stmt >= tags.len or stmt >= main_tokens.len) continue;
+ 
+         const stmt_pos = token_starts[main_tokens[stmt]];
+@@ -1986,12 +2189,11 @@ pub fn isGuardedByLabeledBlockInvariant(
+     const block_node = findContainingBlock(tree, if_node, parent_map, tags) orelse return false;
+     const if_pos = token_starts[main_tokens[if_node]];
+ 
+-    var stmts_buf: [ast_walk.max_block_statements]u32 = undefined;
+-    const stmt_count = ast_walk.getBlockStatements(tree, block_node, &stmts_buf) orelse return false;
++    var inline_statements: [2]u32 = undefined;
++    const statements = ast_walk.getBlockStatements(tree, block_node, &inline_statements) orelse return false;
+ 
+     var fact = false;
+-    for (0..stmt_count) |idx| {
+-        const stmt = stmts_buf[idx];
++    for (statements) |stmt| {
+         if (stmt >= tags.len or stmt >= main_tokens.len) continue;
+ 
+         const stmt_pos = token_starts[main_tokens[stmt]];
+@@ -2011,6 +2213,533 @@ pub fn isGuardedByLabeledBlockInvariant(
+     return !statementMayMutateStorage(query, then_expr, unwrapped_var, tags, datas, block_node, type_context);
+ }
+ 
++/// `std.ArrayList.pop` and `std.ArrayListUnmanaged.pop` yield null exactly
++/// when the list is empty, so a loop condition that proves a positive length
++/// proves the removal's payload. The contract is bound to the *verified*
++/// generic type: a same-spelled `pop` on a project type, or a shadowed `std`,
++/// keeps its diagnostic. It also covers a single removal, on the iteration the
++/// condition admitted: a nested loop that can reach the unwrap again, or any
++/// statement evaluated before it — including one nested in the `if`, `switch`
++/// prong or `while (cond) : (payload)` payload that encloses the unwrap — may
++/// empty the list first and cancels the proof.
++pub fn isGuardedByContainerLength(
++    query: *const QueryContext,
++    unwrap_node: u32,
++    unwrapped_var: u32,
++    parent_map: []const u32,
++    type_context: ?*TypeContext,
++) bool {
++    const tree = query.tree;
++    const tags = tree.nodes.items(.tag);
++    const datas = tree.nodes.items(.data);
++
++    if (unwrapped_var >= tags.len) return false;
++    if (!call_resolver.isCallNode(tags[unwrapped_var])) return false;
++
++    var call_buffer: [1]std.zig.Ast.Node.Index = undefined;
++    const call = tree.fullCall(&call_buffer, @enumFromInt(unwrapped_var)) orelse return false;
++    if (call.ast.params.len != 0) return false;
++    const callee = @intFromEnum(call.ast.fn_expr);
++    if (callee >= tags.len or tags[callee] != .field_access) return false;
++    const access = datas[callee].node_and_token;
++    if (!std.mem.eql(u8, import_resolver.normalizeIdentifier(tree.tokenSlice(access[1])), "pop")) return false;
++    const receiver = @intFromEnum(access[0]);
++
++    if (!isVerifiedStdArrayListExpression(query, receiver)) return false;
++
++    const loop_node = findEnclosingWhile(unwrap_node, parent_map, tags) orelse return false;
++    const full = tree.fullWhile(@enumFromInt(loop_node)) orelse return false;
++    const condition = @intFromEnum(full.ast.cond_expr);
++    // The condition decides entry; the unwrap must live in the body or in the
++    // `while (cond) : (payload)` continue payload, never in the condition or
++    // in the `else` branch.
++    if (isInSubtree(tree, condition, unwrap_node)) return false;
++    if (full.ast.else_expr.unwrap()) |else_node| {
++        if (isInSubtree(tree, @intFromEnum(else_node), unwrap_node)) return false;
++    }
++    const body = @intFromEnum(full.ast.then_expr);
++    if (body >= tags.len) return false;
++    const continue_payload: ?u32 = if (full.ast.cont_expr.unwrap()) |cont| @intFromEnum(cont) else null;
++    const in_body = isInSubtree(tree, body, unwrap_node);
++    const in_continue = if (continue_payload) |cont| isInSubtree(tree, cont, unwrap_node) else false;
++    if (!in_body and !in_continue) return false;
++    if (!conditionProvesPositiveLength(query, tree, condition, receiver, tags, datas)) return false;
++
++    // A nested loop can reach the unwrap on a later iteration, after an earlier
++    // removal consumed the length this iteration's condition proved.
++    if (nestedLoopEncloses(unwrap_node, loop_node, parent_map, tags)) return false;
++
++    if (containerBodyMayMutate(query, body, receiver, unwrap_node, type_context)) return false;
++    if (in_continue) {
++        if (containerBodyMayMutate(query, continue_payload.?, receiver, unwrap_node, type_context)) return false;
++    }
++    return true;
++}
++
++fn findEnclosingWhile(
++    unwrap_node: u32,
++    parent_map: []const u32,
++    tags: []const std.zig.Ast.Node.Tag,
++) ?u32 {
++    var node = unwrap_node;
++    var depth: u32 = 0;
++    while (node < parent_map.len and depth < 64) : (depth += 1) {
++        const parent = parent_map[node];
++        if (parent == 0 or parent >= tags.len) return null;
++        switch (tags[parent]) {
++            .@"while", .while_simple, .while_cont => return parent,
++            else => {},
++        }
++        node = parent;
++    }
++    return null;
++}
++
++/// A loop strictly between the guarded `while` and the unwrap can iterate again
++/// after an earlier removal, so the condition no longer bounds the list.
++fn nestedLoopEncloses(
++    unwrap_node: u32,
++    boundary: u32,
++    parent_map: []const u32,
++    tags: []const std.zig.Ast.Node.Tag,
++) bool {
++    if (unwrap_node >= parent_map.len) return false;
++    var ancestor = parent_map[unwrap_node];
++    var depth: u32 = 0;
++    while (depth < 64 and ancestor != 0 and ancestor < tags.len and ancestor != boundary) : (depth += 1) {
++        switch (tags[ancestor]) {
++            .@"for", .for_simple, .@"while", .while_simple, .while_cont => return true,
++            else => {},
++        }
++        ancestor = parent_map[ancestor];
++    }
++    return false;
++}
++
++/// Everything the loop evaluates before the unwrap must leave the container's
++/// length alone. A node that merely *spans* the unwrap — the `if`, `switch`
++/// prong or block that encloses it — is descended into so the statements
++/// preceding the unwrap inside it are still inspected. The unwrap subtree is
++/// pruned before descending: its operand is the very removal the condition
++/// proved, not a competing mutation. Everything tokenised after the unwrap is
++/// skipped as well.
++fn containerBodyMayMutate(
++    query: *const QueryContext,
++    root: u32,
++    target: u32,
++    unwrap_node: u32,
++    type_context: ?*TypeContext,
++) bool {
++    const tree = query.tree;
++    const tags = tree.nodes.items(.tag);
++    const datas = tree.nodes.items(.data);
++    // An unwrap's first and last token are both the `.?`, so the guarded
++    // region starts at the operand the removal produces.
++    const unwrap_first = if (unwrap_node < tags.len and tags[unwrap_node] == .unwrap_optional)
++        query.firstToken(@intFromEnum(datas[unwrap_node].node_and_token[0]))
++    else
++        query.firstToken(unwrap_node);
++    const unwrap_last = query.lastToken(unwrap_node);
++
++    const Scan = struct {
++        query: *const QueryContext,
++        target: u32,
++        unwrap_node: u32,
++        unwrap_first: u32,
++        unwrap_last: u32,
++        block: u32,
++        tags: []const std.zig.Ast.Node.Tag,
++        datas: []const std.zig.Ast.Node.Data,
++        type_context: ?*TypeContext,
++        found: bool = false,
++        stop: bool = false,
++
++        const Self = @This();
++
++        pub fn visit(self: *Self, _: *const std.zig.Ast, node: u32, tag: std.zig.Ast.Node.Tag) !void {
++            if (isAssignmentTag(tag)) {
++                if (tag == .assign_destructure) {
++                    const destruct = self.query.tree.assignDestructure(@enumFromInt(node));
++                    for (destruct.ast.variables) |variable| {
++                        if (storageWriteMayAffect(
++                            self.query,
++                            @intFromEnum(variable),
++                            self.target,
++                            self.block,
++                            self.type_context,
++                        )) {
++                            self.found = true;
++                            self.stop = true;
++                            return;
++                        }
++                    }
++                } else {
++                    const lhs = @intFromEnum(self.datas[node].node_and_node[0]);
++                    if (storageWriteMayAffect(self.query, lhs, self.target, self.block, self.type_context)) {
++                        self.found = true;
++                        self.stop = true;
++                        return;
++                    }
++                }
++            }
++            switch (tag) {
++                .call, .call_comma, .call_one, .call_one_comma => {
++                    if (callMayMutateStorage(self.query, node, self.target, self.tags, self.datas, self.type_context)) {
++                        self.found = true;
++                        self.stop = true;
++                    }
++                },
++                .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => {
++                    if (builtinCallMayMutateStorage(self.query, node, self.target, self.tags, self.datas, self.type_context)) {
++                        self.found = true;
++                        self.stop = true;
++                    }
++                },
++                else => {},
++            }
++        }
++
++        /// Children are filtered before the walk descends, so a pruned node
++        /// leaves its whole subtree unvisited rather than merely unexamined.
++        fn step(inner_tree: *const std.zig.Ast, node: u32, self: *Self) anyerror!void {
++            if (self.stop) return;
++            if (self.pruned(node)) return;
++            return self.scan(inner_tree, node);
++        }
++
++        fn scan(self: *Self, inner_tree: *const std.zig.Ast, node: u32) !void {
++            if (self.stop) return;
++            const inner_tags = inner_tree.nodes.items(.tag);
++            if (node >= inner_tags.len) return;
++            try self.visit(inner_tree, node, inner_tags[node]);
++            if (self.stop) return;
++            ast_walk.walkChildren(Self, inner_tree, node, self, Self.step) catch unreachable;
++        }
++
++        /// The unwrap node, its operand and everything the `.?` closes over
++        /// start at or after the operand's first token and end at or before the
++        /// `.?`; a node that merely spans the unwrap starts before it.
++        fn pruned(self: *Self, node: u32) bool {
++            if (node == self.unwrap_node) return true;
++            const first = self.query.firstToken(node);
++            if (first > self.unwrap_last) return true;
++            if (first < self.unwrap_first) return false;
++            return self.query.lastToken(node) <= self.unwrap_last;
++        }
++    };
++
++    var scan = Scan{
++        .query = query,
++        .target = target,
++        .unwrap_node = unwrap_node,
++        .unwrap_first = unwrap_first,
++        .unwrap_last = unwrap_last,
++        .block = root,
++        .tags = tags,
++        .datas = datas,
++        .type_context = type_context,
++    };
++    scan.scan(tree, root) catch unreachable;
++    return scan.found;
++}
++
++/// `<receiver>.items.len != 0`, `> 0` or `>= 1`.
++fn conditionProvesPositiveLength(
++    query: *const QueryContext,
++    tree: *const std.zig.Ast,
++    cond_node: u32,
++    receiver: u32,
++    tags: []const std.zig.Ast.Node.Tag,
++    datas: []const std.zig.Ast.Node.Data,
++) bool {
++    if (cond_node >= tags.len) return false;
++    switch (tags[cond_node]) {
++        .bang_equal, .greater_than, .greater_or_equal => {},
++        else => return false,
++    }
++    const length = @intFromEnum(datas[cond_node].node_and_node[0]);
++    const literal = @intFromEnum(datas[cond_node].node_and_node[1]);
++    if (literal >= tree.nodes.len) return false;
++    const literal_text = tree.tokenSlice(tree.nodeMainToken(@enumFromInt(literal)));
++    return switch (tags[cond_node]) {
++        .bang_equal => isContainerItemsLength(query, tree, length, receiver, tags, datas) and
++            std.mem.eql(u8, literal_text, "0"),
++        .greater_than => isContainerItemsLength(query, tree, length, receiver, tags, datas) and
++            std.mem.eql(u8, literal_text, "0"),
++        .greater_or_equal => isContainerItemsLength(query, tree, length, receiver, tags, datas) and
++            std.mem.eql(u8, literal_text, "1"),
++        else => false,
++    };
++}
++
++fn isContainerItemsLength(
++    query: *const QueryContext,
++    tree: *const std.zig.Ast,
++    node: u32,
++    receiver: u32,
++    tags: []const std.zig.Ast.Node.Tag,
++    datas: []const std.zig.Ast.Node.Data,
++) bool {
++    if (node >= tags.len or tags[node] != .field_access) return false;
++    const access = datas[node].node_and_token;
++    if (!std.mem.eql(u8, import_resolver.normalizeIdentifier(tree.tokenSlice(access[1])), "len")) return false;
++    const items = @intFromEnum(access[0]);
++    if (items >= tags.len or tags[items] != .field_access) return false;
++    const items_access = datas[items].node_and_token;
++    if (!std.mem.eql(u8, import_resolver.normalizeIdentifier(tree.tokenSlice(items_access[1])), "items")) return false;
++    // The container that owns `.items` must be the popping receiver itself, so
++    // a local, a `*list` deref and a `holder.list` field all compare directly.
++    return sameStoragePath(query, tree, @intFromEnum(items_access[0]), receiver, tags, datas);
++}
++
++/// Same root binding *and* same field chain: `p.waiters` matches `p.waiters`
++/// but not `p.other` and not `self.waiters`.
++fn sameStoragePath(
++    query: *const QueryContext,
++    tree: *const std.zig.Ast,
++    left: u32,
++    right: u32,
++    tags: []const std.zig.Ast.Node.Tag,
++    datas: []const std.zig.Ast.Node.Data,
++) bool {
++    var a = left;
++    var b = right;
++    var depth: u32 = 0;
++    while (depth < 16) : (depth += 1) {
++        if (a >= tags.len or b >= tags.len) return false;
++        if (tags[a] == .grouped_expression) {
++            a = @intFromEnum(datas[a].node_and_token[0]);
++            continue;
++        }
++        if (tags[b] == .grouped_expression) {
++            b = @intFromEnum(datas[b].node_and_token[0]);
++            continue;
++        }
++        if (tags[a] == .deref) {
++            a = @intFromEnum(datas[a].node);
++            continue;
++        }
++        if (tags[b] == .deref) {
++            b = @intFromEnum(datas[b].node);
++            continue;
++        }
++        if (tags[a] == .field_access and tags[b] == .field_access) {
++            const left_access = datas[a].node_and_token;
++            const right_access = datas[b].node_and_token;
++            if (!std.mem.eql(u8, import_resolver.normalizeIdentifier(tree.tokenSlice(left_access[1])), import_resolver.normalizeIdentifier(tree.tokenSlice(right_access[1])))) return false;
++            a = @intFromEnum(left_access[0]);
++            b = @intFromEnum(right_access[0]);
++            continue;
++        }
++        if (tags[a] == .identifier and tags[b] == .identifier) {
++            return sameIdentifierBinding(query, a, b);
++        }
++        return false;
++    }
++    return false;
++}
++
++/// The receiver must be a local, a parameter or a field whose *declared* type
++/// is the verified `std.ArrayList`/`std.ArrayListUnmanaged` generic, so a
++/// project type with its own `pop` never reaches the removal contract.
++fn isVerifiedStdArrayListExpression(query: *const QueryContext, expr: u32) bool {
++    const tree = query.tree;
++    const tags = tree.nodes.items(.tag);
++    const datas = tree.nodes.items(.data);
++    if (expr >= tags.len) return false;
++
++    const files = [_]import_resolver.File{.{ .path = "", .tree = tree, .lexical_index = query.lexical }};
++    const resolver = call_utils.ProjectTypeResolver{ .files = &files, .file_index = 0 };
++    switch (tags[expr]) {
++        .grouped_expression => return isVerifiedStdArrayListExpression(
++            query,
++            @intFromEnum(datas[expr].node_and_token[0]),
++        ),
++        // `list.pop()`, `list.*.pop()` and a `*std.ArrayList(T)` receiver all
++        // reach the same contract; the declared type is read from the binding.
++        .identifier, .deref => {
++            const base = if (tags[expr] == .deref) @intFromEnum(datas[expr].node) else expr;
++            if (tags[base] != .identifier) return false;
++            const declared = bindingTypeExprNode(query, base) orelse return false;
++            return isVerifiedStdArrayListTypeNode(query, tree, declared, tags, datas);
++        },
++        .field_access => {
++            const access = datas[expr].node_and_token;
++            const owner = fieldOwnerType(query, resolver, tree, @intFromEnum(access[0]), tags) orelse return false;
++            const field_name = import_resolver.normalizeIdentifier(tree.tokenSlice(access[1]));
++            const declared = resolver.resolveFieldTypeNode(owner, field_name) orelse return false;
++            return isVerifiedStdArrayListTypeNode(query, tree, declared.node_index, tags, datas);
++        },
++        else => return false,
++    }
++}
++
++/// The container a `holder.list` field access reads. Expression types cover
++/// locals and parameters, but a root `const Holder = struct {...}` is a
++/// declaration rather than an expression type, so the base binding's own
++/// declared type names the container when expression resolution cannot.
++fn fieldOwnerType(
++    query: *const QueryContext,
++    resolver: call_utils.ProjectTypeResolver,
++    tree: *const std.zig.Ast,
++    base: u32,
++    tags: []const std.zig.Ast.Node.Tag,
++) ?call_utils.ResolvedType {
++    if (resolver.resolveExprType(base)) |resolved| return resolved;
++    if (resolver.resolveTypeNode(base)) |resolved| return resolved;
++    const declared = bindingTypeExprNode(query, base) orelse return null;
++    const container = rootContainerDeclForType(tree, declared, tags) orelse return null;
++    return .{ .file_index = 0, .container_node = container };
++}
++
++/// The container a declared type expression names: pointer layers reach the
++/// pointee, and a plain type name resolves to the file-scope declaration
++/// whose initializer is a struct, union or enum.
++fn rootContainerDeclForType(
++    tree: *const std.zig.Ast,
++    type_node: u32,
++    tags: []const std.zig.Ast.Node.Tag,
++) ?u32 {
++    const main_tokens = tree.nodes.items(.main_token);
++    var node = type_node;
++    for (0..8) |_| {
++        if (node >= tags.len) return null;
++        switch (tags[node]) {
++            .ptr_type, .ptr_type_aligned, .ptr_type_bit_range, .ptr_type_sentinel => {
++                const pointer = tree.fullPtrType(@enumFromInt(node)) orelse return null;
++                node = @intFromEnum(pointer.ast.child_type);
++                continue;
++            },
++            else => break,
++        },
++    }
++    if (node >= tags.len or tags[node] != .identifier or node >= main_tokens.len) return null;
++    const name = import_resolver.normalizeIdentifier(tree.tokenSlice(main_tokens[node]));
++    for (tree.rootDecls()) |decl| {
++        const decl_node = @intFromEnum(decl);
++        if (decl_node >= tags.len) continue;
++        var name_token: u32 = undefined;
++        var initializer: u32 = undefined;
++        switch (tags[decl_node]) {
++            .container_field_init => {
++                const field = tree.fullContainerField(@enumFromInt(decl_node)) orelse continue;
++                name_token = field.ast.main_token;
++                initializer = @intFromEnum(field.ast.value_expr.unwrap() orelse continue);
++            },
++            .global_var_decl, .local_var_decl, .simple_var_decl, .aligned_var_decl => {
++                const full = tree.fullVarDecl(@enumFromInt(decl_node)) orelse continue;
++                name_token = full.ast.mut_token + 1;
++                initializer = @intFromEnum(full.ast.init_node.unwrap() orelse continue);
++            },
++            else => continue,
++        }
++        if (name_token >= tree.tokens.len or tree.tokenTag(name_token) != .identifier) continue;
++        if (!std.mem.eql(u8, import_resolver.normalizeIdentifier(tree.tokenSlice(name_token)), name)) continue;
++        return containerDeclNode(tree, initializer) orelse return null;
++    }
++    return null;
++}
++
++fn containerDeclNode(tree: *const std.zig.Ast, node: u32) ?u32 {
++    if (node >= tree.nodes.len) return null;
++    return switch (tree.nodeTag(@enumFromInt(node))) {
++        .container_decl,
++        .container_decl_trailing,
++        .container_decl_two,
++        .container_decl_two_trailing,
++        .container_decl_arg,
++        .container_decl_arg_trailing,
++        .struct_init,
++        .struct_init_comma,
++        .struct_init_one,
++        .struct_init_one_comma,
++        .struct_init_dot,
++        .struct_init_dot_comma,
++        .struct_init_dot_two,
++        .struct_init_dot_two_comma,
++        .tagged_union,
++        .tagged_union_trailing,
++        .tagged_union_enum_tag,
++        .tagged_union_enum_tag_trailing,
++        .tagged_union_two,
++        .tagged_union_two_trailing,
++        .enum_simple,
++        .union_simple,
++        => node,
++        else => null,
++    };
++}
++
++/// The type expression written for the binding an identifier resolves to: the
++/// declared type of a `var`/`const`, or the parameter's own type node.
++fn bindingTypeExprNode(query: *const QueryContext, identifier: u32) ?u32 {
++    const tree = query.tree;
++    const tags = tree.nodes.items(.tag);
++    if (identifier >= tags.len or tags[identifier] != .identifier) return null;
++    const binding = query.resolveIdentifierBinding(identifier) orelse return null;
++    for (tags, 0..) |tag, index| {
++        if (import_resolver.isVarDeclTag(tag)) {
++            const full = tree.fullVarDecl(@enumFromInt(index)) orelse continue;
++            if (full.ast.mut_token + 1 != binding) continue;
++            return @intFromEnum(full.ast.type_node.unwrap() orelse return null);
++        }
++        const name_token = import_resolver.paramNameTokenBeforeType(tree, index) orelse continue;
++        if (@as(u32, @intCast(name_token)) != binding) continue;
++        return @intCast(index);
++    }
++    return null;
++}
++
++fn isVerifiedStdArrayListTypeNode(
++    query: *const QueryContext,
++    tree: *const std.zig.Ast,
++    type_node: u32,
++    tags: []const std.zig.Ast.Node.Tag,
++    datas: []const std.zig.Ast.Node.Data,
++) bool {
++    // A `*std.ArrayList(T)` declaration reaches the same contract through
++    // auto-deref, so the pointer layers do not change the verdict.
++    var node = type_node;
++    for (0..8) |_| {
++        if (node >= tags.len) return false;
++        switch (tags[node]) {
++            .ptr_type, .ptr_type_aligned, .ptr_type_bit_range, .ptr_type_sentinel => {
++                const pointer = tree.fullPtrType(@enumFromInt(node)) orelse return false;
++                node = @intFromEnum(pointer.ast.child_type);
++                continue;
++            },
++            else => break,
++        },
++    }
++    if (node >= tags.len) return false;
++    return isVerifiedStdArrayListValueTypeNode(query, tree, node, tags, datas);
++}
++
++/// The type node itself, with every pointer layer already peeled off: a
++/// by-value `std.ArrayList(T)`, whose instances own an independent copy of
++/// the container header instead of designating the original object.
++fn isVerifiedStdArrayListValueTypeNode(
++    query: *const QueryContext,
++    tree: *const std.zig.Ast,
++    type_node: u32,
++    tags: []const std.zig.Ast.Node.Tag,
++    datas: []const std.zig.Ast.Node.Data,
++) bool {
++    if (type_node >= tree.nodes.len) return false;
++    var buffer: [1]std.zig.Ast.Node.Index = undefined;
++    const call = tree.fullCall(&buffer, @enumFromInt(type_node)) orelse return false;
++    if (call.ast.params.len != 1) return false;
++    const callee = @intFromEnum(call.ast.fn_expr);
++    if (callee >= tags.len or tags[callee] != .field_access) return false;
++    const access = datas[callee].node_and_token;
++    const name = import_resolver.normalizeIdentifier(tree.tokenSlice(access[1]));
++    if (!std.mem.eql(u8, name, "ArrayList") and !std.mem.eql(u8, name, "ArrayListUnmanaged")) return false;
++
++    const files = [_]import_resolver.File{.{ .path = "", .tree = tree, .lexical_index = query.lexical }};
++    const resolver = call_utils.ProjectTypeResolver{ .files = &files, .file_index = 0 };
++    return resolver.isVerifiedImportBinding(@intFromEnum(access[0]), "std");
++}
++
+ fn findEnclosingIfForUnwrap(
+     tree: *const std.zig.Ast,
+     unwrap_node: u32,
+diff --git a/src/checkers/optional_unwrap/scan.zig b/src/checkers/optional_unwrap/scan.zig
+index 89d73ef..46297b8 100644
+--- a/src/checkers/optional_unwrap/scan.zig
++++ b/src/checkers/optional_unwrap/scan.zig
+@@ -102,6 +102,10 @@ pub fn scanForUnsafeUnwraps(
+         // e.g., `const flag = blk: { x orelse break :blk false; ... }; if (flag) { x.? }`
+         if (guards.isGuardedByLabeledBlockInvariant(&query, ast_node, unwrapped_node, parent_map, type_context)) continue;
+ 
++        // Check the standard container-removal contract: a loop condition that
++        // proves a positive `items.len` proves `std.ArrayList.pop`'s payload.
++        if (guards.isGuardedByContainerLength(&query, ast_node, unwrapped_node, parent_map, type_context)) continue;
++
+         // Find the CFG node containing this AST node
+         const cfg_node_idx = findCfgNodeForAst(cfg, ast_node, tree);
+         const node_idx = cfg_node_idx orelse {
+diff --git a/src/checkers/optional_unwrap_engine.zig b/src/checkers/optional_unwrap_engine.zig
+index 7b336b3..cddb168 100644
+--- a/src/checkers/optional_unwrap_engine.zig
++++ b/src/checkers/optional_unwrap_engine.zig
+@@ -970,3 +970,227 @@ test "lazy initialization preserves explicit standard container types" {
+     ;
+     try expectOptionalUnwrapDiagnosticLines(shadowed, &.{5});
+ }
++
++test "long block assignments after statement 64 dominate optional unwraps" {
++    const code: [:0]const u8 =
++        "const State = struct { value: ?u32 };\n" ++
++        "fn read(state: *State) u32 {\n" ++
++        "    _ = 0;\n" ** 70 ++
++        "    state.value = 1;\n" ++
++        "    return state.value.?;\n" ++
++        "}\n";
++    try expectOptionalUnwrapDiagnosticLines(code, &.{});
++}
++
++test "long block mutations after statement 64 invalidate optional guards" {
++    const code: [:0]const u8 =
++        "const State = struct { value: ?u32 };\n" ++
++        "fn read(state: *State) u32 {\n" ++
++        "    state.value = 1;\n" ++
++        "    _ = 0;\n" ** 70 ++
++        "    state.value = null;\n" ++
++        "    return state.value.?;\n" ++
++        "}\n";
++    try expectOptionalUnwrapDiagnosticLines(code, &.{75});
++}
++
++test "verified std array list removal needs a dominating positive length" {
++    const code: [:0]const u8 =
++        \\const std = @import("std");
++        \\const Holder = struct { list: std.ArrayList(u8) = .empty };
++        \\
++        \\const Own = struct {
++        \\    items: []u8 = &.{},
++        \\    fn pop(self: *Own) ?u8 {
++        \\        if (self.items.len == 0) return null;
++        \\        return self.items[0];
++        \\    }
++        \\};
++        \\const OwnHolder = struct { own: Own = .{} };
++        \\
++        \\fn safeDrain(holder: *Holder) u8 {
++        \\    while (holder.list.items.len != 0) {
++        \\        const value = holder.list.pop().?;
++        \\        return value;
++        \\    }
++        \\    return 0;
++        \\}
++        \\
++        \\fn drainLocal(gpa: std.mem.Allocator) !u8 {
++        \\    var list: std.ArrayList(u8) = .empty;
++        \\    try list.append(gpa, 'a');
++        \\    while (list.items.len != 0) {
++        \\        const value = list.pop().?;
++        \\        return value;
++        \\    }
++        \\    return 0;
++        \\}
++        \\
++        \\fn drainParam(list: *std.ArrayList(u8)) u8 {
++        \\    while (list.items.len != 0) {
++        \\        const value = list.pop().?;
++        \\        return value;
++        \\    }
++        \\    return 0;
++        \\}
++        \\
++        \\fn drainDerefParam(list: *std.ArrayList(u8)) u8 {
++        \\    while (list.*.items.len != 0) {
++        \\        const value = list.*.pop().?;
++        \\        return value;
++        \\    }
++        \\    return 0;
++        \\}
++        \\
++        \\fn nestedClearThenPop(holder: *Holder, cond: bool) u8 {
++        \\    while (holder.list.items.len != 0) {
++        \\        if (cond) {
++        \\            holder.list.clearRetainingCapacity();
++        \\            return holder.list.pop().?;
++        \\        }
++        \\    }
++        \\    return 0;
++        \\}
++        \\
++        \\fn nestedLoopSecondPop(holder: *Holder) u8 {
++        \\    var last: u8 = 0;
++        \\    while (holder.list.items.len != 0) {
++        \\        for ([_]usize{ 0, 1 }) |_| {
++        \\            last = holder.list.pop().?;
++        \\        }
++        \\    }
++        \\    return last;
++        \\}
++        \\
++        \\fn drainedByContinuePayload(list: *std.ArrayList(u8)) u8 {
++        \\    while (list.items.len != 0) : ({
++        \\        list.clearRetainingCapacity();
++        \\        _ = list.pop().?;
++        \\    }) {
++        \\        _ = 1;
++        \\    }
++        \\    return 0;
++        \\}
++        \\
++        \\fn aliasedRootPop(holder: *Holder) u8 {
++        \\    var alias = holder;
++        \\    while (holder.list.items.len != 0) {
++        \\        _ = alias.list.pop();
++        \\        return holder.list.pop().?;
++        \\    }
++        \\    return 0;
++        \\}
++        \\
++        \\fn projectPop(holder: *OwnHolder) u8 {
++        \\    while (holder.own.items.len != 0) {
++        \\        return holder.own.pop().?;
++        \\    }
++        \\    return 0;
++        \\}
++        \\
++        \\fn foreignList(holder: *Holder, other: *Holder) u8 {
++        \\    while (other.list.items.len != 0) {
++        \\        return holder.list.pop().?;
++        \\    }
++        \\    return 0;
++        \\}
++        \\
++        \\fn drainedBeforePop(holder: *Holder) u8 {
++        \\    while (holder.list.items.len != 0) {
++        \\        holder.list.clearRetainingCapacity();
++        \\        return holder.list.pop().?;
++        \\    }
++        \\    return 0;
++        \\}
++        \\
++        \\fn shadowedImport() u8 {
++        \\    const std = struct {
++        \\        const ArrayList = struct {
++        \\            const T = struct { items: []u8 = &.{}, len: usize = 0 };
++        \\            fn pop(self: *T) ?u8 {
++        \\                return null;
++        \\            }
++        \\        };
++        \\    };
++        \\    const Box = struct { list: std.ArrayList(std.ArrayList.T) };
++        \\    var state = Box{ .list = .{} };
++        \\    while (state.list.items.len != 0) {
++        \\        return state.list.pop().?;
++        \\    }
++        \\    return 0;
++        \\}
++    ;
++
++    try expectOptionalUnwrapDiagnosticLines(code, &.{ 51, 61, 70, 81, 88, 95, 103, 120 });
++}
++
++test "a container root re-bound through a pointer alias still invalidates the length guard" {
++    const code: [:0]const u8 =
++        \\const std = @import("std");
++        \\const Holder = struct { list: std.ArrayList(u8) = .empty };
++        \\
++        \\fn localRootPointerAlias(gpa: std.mem.Allocator) !u8 {
++        \\    var list: std.ArrayList(u8) = .empty;
++        \\    try list.append(gpa, 'a');
++        \\    const alias: *std.ArrayList(u8) = &list;
++        \\    while (list.items.len != 0) {
++        \\        alias.clearRetainingCapacity();
++        \\        return list.pop().?;
++        \\    }
++        \\    return 0;
++        \\}
++        \\
++        \\fn transitiveAlias(holder: *Holder) u8 {
++        \\    var first = holder;
++        \\    const second = first;
++        \\    const third = second;
++        \\    while (holder.list.items.len != 0) {
++        \\        third.list.clearRetainingCapacity();
++        \\        return holder.list.pop().?;
++        \\    }
++        \\    return 0;
++        \\}
++        \\
++        \\fn reboundAlias(holder: *Holder, other: *Holder) u8 {
++        \\    var alias = other;
++        \\    while (holder.list.items.len != 0) {
++        \\        alias = holder;
++        \\        alias.list.clearRetainingCapacity();
++        \\        return holder.list.pop().?;
++        \\    }
++        \\    return 0;
++        \\}
++        \\
++        \\fn valueCopyKeepsItsOwnLength(gpa: std.mem.Allocator) !u8 {
++        \\    var list: std.ArrayList(u8) = .empty;
++        \\    try list.append(gpa, 'a');
++        \\    var copy = list;
++        \\    while (list.items.len != 0) {
++        \\        copy.clearRetainingCapacity();
++        \\        return list.pop().?;
++        \\    }
++        \\    return 0;
++        \\}
++    ;
++
++    try expectOptionalUnwrapDiagnosticLines(code, &.{ 10, 21, 31 });
++}
++
++test "a field nulled inside the use loop stays an unsafe unwrap" {
++    const code: [:0]const u8 =
++        \\const Spec = struct { view: ?u32 = null };
++        \\
++        \\fn publish(specs: []Spec, out: []u32) void {
++        \\    for (specs) |spec| {
++        \\        const view = spec.view orelse return;
++        \\        _ = view;
++        \\    }
++        \\    for (specs) |*spec| {
++        \\        spec.view = null;
++        \\        out[0] = spec.view.?;
++        \\    }
++        \\}
++    ;
++
++    try expectOptionalUnwrapDiagnosticLines(code, &.{10});
++}
+diff --git a/src/cli/args.zig b/src/cli/args.zig
+index b071bc9..93b0fe4 100644
+--- a/src/cli/args.zig
++++ b/src/cli/args.zig
+@@ -31,6 +31,9 @@ pub const CliError = error{
+     InvalidTargetTriple,
+     InvalidOutputFormat,
+     InvalidNumericValue,
++    /// An option zwanzig does not define. Dropping it would run a different
++    /// analysis than the one that was asked for, so it has to be loud.
++    UnknownFlag,
+ };
+ 
+ fn outputFormatFromString(s: []const u8) ?OutputFormat {
+@@ -163,7 +166,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) CliErro
+             if (parsed == 0) return CliError.InvalidNumericValue;
+             thread_count = parsed;
+         } else if (std.mem.startsWith(u8, arg, "--")) {
+-            continue;
++            return CliError.UnknownFlag;
+         } else {
+             try paths.append(allocator, arg);
+         }
+@@ -454,3 +457,52 @@ test "parseArgs: --config without value" {
+ 
+     try std.testing.expectError(CliError.MissingFlagValue, result);
+ }
++
++test "parseArgs: gate invocation keeps every option and positional path" {
++    const allocator = std.testing.allocator;
++    const args = [_][]const u8{
++        "zwanzig",   "--format", "json",      "--config",  "/repo/.zwanzig.json",
++        "--threads", "4",        "src/a.zig", "build.zig",
++    };
++    const result = try parseArgs(allocator, &args);
++    defer freeCliArgs(allocator, result);
++
++    try std.testing.expectEqual(OutputFormat.json, result.output_format);
++    try std.testing.expectEqualStrings("/repo/.zwanzig.json", result.config_path.?);
++    try std.testing.expectEqual(@as(usize, 4), result.thread_count);
++    try std.testing.expectEqual(@as(usize, 2), result.paths.len);
++    try std.testing.expectEqualStrings("src/a.zig", result.paths[0]);
++    try std.testing.expectEqualStrings("build.zig", result.paths[1]);
++}
++
++test "parseArgs: mistyped boolean flag is rejected instead of ignored" {
++    const allocator = std.testing.allocator;
++    const args = [_][]const u8{ "zwanzig", "--cach", "file.zig" };
++    const result = parseArgs(allocator, &args);
++
++    try std.testing.expectError(CliError.UnknownFlag, result);
++}
++
++test "parseArgs: --flag=value assignment form is rejected" {
++    const allocator = std.testing.allocator;
++    const args = [_][]const u8{ "zwanzig", "--format=json", "file.zig" };
++    const result = parseArgs(allocator, &args);
++
++    try std.testing.expectError(CliError.UnknownFlag, result);
++}
++
++test "parseArgs: unknown flag is rejected even with a value attached" {
++    const allocator = std.testing.allocator;
++    const args = [_][]const u8{ "zwanzig", "--max-step", "10", "file.zig" };
++    const result = parseArgs(allocator, &args);
++
++    try std.testing.expectError(CliError.UnknownFlag, result);
++}
++
++test "parseArgs: unknown flag after valid paths is still rejected" {
++    const allocator = std.testing.allocator;
++    const args = [_][]const u8{ "zwanzig", "file.zig", "--nope" };
++    const result = parseArgs(allocator, &args);
++
++    try std.testing.expectError(CliError.UnknownFlag, result);
++}
+diff --git a/src/cli/run.zig b/src/cli/run.zig
+index 3e8c00c..38d9938 100644
+--- a/src/cli/run.zig
++++ b/src/cli/run.zig
+@@ -205,12 +205,23 @@ pub fn parseCliArgs(io_context: *compat.Context, allocator: std.mem.Allocator, a
+             CliError.InvalidNumericValue => {
+                 writeError(io_context, "Error: Invalid numeric value for limit\n");
+             },
++            CliError.UnknownFlag => {
++                writeError(io_context, "Error: Unknown option. Options take a separate value " ++
++                    "(for example --format json); run 'zwanzig --help' for the full list.\n");
++            },
+         }
+         // zwanzig-enable: empty-catch-engine
+         std.process.exit(1);
+     };
+ }
+ 
++/// A selection that resolves to no `.zig` files analyzed nothing at all. That
++/// is not the same as analyzing code and finding nothing, so it is reported as
++/// a failure instead of a clean run.
++fn requireInputSelection(files: []const []const u8) error{NoInputFiles}!void {
++    if (files.len == 0) return error.NoInputFiles;
++}
++
+ fn loadMergedConfig(io_context: *compat.Context, allocator: std.mem.Allocator, cli_args: CliArgs) MergedConfig {
+     return merge_mod.mergeConfig(io_context, allocator, cli_args) catch |err| {
+         // zwanzig-disable: empty-catch-engine
+@@ -313,14 +324,10 @@ pub fn runParsed(allocator: std.mem.Allocator, cli_args: CliArgs, io_context: *c
+     defer file_discovery.freeDiscoveredFiles(allocator, files);
+     log.info("discovered {d} file(s)", .{files.len});
+ 
+-    if (files.len == 0) {
+-        var stderr: compat.OutputWriter = undefined;
+-        stderr.init(io_context, true);
+-        defer stderr.deinit();
+-        try stderr.writer().writeAll("No .zig files found.\n");
+-        try stderr.flush();
+-        return;
+-    }
++    requireInputSelection(files) catch {
++        writeError(io_context, "Error: No .zig files found. Nothing was analyzed.\n");
++        std.process.exit(1);
++    };
+ 
+     var analyzer = Analyzer.initWithContext(allocator, io_context);
+     defer analyzer.deinit();
+@@ -451,3 +458,8 @@ test "configureBuildMetadata borrows CLI metadata" {
+     try std.testing.expectEqualStrings("gnu", metadata.target.abi.?);
+     try std.testing.expectEqualStrings("gnu", analyzer.getBuildMetadata().?.target.abi.?);
+ }
++
++test "requireInputSelection rejects an empty selection" {
++    try std.testing.expectError(error.NoInputFiles, requireInputSelection(&.{}));
++    try requireInputSelection(&[_][]const u8{"src/main.zig"});
++}
+diff --git a/src/engine/analysis/engine.zig b/src/engine/analysis/engine.zig
+index 7e189c0..aa29546 100644
+--- a/src/engine/analysis/engine.zig
++++ b/src/engine/analysis/engine.zig
+@@ -89,6 +89,11 @@ pub const AnalysisEngine = struct {
+     /// This is an unowned slice; callers must ensure the underlying data
+     /// remains valid for at least as long as this AnalysisEngine instance.
+     checker_name: ?[]const u8,
++    /// Which per-run budget stopped the most recent `run`, or null when that
++    /// run reached a fixed point. Both budgets abort the run with the same
++    /// error, so consumers that report an incomplete analysis need this to
++    /// name the limit that actually stopped it.
++    limit_kind: ?LimitKind = null,
+     /// Type context for type-aware analysis (optional, not owned).
+     type_context: ?*TypeContext,
+     /// Config for resource models (optional, not owned).
+@@ -101,6 +106,7 @@ pub const AnalysisEngine = struct {
+     owned_parent_map: ?[]u32,
+     /// Scratch buffer for FQN construction
+     fqn_buffer: [256]u8 = undefined,
++    pub const LimitKind = enum { worklist_steps, states_per_point };
+ 
+     pub const ResourceCalls = @import("resource_calls.zig").Mixin(@This());
+     pub const Literals = @import("literals.zig").Mixin(@This());
+@@ -142,6 +148,7 @@ pub const AnalysisEngine = struct {
+             .summary_use_count = 0,
+             .build_metadata = null,
+             .checker_name = null,
++            .limit_kind = null,
+             .type_context = null,
+             .config = null,
+             .use_widening = false,
+@@ -275,6 +282,10 @@ pub const AnalysisEngine = struct {
+ 
+     /// Run the analysis on the CFG, building the exploded graph.
+     pub fn run(self: *AnalysisEngine) EngineError!void {
++        // Both budgets can fire in one run, so the reported reason is always
++        // the one that aborted the run rather than a leftover from an earlier
++        // call on a reused engine.
++        self.limit_kind = null;
+         const cfg = self.graph.cfg;
+ 
+         // Build function name index if source is available
+@@ -325,6 +336,7 @@ pub const AnalysisEngine = struct {
+                     item.cfg.fn_name orelse "unknown",
+                     file_path,
+                 });
++                self.limit_kind = .worklist_steps;
+                 return error.AnalysisLimitExceeded;
+             }
+             try self.processNode(item.node_index, item.edge_kind, item.pending_constraint, item.cfg);
+@@ -339,6 +351,7 @@ pub const AnalysisEngine = struct {
+     ) EngineError!ExplodedGraph.GetOrCreateResult {
+         return self.graph.getOrCreateNodeWithWidening(point, state, options) catch |err| {
+             if (err == error.AnalysisLimitExceeded) {
++                self.limit_kind = .states_per_point;
+                 log.warn("[{s}] analysis state limit exceeded: {d} states per point, function {s} in {s}, cfg node {d} ({s})", .{
+                     self.checker_name orelse "unknown",
+                     self.graph.max_states_per_point,
+diff --git a/src/project_unused_decl.zig b/src/project_unused_decl.zig
+index 4766901..111d9e7 100644
+--- a/src/project_unused_decl.zig
++++ b/src/project_unused_decl.zig
+@@ -2,7 +2,9 @@ const std = @import("std");
+ const compat = @import("compat.zig");
+ const ast_walk = @import("ast_walk.zig");
+ const call_resolver = @import("analysis/call_resolver.zig");
+-const Diagnostic = @import("diagnostic.zig").Diagnostic;
++const diagnostic_mod = @import("diagnostic.zig");
++const Diagnostic = diagnostic_mod.Diagnostic;
++const LocationMapper = diagnostic_mod.LocationMapper;
+ const import_resolver = @import("analysis/import_resolver.zig");
+ const ProjectSources = @import("project_sources.zig").ProjectSources;
+ const ProjectReferenceIndex = @import("analysis/project_reference_index.zig").ProjectReferenceIndex;
+@@ -307,6 +309,45 @@ fn buildPathLiteral(
+     return literal[1 .. literal.len - 1];
+ }
+ 
++fn isSelectedSource(diagnostic_indices: []const usize, index: usize) bool {
++    for (diagnostic_indices) |selected| {
++        if (selected == index) return true;
++    }
++    return false;
++}
++
++/// Report the syntax errors of a project file that the per-file analysis pass
++/// never diagnoses. Build context is only read by this pass, so without a
++/// diagnostic a build script that does not parse would silently remove
++/// project-wide dead-code detection from an otherwise successful run.
++fn appendContextParseErrors(
++    allocator: std.mem.Allocator,
++    diagnostics: *std.ArrayList(Diagnostic),
++    file: import_resolver.File,
++) !void {
++    var mapper = try LocationMapper.init(allocator, file.tree.source);
++    defer mapper.deinit();
++    var message: std.Io.Writer.Allocating = .init(allocator);
++    defer message.deinit();
++    for (file.tree.errors) |parse_error| {
++        message.writer.end = 0;
++        file.tree.renderError(parse_error, &message.writer) catch return error.OutOfMemory;
++        const offset = file.tree.tokens.items(.start)[parse_error.token] + file.tree.errorOffset(parse_error);
++        const location = mapper.byteToLocation(offset);
++        var diagnostic = try Diagnostic.initAtLocation(
++            allocator,
++            file.path,
++            "parse-error",
++            if (parse_error.is_note) .hint else .err,
++            message.written(),
++            location.line,
++            location.column,
++        );
++        errdefer diagnostic.deinit(allocator);
++        try diagnostics.append(allocator, diagnostic);
++    }
++}
++
+ pub fn analyze(
+     project_sources: *const ProjectSources,
+     allocator: std.mem.Allocator,
+@@ -316,9 +357,16 @@ pub fn analyze(
+     const diagnostic_indices = project_sources.diagnosticFileIndices();
+     if (diagnostic_indices.len < 2) return;
+     // Incomplete syntax cannot prove the absence of cross-file references.
+-    for (resolver_files) |file| {
+-        if (file.tree.errors.len != 0) return;
++    // Selected sources already reported their own parse errors, so only the
++    // build context this pass depends on needs a diagnostic here.
++    var incomplete = false;
++    for (resolver_files, 0..) |file, index| {
++        if (file.tree.errors.len == 0) continue;
++        incomplete = true;
++        if (isSelectedSource(diagnostic_indices, index)) continue;
++        try appendContextParseErrors(allocator, diagnostics, file);
+     }
++    if (incomplete) return;
+ 
+     const files = try allocator.alloc(FileInfo, resolver_files.len);
+     var file_count: usize = 0;
+@@ -1343,11 +1391,20 @@ test "project unused analysis requires complete source and build syntax" {
+         \\    _ = b.addModule("fixture", .{ .root_source_file = b.path("b.zig") });
+         \\}
+     ;
+-    const scenarios = [_]struct { source: []const u8, build: []const u8, expected: usize }{
+-        .{ .source = "const broken = ;", .build = complete_build, .expected = 0 },
+-        .{ .source = complete_source, .build = "const broken = ;", .expected = 0 },
+-        .{ .source = complete_source, .build = complete_build, .expected = 2 },
++    const scenarios = [_]struct {
++        source: []const u8,
++        build: []const u8,
++        findings: usize,
++        /// Build context this pass must report itself: no per-file analysis
++        /// pass covers it, so an unparsable one would otherwise remove
++        /// project-wide dead-code detection without a trace.
++        broken_context: ?[]const u8,
++    }{
++        .{ .source = "const broken = ;", .build = complete_build, .findings = 0, .broken_context = null },
++        .{ .source = complete_source, .build = "const broken = ;", .findings = 0, .broken_context = "build.zig" },
++        .{ .source = complete_source, .build = complete_build, .findings = 2, .broken_context = null },
+     };
++    const Scenarios = @TypeOf(scenarios);
+     const names = [_][]const u8{ "a.zig", "malformed.zig", "b.zig" };
+     var buffers: [names.len][std.fs.max_path_bytes]u8 = undefined;
+     var paths: [names.len][]const u8 = undefined;
+@@ -1355,24 +1412,52 @@ test "project unused analysis requires complete source and build syntax" {
+         paths[index] = try std.fmt.bufPrint(&buffers[index], "{s}/{s}", .{ directory.path(), name });
+     }
+     const Harness = struct {
+-        fn run(failing_allocator: std.mem.Allocator, sources: *const ProjectSources, expected: usize) !void {
++        fn run(
++            failing_allocator: std.mem.Allocator,
++            sources: *const ProjectSources,
++            cases: *const Scenarios,
++            case_index: usize,
++        ) !void {
++            const scenario = cases[case_index];
+             var diagnostics: std.ArrayList(Diagnostic) = .empty;
+             defer {
+                 for (diagnostics.items) |*item| item.deinit(failing_allocator);
+                 diagnostics.deinit(failing_allocator);
+             }
+             try analyze(sources, failing_allocator, &diagnostics);
+-            try std.testing.expectEqual(expected, diagnostics.items.len);
+-            if (expected == 0) return;
++
++            var context_reports: usize = 0;
++            for (diagnostics.items) |diagnostic| {
++                if (!std.mem.eql(u8, diagnostic.rule_id, "parse-error")) continue;
++                context_reports += 1;
++                // A selected source is diagnosed by the per-file pass, so
++                // reporting it again here would only duplicate that report.
++                try std.testing.expect(!std.mem.eql(u8, "malformed.zig", std.fs.path.basename(diagnostic.file_path)));
++                if (scenario.broken_context) |name| {
++                    try std.testing.expectEqualStrings(name, std.fs.path.basename(diagnostic.file_path));
++                }
++            }
++            if (scenario.broken_context) |_| {
++                try std.testing.expect(context_reports > 0);
++            } else {
++                try std.testing.expectEqual(@as(usize, 0), context_reports);
++            }
++
++            try std.testing.expectEqual(scenario.findings, diagnostics.items.len - context_reports);
++            if (scenario.findings == 0) return;
+             try std.testing.expectEqualStrings("a.zig", std.fs.path.basename(diagnostics.items[0].file_path));
+             try std.testing.expectEqualStrings("malformed.zig", std.fs.path.basename(diagnostics.items[1].file_path));
+         }
+     };
+-    for (scenarios) |scenario| {
++    for (scenarios, 0..) |scenario, case_index| {
+         try directory.writeFile("malformed.zig", scenario.source);
+         try directory.writeFile("build.zig", scenario.build);
+         var project = try ProjectSources.init(&io_context, allocator, &paths);
+         defer project.deinit();
+-        try std.testing.checkAllAllocationFailures(allocator, Harness.run, .{ &project, scenario.expected });
++        try std.testing.checkAllAllocationFailures(
++            allocator,
++            Harness.run,
++            .{ &project, &scenarios, case_index },
++        );
+     }
+ }
+diff --git a/src/rules/identifier_style.zig b/src/rules/identifier_style.zig
+index d4fb35d..cce0442 100644
+--- a/src/rules/identifier_style.zig
++++ b/src/rules/identifier_style.zig
+@@ -223,21 +223,28 @@ pub const IdentifierStyleRule = struct {
+             }
+         }
+ 
+-        const is_known_type_factory = if (is_const)
+-            if (init_idx_opt) |init_idx|
+-                isKnownTypeFactoryCall(tree, tags, datas, token_tags, init_idx)
+-            else
+-                false
+-        else
+-            false;
++        // Type-valued initializers are proved from the expression itself: ZIR
++        // only sees the call/conditional node of a type expression and reports
++        // its result as an unknown value, so this evidence must be collected
++        // before the ZIR-based classification.
++        const is_type_value_expr = blk: {
++            if (!is_const) break :blk false;
++            const init_idx = init_idx_opt orelse break :blk false;
++            break :blk isTypeValueInitExpr(tree, tags, datas, main_tokens, token_tags, init_idx);
++        };
+ 
+-        const type_classification: DeclClassification = if (is_explicit_type_alias or is_known_type_factory)
++        const zir_classification = classifyDeclWithTypeInfo(src, name, node_idx);
++        // A ZIR classification that knows the declaration is a plain value is
++        // final. The expression proof is naming-based, so letting it promote a
++        // known value to a type alias would demand PascalCase for a value.
++        const zir_knows_value = zir_classification == .constant or zir_classification == .variable;
++        const type_classification: DeclClassification = if (!zir_knows_value and (is_explicit_type_alias or is_type_value_expr))
+             .type_decl
+         else
+-            classifyDeclWithTypeInfo(src, name, node_idx);
++            zir_classification;
+         switch (type_classification) {
+             .type_decl => {
+-                // ZIR confirms this is a type - must be PascalCase
++                // Proved to be a type value - must be PascalCase
+                 if (!isPascalCase(name) and !isCTypeAliasName(name)) {
+                     try emitDiagnostic(src, allocator, diagnostics, token_starts[name_token], name, "type", .pascal_case);
+                 }
+@@ -365,24 +372,60 @@ pub const IdentifierStyleRule = struct {
+         }
+     }
+ 
+-    fn isKnownTypeFactoryCall(
++    /// Prove that an initializer expression evaluates to a type value.
++    ///
++    /// Only expression forms that cannot be mistaken for a value are accepted:
++    /// a type-producing builtin, a generic type factory call, or a conditional
++    /// or switch expression whose every branch is itself a type value.
++    fn isTypeValueInitExpr(
+         tree: *const std.zig.Ast,
+         tags: []const std.zig.Ast.Node.Tag,
+         datas: []const std.zig.Ast.Node.Data,
++        main_tokens: []const std.zig.Ast.TokenIndex,
+         token_tags: []const std.zig.Token.Tag,
+         init_idx: usize,
+     ) bool {
+         if (init_idx >= tags.len) return false;
+-        switch (tags[init_idx]) {
+-            .call, .call_comma, .call_one, .call_one_comma => {},
+-            else => return false,
+-        }
+-        var buffer: [1]std.zig.Ast.Node.Index = undefined;
+-        const call = tree.fullCall(&buffer, @enumFromInt(init_idx)) orelse return false;
+-        return isKnownTypeFactoryCallee(tree, tags, datas, token_tags, @intFromEnum(call.ast.fn_expr));
++        return switch (tags[init_idx]) {
++            .builtin_call, .builtin_call_comma, .builtin_call_two, .builtin_call_two_comma => blk: {
++                const builtin_name = builtinCallName(tree, tags, token_tags, init_idx) orelse break :blk false;
++                break :blk isTypeFactoryBuiltin(builtin_name);
++            },
++            .call, .call_comma, .call_one, .call_one_comma => isTypeFactoryCall(
++                tree,
++                tags,
++                datas,
++                main_tokens,
++                token_tags,
++                init_idx,
++            ),
++            .@"switch", .switch_comma => isTypeSwitchAlias(
++                tree,
++                tags,
++                datas,
++                main_tokens,
++                token_tags,
++                init_idx,
++            ),
++            .@"if", .if_simple => isTypeIfAlias(
++                tree,
++                tags,
++                datas,
++                main_tokens,
++                token_tags,
++                init_idx,
++            ),
++            else => false,
++        };
+     }
+ 
+-    fn isKnownTypeFactoryCallee(
++    /// A member of the verified `std` import whose name is PascalCase names a
++    /// standard-library type, so calling it instantiates that type.
++    ///
++    /// Zig keeps type names PascalCase and function names camelCase, so the
++    /// member name distinguishes the two, and the import binding is verified
++    /// rather than name-matched, so a local `std` shadow gets no exemption.
++    fn isVerifiedStdTypeMemberCallee(
+         tree: *const std.zig.Ast,
+         tags: []const std.zig.Ast.Node.Tag,
+         datas: []const std.zig.Ast.Node.Data,
+@@ -393,7 +436,7 @@ pub const IdentifierStyleRule = struct {
+         const access = datas[node_idx].node_and_token;
+         const field_token = access[1];
+         if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return false;
+-        if (!isKnownTypeFactoryName(tree.tokenSlice(field_token))) return false;
++        if (!isPascalCase(tree.tokenSlice(field_token))) return false;
+         return isStdQualifiedValue(
+             tree,
+             tags,
+@@ -403,17 +446,6 @@ pub const IdentifierStyleRule = struct {
+         );
+     }
+ 
+-    fn isKnownTypeFactoryName(name: []const u8) bool {
+-        return std.mem.eql(u8, name, "HashMap") or
+-            std.mem.eql(u8, name, "HashMapUnmanaged") or
+-            std.mem.eql(u8, name, "AutoHashMap") or
+-            std.mem.eql(u8, name, "AutoHashMapUnmanaged") or
+-            std.mem.eql(u8, name, "StringHashMap") or
+-            std.mem.eql(u8, name, "StringHashMapUnmanaged") or
+-            std.mem.eql(u8, name, "ArrayHashMap") or
+-            std.mem.eql(u8, name, "ArrayHashMapUnmanaged");
+-    }
+-
+     fn isStdQualifiedValue(
+         tree: *const std.zig.Ast,
+         tags: []const std.zig.Ast.Node.Tag,
+@@ -631,9 +663,18 @@ pub const IdentifierStyleRule = struct {
+         return tree.tokenSlice(builtin_token);
+     }
+ 
++    /// Builtins whose result is a type value. `@FieldType` is matched on its
++    /// builtin token, so a local function of the same name cannot borrow the
++    /// type classification.
++    ///
++    /// `@typeInfo` is deliberately absent: it evaluates to a `std.builtin.Type`
++    /// union *value*, not a type. `@TypeOf(@typeInfo(T))` is a type and is
++    /// covered by `@TypeOf`; a `?type` payload reached through a
++    /// `@typeInfo(...)` switch is covered by `isTypeInfoTypeFieldAccess`.
+     fn isTypeFactoryBuiltin(name: []const u8) bool {
+         return std.mem.eql(u8, name, "@TypeOf") or
+             std.mem.eql(u8, name, "@Type") or
++            std.mem.eql(u8, name, "@FieldType") or
+             std.mem.eql(u8, name, "@This") or
+             std.mem.eql(u8, name, "@OpaqueType") or
+             std.mem.eql(u8, name, "@Vector") or
+@@ -787,7 +828,7 @@ pub const IdentifierStyleRule = struct {
+         const call_info = tree.fullCall(&buf, @enumFromInt(init_idx)) orelse return false;
+         const callee_idx = @intFromEnum(call_info.ast.fn_expr);
+         if (!isTypeAliasCallee(tree, tags, datas, token_tags, callee_idx)) return false;
+-        const is_verified_std_factory = isKnownTypeFactoryCallee(
++        const is_verified_std_type = isVerifiedStdTypeMemberCallee(
+             tree,
+             tags,
+             datas,
+@@ -802,7 +843,7 @@ pub const IdentifierStyleRule = struct {
+                 saw_type_arg = true;
+                 continue;
+             }
+-            if (is_verified_std_factory and isStdQualifiedValue(tree, tags, datas, token_tags, arg_idx)) {
++            if (is_verified_std_type and isStdQualifiedValue(tree, tags, datas, token_tags, arg_idx)) {
+                 continue;
+             }
+             if (isTypeFactoryLiteral(tags, datas, arg_idx)) {
+@@ -811,7 +852,10 @@ pub const IdentifierStyleRule = struct {
+             return false;
+         }
+ 
+-        return saw_type_arg;
++        // A type argument is the usual proof, but a standard-library type
++        // instantiated from literal arguments only (`std.StaticBitSet(256)`)
++        // is just as conclusive once the callee is proved to be a type.
++        return saw_type_arg or is_verified_std_type;
+     }
+ 
+     fn isTypeFactoryLiteral(
+@@ -1085,6 +1129,13 @@ pub const IdentifierStyleRule = struct {
+         return has_upper;
+     }
+ 
++    /// What a capture binds. A capture of a `?type` field binds a type value,
++    /// which follows the PascalCase rule instead of the snake_case value rule.
++    const PayloadKind = enum {
++        value,
++        type_value,
++    };
++
+     fn checkSnakeCaseToken(
+         src: *Source,
+         allocator: std.mem.Allocator,
+@@ -1094,10 +1145,12 @@ pub const IdentifierStyleRule = struct {
+         token_starts: []const u32,
+         token: u32,
+         kind: []const u8,
++        capture: PayloadKind,
+     ) RuleError!void {
+         if (token >= token_tags.len or token_tags[token] != .identifier) return;
+         const name = tree.tokenSlice(token);
+         if (shouldSkipName(name)) return;
++        if (capture == .type_value and isPascalCase(name)) return;
+         if (!isLowerSnakeCase(name)) {
+             try emitDiagnostic(src, allocator, diagnostics, token_starts[token], name, kind, .snake_case);
+         }
+@@ -1148,11 +1201,12 @@ pub const IdentifierStyleRule = struct {
+         token_starts: []const u32,
+     ) RuleError!void {
+         const full_if = tree.fullIf(@enumFromInt(node_idx)) orelse return;
++        const capture = conditionCaptureKind(tree, token_tags, @intFromEnum(full_if.ast.cond_expr));
+         if (full_if.payload_token) |tok| {
+-            try checkPayloadToken(src, allocator, diagnostics, tree, token_tags, token_starts, tok, "payload");
++            try checkPayloadToken(src, allocator, diagnostics, tree, token_tags, token_starts, tok, "payload", capture);
+         }
+         if (full_if.error_token) |tok| {
+-            try checkPayloadToken(src, allocator, diagnostics, tree, token_tags, token_starts, tok, "payload");
++            try checkPayloadToken(src, allocator, diagnostics, tree, token_tags, token_starts, tok, "payload", .value);
+         }
+     }
+ 
+@@ -1173,11 +1227,12 @@ pub const IdentifierStyleRule = struct {
+             else => return,
+         };
+ 
++        const capture = conditionCaptureKind(tree, token_tags, @intFromEnum(full_while.ast.cond_expr));
+         if (full_while.payload_token) |tok| {
+-            try checkPayloadToken(src, allocator, diagnostics, tree, token_tags, token_starts, tok, "payload");
++            try checkPayloadToken(src, allocator, diagnostics, tree, token_tags, token_starts, tok, "payload", capture);
+         }
+         if (full_while.error_token) |tok| {
+-            try checkPayloadToken(src, allocator, diagnostics, tree, token_tags, token_starts, tok, "payload");
++            try checkPayloadToken(src, allocator, diagnostics, tree, token_tags, token_starts, tok, "payload", .value);
+         }
+     }
+ 
+@@ -1213,7 +1268,7 @@ pub const IdentifierStyleRule = struct {
+         for (full_switch.ast.cases) |case_node| {
+             const full_case = tree.fullSwitchCase(case_node) orelse continue;
+             if (full_case.payload_token) |tok| {
+-                try checkPayloadToken(src, allocator, diagnostics, tree, token_tags, token_starts, tok, "payload");
++                try checkPayloadToken(src, allocator, diagnostics, tree, token_tags, token_starts, tok, "payload", .value);
+             }
+         }
+     }
+@@ -1231,7 +1286,7 @@ pub const IdentifierStyleRule = struct {
+         const catch_token = main_tokens[node_idx];
+         if (catch_token + 2 >= token_tags.len) return;
+         if (token_tags[catch_token + 1] != .pipe) return;
+-        try checkPayloadToken(src, allocator, diagnostics, tree, token_tags, token_starts, catch_token + 2, "payload");
++        try checkPayloadToken(src, allocator, diagnostics, tree, token_tags, token_starts, catch_token + 2, "payload", .value);
+     }
+ 
+     fn checkErrdeferPayload(
+@@ -1245,7 +1300,7 @@ pub const IdentifierStyleRule = struct {
+     ) RuleError!void {
+         const data = tree.nodes.items(.data)[node_idx].opt_token_and_node;
+         const payload_token = data[0].unwrap() orelse return;
+-        try checkPayloadToken(src, allocator, diagnostics, tree, token_tags, token_starts, payload_token, "payload");
++        try checkPayloadToken(src, allocator, diagnostics, tree, token_tags, token_starts, payload_token, "payload", .value);
+     }
+ 
+     fn checkPayloadToken(
+@@ -1257,13 +1312,14 @@ pub const IdentifierStyleRule = struct {
+         token_starts: []const u32,
+         token: u32,
+         kind: []const u8,
++        capture: PayloadKind,
+     ) RuleError!void {
+         if (token >= token_tags.len) return;
+         var idx = token;
+         if (token_tags[idx] == .pipe) idx += 1;
+         if (idx < token_tags.len and token_tags[idx] == .asterisk) idx += 1;
+         if (idx < token_tags.len and token_tags[idx] == .identifier) {
+-            try checkSnakeCaseToken(src, allocator, diagnostics, tree, token_tags, token_starts, idx, kind);
++            try checkSnakeCaseToken(src, allocator, diagnostics, tree, token_tags, token_starts, idx, kind, capture);
+         }
+     }
+ 
+@@ -1286,14 +1342,104 @@ pub const IdentifierStyleRule = struct {
+             if (tag == .asterisk) {
+                 idx += 1;
+                 if (idx < token_tags.len and token_tags[idx] == .identifier) {
+-                    try checkSnakeCaseToken(src, allocator, diagnostics, tree, token_tags, token_starts, idx, "payload");
++                    try checkSnakeCaseToken(src, allocator, diagnostics, tree, token_tags, token_starts, idx, "payload", .value);
+                 }
+                 continue;
+             }
+             if (tag == .identifier) {
+-                try checkSnakeCaseToken(src, allocator, diagnostics, tree, token_tags, token_starts, idx, "payload");
++                try checkSnakeCaseToken(src, allocator, diagnostics, tree, token_tags, token_starts, idx, "payload", .value);
++            }
++        }
++    }
++
++    /// Decide what an `if`/`while` capture binds from the operand expression.
++    fn conditionCaptureKind(
++        tree: *const std.zig.Ast,
++        token_tags: []const std.zig.Token.Tag,
++        cond_idx: usize,
++    ) PayloadKind {
++        if (isTypeInfoTypeFieldAccess(tree, token_tags, cond_idx)) return .type_value;
++        return .value;
++    }
++
++    /// Prove that the operand is a `?type` field of a `@typeInfo` payload.
++    ///
++    /// `std.builtin.Type` declares exactly these payload fields as `?type`
++    /// (`Struct.backing_integer`, `Union.tag_type`, `Fn.return_type`,
++    /// `Fn.Param.type`, `AnyFrame.child`), so capturing one binds a type value
++    /// rather than a value. The receiver has to be a payload captured from a
++    /// `@typeInfo(...)` switch, and both the builtin token and the std payload
++    /// names are matched, so a local `typeInfo` function or an unrelated
++    /// `tag_type` field gets no exemption.
++    fn isTypeInfoTypeFieldAccess(
++        tree: *const std.zig.Ast,
++        token_tags: []const std.zig.Token.Tag,
++        cond_idx: usize,
++    ) bool {
++        const tags = tree.nodes.items(.tag);
++        const datas = tree.nodes.items(.data);
++        const main_tokens = tree.nodes.items(.main_token);
++        if (cond_idx >= tags.len) return false;
++
++        var node = cond_idx;
++        while (tags[node] == .unwrap_optional or tags[node] == .grouped_expression) {
++            node = @intFromEnum(datas[node].node_and_token[0]);
++            if (node >= tags.len) return false;
++        }
++        if (tags[node] != .field_access) return false;
++
++        const field_token = datas[node].node_and_token[1];
++        if (field_token >= token_tags.len or token_tags[field_token] != .identifier) return false;
++        if (!isOptionalTypeInfoFieldName(tree.tokenSlice(field_token))) return false;
++
++        const receiver_idx = @intFromEnum(datas[node].node_and_token[0]);
++        if (receiver_idx >= tags.len or tags[receiver_idx] != .identifier) return false;
++        const receiver_token = main_tokens[receiver_idx];
++        if (receiver_token >= token_tags.len or token_tags[receiver_token] != .identifier) return false;
++
++        return isTypeInfoSwitchCapture(
++            tree,
++            tags,
++            datas,
++            token_tags,
++            tree.tokenSlice(receiver_token),
++            receiver_token,
++        );
++    }
++
++    fn isOptionalTypeInfoFieldName(name: []const u8) bool {
++        return std.mem.eql(u8, name, "tag_type") or
++            std.mem.eql(u8, name, "backing_integer") or
++            std.mem.eql(u8, name, "return_type") or
++            std.mem.eql(u8, name, "child") or
++            std.mem.eql(u8, name, "type");
++    }
++
++    /// Prove that `name` is a capture of a prong of a `switch (@typeInfo(...))`
++    /// that encloses `reference_token`.
++    fn isTypeInfoSwitchCapture(
++        tree: *const std.zig.Ast,
++        tags: []const std.zig.Ast.Node.Tag,
++        datas: []const std.zig.Ast.Node.Data,
++        token_tags: []const std.zig.Token.Tag,
++        name: []const u8,
++        reference_token: u32,
++    ) bool {
++        for (tags, 0..) |tag, node_index| {
++            if (tag != .@"switch" and tag != .switch_comma) continue;
++            const switch_node: std.zig.Ast.Node.Index = @enumFromInt(node_index);
++            if (tree.firstToken(switch_node) > reference_token) continue;
++            if (tree.lastToken(switch_node) < reference_token) continue;
++            const full_switch = tree.switchFull(switch_node);
++            if (!isTypeInfoBaseExpr(tree, tags, datas, token_tags, @intFromEnum(full_switch.ast.condition))) continue;
++            for (full_switch.ast.cases) |case_node| {
++                const full_case = tree.fullSwitchCase(case_node) orelse continue;
++                const payload_token = full_case.payload_token orelse continue;
++                if (payload_token >= token_tags.len or token_tags[payload_token] != .identifier) continue;
++                if (std.mem.eql(u8, tree.tokenSlice(payload_token), name)) return true;
+             }
+         }
++        return false;
+     }
+ };
+ 
+@@ -1489,3 +1635,307 @@ test "skript control: shadowed std binding rejects factory exemption" {
+     try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+     try std.testing.expect(std.mem.indexOf(u8, diagnostics.items[0].message, "RuntimeMap") != null);
+ }
++
++test "@FieldType type alias still requires PascalCase" {
++    const allocator = std.testing.allocator;
++    const code: [:0]const u8 =
++        \\const FnTableEntry = struct { closure_sites: []const u32 };
++        \\const ClosureSites = @FieldType(FnTableEntry, "closure_sites");
++        \\const closure_sites = @FieldType(FnTableEntry, "closure_sites");
++    ;
++    var source = Source.init(allocator, "type-builtin.zig", code);
++    defer source.deinit();
++
++    var diagnostics: std.ArrayList(Diagnostic) = .empty;
++    defer {
++        for (diagnostics.items) |*diagnostic| diagnostic.deinit(allocator);
++        diagnostics.deinit(allocator);
++    }
++
++    try IdentifierStyleRule.rule.check(&source, allocator, &diagnostics);
++    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
++    try std.testing.expectEqualStrings("identifier-style", diagnostics.items[0].rule_id);
++    try std.testing.expectEqual(@as(usize, 3), diagnostics.items[0].range.start.line);
++}
++
++test "@typeInfo result is a value, so a snake_case name is accepted" {
++    const allocator = std.testing.allocator;
++    const code: [:0]const u8 =
++        \\const type_info = @typeInfo(u8);
++        \\const fn_info = @typeInfo(fn () void).@"fn";
++    ;
++    var source = Source.init(allocator, "typeinfo-value.zig", code);
++    defer source.deinit();
++
++    var diagnostics: std.ArrayList(Diagnostic) = .empty;
++    defer {
++        for (diagnostics.items) |*diagnostic| diagnostic.deinit(allocator);
++        diagnostics.deinit(allocator);
++    }
++
++    try IdentifierStyleRule.rule.check(&source, allocator, &diagnostics);
++    try std.testing.expectEqual(@as(usize, 0), diagnostics.items.len);
++}
++
++test "@typeInfo result is a value, so a PascalCase name is reported" {
++    const allocator = std.testing.allocator;
++    const code: [:0]const u8 =
++        \\const TypeInfo = @typeInfo(u8);
++    ;
++    var source = Source.init(allocator, "typeinfo-value.zig", code);
++    defer source.deinit();
++
++    var diagnostics: std.ArrayList(Diagnostic) = .empty;
++    defer {
++        for (diagnostics.items) |*diagnostic| diagnostic.deinit(allocator);
++        diagnostics.deinit(allocator);
++    }
++
++    try IdentifierStyleRule.rule.check(&source, allocator, &diagnostics);
++    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
++    try std.testing.expectEqualStrings("identifier-style", diagnostics.items[0].rule_id);
++    try std.testing.expectEqual(@as(usize, 1), diagnostics.items[0].range.start.line);
++}
++
++test "@TypeOf of a @typeInfo value is a type, so a PascalCase alias is kept" {
++    const allocator = std.testing.allocator;
++    const code: [:0]const u8 =
++        \\const TypeOfInfo = @TypeOf(@typeInfo(u8));
++        \\const type_of_info = @TypeOf(@typeInfo(u8));
++    ;
++    var source = Source.init(allocator, "typeof-typeinfo.zig", code);
++    defer source.deinit();
++
++    var diagnostics: std.ArrayList(Diagnostic) = .empty;
++    defer {
++        for (diagnostics.items) |*diagnostic| diagnostic.deinit(allocator);
++        diagnostics.deinit(allocator);
++    }
++
++    try IdentifierStyleRule.rule.check(&source, allocator, &diagnostics);
++    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
++    try std.testing.expectEqualStrings("identifier-style", diagnostics.items[0].rule_id);
++    try std.testing.expectEqual(@as(usize, 2), diagnostics.items[0].range.start.line);
++}
++
++test "standard-library type instantiated from literal arguments only keeps a PascalCase alias" {
++    const allocator = std.testing.allocator;
++    const code: [:0]const u8 =
++        \\const std = @import("std");
++        \\const FiniteParameters = std.StaticBitSet(256);
++        \\const finite_parameters = std.StaticBitSet(256);
++    ;
++    var source = Source.init(allocator, "std-factory.zig", code);
++    defer source.deinit();
++
++    var diagnostics: std.ArrayList(Diagnostic) = .empty;
++    defer {
++        for (diagnostics.items) |*diagnostic| diagnostic.deinit(allocator);
++        diagnostics.deinit(allocator);
++    }
++
++    try IdentifierStyleRule.rule.check(&source, allocator, &diagnostics);
++    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
++    try std.testing.expectEqualStrings("identifier-style", diagnostics.items[0].rule_id);
++    try std.testing.expectEqual(@as(usize, 3), diagnostics.items[0].range.start.line);
++}
++
++test "conditional type alias requires a type value in every branch" {
++    const allocator = std.testing.allocator;
++    const code: [:0]const u8 =
++        \\const std = @import("std");
++        \\const builtin = @import("builtin");
++        \\const win = struct { pub const HMODULE = void; };
++        \\const NativeLibraryHandle = if (builtin.os.tag == .windows)
++        \\    win.HMODULE
++        \\else if (builtin.link_mode == .static)
++        \\    @FieldType(std.DynLib, "inner")
++        \\else
++        \\    std.DynLib;
++        \\const MixedAlias = if (builtin.os.tag == .windows) win.HMODULE else 1;
++    ;
++    var source = Source.init(allocator, "conditional-type.zig", code);
++    defer source.deinit();
++
++    var diagnostics: std.ArrayList(Diagnostic) = .empty;
++    defer {
++        for (diagnostics.items) |*diagnostic| diagnostic.deinit(allocator);
++        diagnostics.deinit(allocator);
++    }
++
++    try IdentifierStyleRule.rule.check(&source, allocator, &diagnostics);
++    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
++    try std.testing.expectEqualStrings("identifier-style", diagnostics.items[0].rule_id);
++    try std.testing.expectEqual(@as(usize, 10), diagnostics.items[0].range.start.line);
++}
++
++test "control: shadowed std binding rejects a literal-only type instantiation" {
++    const allocator = std.testing.allocator;
++    const code: [:0]const u8 =
++        \\const std = @import("std");
++        \\fn probe() void {
++        \\    const std = struct {
++        \\        pub const Bits = fn (comptime n: u8) u8;
++        \\    };
++        \\    const BitCount = std.Bits(3);
++        \\    _ = BitCount;
++        \\}
++    ;
++    var source = Source.init(allocator, "shadowed-factory.zig", code);
++    defer source.deinit();
++
++    var diagnostics: std.ArrayList(Diagnostic) = .empty;
++    defer {
++        for (diagnostics.items) |*diagnostic| diagnostic.deinit(allocator);
++        diagnostics.deinit(allocator);
++    }
++
++    try IdentifierStyleRule.rule.check(&source, allocator, &diagnostics);
++
++    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
++    try std.testing.expectEqualStrings("identifier-style", diagnostics.items[0].rule_id);
++    try std.testing.expectEqual(@as(usize, 6), diagnostics.items[0].range.start.line);
++}
++
++test "capture of a typeInfo ?type payload binds a type value" {
++    const allocator = std.testing.allocator;
++    const code: [:0]const u8 =
++        \\const std = @import("std");
++        \\fn trace(comptime T: type) void {
++        \\    switch (@typeInfo(T)) {
++        \\        .@"union" => |info| {
++        \\            if (info.tag_type) |Tag| {
++        \\                _ = @sizeOf(Tag);
++        \\            }
++        \\            while (info.tag_type) |Inner| {
++        \\                _ = @sizeOf(Inner);
++        \\            } else {}
++        \\            if (info.fields) |Fields| {
++        \\                _ = Fields.len;
++        \\            }
++        \\        },
++        \\        else => {},
++        \\    }
++        \\}
++    ;
++    var source = Source.init(allocator, "typeinfo-capture.zig", code);
++    defer source.deinit();
++
++    var diagnostics: std.ArrayList(Diagnostic) = .empty;
++    defer {
++        for (diagnostics.items) |*diagnostic| diagnostic.deinit(allocator);
++        diagnostics.deinit(allocator);
++    }
++
++    try IdentifierStyleRule.rule.check(&source, allocator, &diagnostics);
++    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
++    try std.testing.expectEqualStrings("identifier-style", diagnostics.items[0].rule_id);
++    try std.testing.expectEqual(@as(usize, 11), diagnostics.items[0].range.start.line);
++}
++
++test "control: a local typeInfo function payload is a value capture" {
++    const allocator = std.testing.allocator;
++    const code: [:0]const u8 =
++        \\const Info = struct { tag_type: ?u8 = null };
++        \\fn typeInfo(comptime T: type) Info {
++        \\    _ = T;
++        \\    return .{};
++        \\}
++        \\fn probe() void {
++        \\    const info = typeInfo(u8);
++        \\    if (info.tag_type) |Tag| {
++        \\        _ = Tag;
++        \\    }
++        \\}
++    ;
++    var source = Source.init(allocator, "fake-typeinfo.zig", code);
++    defer source.deinit();
++
++    var diagnostics: std.ArrayList(Diagnostic) = .empty;
++    defer {
++        for (diagnostics.items) |*diagnostic| diagnostic.deinit(allocator);
++        diagnostics.deinit(allocator);
++    }
++
++    try IdentifierStyleRule.rule.check(&source, allocator, &diagnostics);
++    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
++    try std.testing.expectEqualStrings("identifier-style", diagnostics.items[0].rule_id);
++    try std.testing.expectEqual(@as(usize, 8), diagnostics.items[0].range.start.line);
++}
++
++test "switch mixing a type and a value gains no type authority" {
++    const allocator = std.testing.allocator;
++    const code: [:0]const u8 =
++        \\const std = @import("std");
++        \\const builtin = @import("builtin");
++        \\const TypedChoice = switch (builtin.os.tag) {
++        \\    .windows => std.DynLib,
++        \\    else => 0,
++        \\};
++        \\const typed_choice = switch (builtin.os.tag) {
++        \\    .windows => std.DynLib,
++        \\    else => 0,
++        \\};
++    ;
++    var source = Source.init(allocator, "switch-mixed.zig", code);
++    defer source.deinit();
++
++    var diagnostics: std.ArrayList(Diagnostic) = .empty;
++    defer {
++        for (diagnostics.items) |*diagnostic| diagnostic.deinit(allocator);
++        diagnostics.deinit(allocator);
++    }
++
++    try IdentifierStyleRule.rule.check(&source, allocator, &diagnostics);
++    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
++    try std.testing.expectEqualStrings("identifier-style", diagnostics.items[0].rule_id);
++    try std.testing.expectEqual(@as(usize, 3), diagnostics.items[0].range.start.line);
++}
++
++test "skript residual: real type aliases are kept and a snake_case type alias is reported" {
++    const allocator = std.testing.allocator;
++    const code: [:0]const u8 =
++        \\const std = @import("std");
++        \\const Ast = @This();
++        \\const Budget = @This();
++        \\const FiniteParameters = std.StaticBitSet(256);
++        \\const RuntimeMap = std.HashMap(MapKey, Value, MapKey.Context, std.hash_map.default_max_load_percentage);
++        \\const TypeOf = @TypeOf(0);
++        \\const elf_dyn_lib = @FieldType(std.DynLib, "inner");
++    ;
++    var source = Source.init(allocator, "skript-type-alias.zig", code);
++    defer source.deinit();
++
++    var diagnostics: std.ArrayList(Diagnostic) = .empty;
++    defer {
++        for (diagnostics.items) |*diagnostic| diagnostic.deinit(allocator);
++        diagnostics.deinit(allocator);
++    }
++
++    try IdentifierStyleRule.rule.check(&source, allocator, &diagnostics);
++    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
++    try std.testing.expectEqualStrings("identifier-style", diagnostics.items[0].rule_id);
++    try std.testing.expectEqual(@as(usize, 7), diagnostics.items[0].range.start.line);
++}
++
++test "skript residual: a snake_case @typeInfo value binding is accepted" {
++    const allocator = std.testing.allocator;
++    const code: [:0]const u8 =
++        \\const std = @import("std");
++        \\fn intrinsicType(comptime func: anytype) void {
++        \\    const func_info = @typeInfo(@TypeOf(func)).@"fn";
++        \\    _ = func_info;
++        \\}
++    ;
++    var source = Source.init(allocator, "skript-typeinfo.zig", code);
++    defer source.deinit();
++
++    var diagnostics: std.ArrayList(Diagnostic) = .empty;
++    defer {
++        for (diagnostics.items) |*diagnostic| diagnostic.deinit(allocator);
++        diagnostics.deinit(allocator);
++    }
++
++    try IdentifierStyleRule.rule.check(&source, allocator, &diagnostics);
++    try std.testing.expectEqual(@as(usize, 0), diagnostics.items.len);
++}
+diff --git a/src/type_context.zig b/src/type_context.zig
+index 1066005..5ae974b 100644
+--- a/src/type_context.zig
++++ b/src/type_context.zig
+@@ -277,10 +277,10 @@ pub const TypeContext = struct {
+         use_known_methods: bool,
+         use_cache: bool,
+     ) ?TypeInfo {
+-        var statements: [ast_walk.max_block_statements]u32 = undefined;
+-        const count = ast_walk.getBlockStatements(tree, block_node, &statements) orelse return null;
++        var inline_statements: [2]u32 = undefined;
++        const statements = ast_walk.getBlockStatements(tree, block_node, &inline_statements) orelse return null;
+         var result: ?TypeInfo = null;
+-        for (statements[0..count]) |statement| {
++        for (statements) |statement| {
+             if (isTerminatingExpression(tree, statement)) return null;
+             result = self.getExpressionTypeInternal(statement, use_known_methods, use_cache);
+         }

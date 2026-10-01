@@ -1226,43 +1226,578 @@ to the library. And nothing depends on the `bench` step: `install` does not
 build the benchmarks and `test` does not run them, because a number is not a
 gate.
 
+### Reading `bench-lp`
+
+`zig build bench-lp` runs one recipe twice and prints two sections.
+
+| Section | Heap | Timed rows |
+| --- | --- | --- |
+| `allocator=dbg` | `std.heap.DebugAllocator` | 13 |
+| `allocator=smp` | `std.heap.smp_allocator` | 13 |
+
+Twenty-six timed rows in all. The two sections are the same thirteen bodies,
+under the same names, with the same iteration counts and the same seeds; the
+only thing that differs is the heap they are built on.
+
+That difference is why both exist. These systems allocate, grow geometrically
+and free, so which heap they run on is part of what is being timed: a
+`DebugAllocator` charges its own guard bytes and bookkeeping to every round trip,
+which makes a figure measured under one partly a measurement of the allocator.
+`smp_allocator` is the fast general-purpose heap and does **no leak detection at
+all**: it keeps no record of what it handed out, so it cannot report a leak and a
+leak under it is invisible rather than absent. The `DebugAllocator` is therefore
+the only one of the two whose end-of-run state can still be asked about, and
+that question is asked about the `allocator=dbg` section only. The untimed
+accounting block described below is printed for *both* sections — those counters
+are the wrapper's own and do not depend on the heap having leak detection. A time
+here is a property of the PAIR, workload and allocator, so quote it under the
+heading it was printed beneath.
+
+**A difference between the two tables is not, by itself, a heap measurement.**
+The recipe is otherwise identical — which is what the paragraph above proves —
+but which section ran first, the state the run leaves in the caches and the
+allocator, and everything else on a shared host are all inside the delta too.
+Separating the heap's own cost from that noise needs a same-run A/B under the
+harness's controls, and no figure in this document is one.
+
+The evidence that the second section really is the first recipe again is in the
+output itself. The geometry report and every per-row `checksum` are functions of
+the inputs alone, so the `allocator=smp` section must print the `allocator=dbg`
+section's geometry and checksums; if it does not, the two sections differ in
+something other than the allocator. So the two runs are configured alike down to
+the heap and nothing else — which is a statement about the recipe, and not a
+claim that the only thing their timings can differ by is the heap.
+
+### The untimed allocation accounting
+
+Each section prints one more block, and no clock runs there. It comes after that
+section's geometry report, its timed measurements and its summary line — and
+before the timing table itself, which the harness prints when the section has
+finished, so the table you read for `ns/op` is the last thing that section
+prints rather than the thing this block follows. Every body is swept once per
+iteration its timed row runs — the same varying inputs, with `reps = 1` against
+the harness's seven — through `std.testing.FailingAllocator` with `fail_index`
+and `resize_fail_index` both at `maxInt`, which means the wrapper injects **no
+failure of its own**: it is not set to make any particular allocation in the
+sweep fail. That does not make the sweep infallible — an allocation the
+underlying heap refuses still answers `error.OutOfMemory`, reaches the body's
+own `catch`, and ends the run uncounted. What the setting buys is that the
+counts are counts of work that really ran, rather than of the allocation at
+which an injected failure stopped it.
+
+The counters are totals over that whole range, and their definitions are not the
+obvious ones:
+
+| Column | Definition |
+| --- | --- |
+| `allocs` | successful `alloc` calls. A successful `resize` or `remap` is **neither** an alloc nor a free. |
+| `frees` | successful `free` calls. |
+| `alloc B` | the bytes of those successful allocations **plus** the positive growth of every successful `resize` or `remap`. Not a sum of requested raw sizes. |
+| `freed B` | the bytes handed to `free`, plus the shrinkage of those same resizes. |
+| `checksum` | this body's own sink over the sweep — not the timed table's checksum, which covers that body's warmup call and its seven repetitions. |
+
+Every body is swept twice and the two sweeps must be identical, and every body
+must come back balanced: as many frees as allocations, as many freed bytes as
+allocated bytes. A difference or an imbalance ends the run rather than printing
+a figure, because a count that drifts between two identical sweeps is a count of
+something other than the work, and a workload allocation that outlived its call
+is a defect rather than a number. The totals line counts one sweep of each body;
+the second sweep exists only to be compared, and is printed by neither.
+
+No counter runs inside a timed region, and the harness's own buffers — the `Io`
+thread pool and each report's row buffer — come from a third allocator, so a
+body is never billed for the table it is being printed into. The 20,000-row
+budget on every elimination is unchanged by any of this, and each section's
+summary line reports the wall time of its own timed measurements and that
+budget — before the accounting block and before the timing table.
+
+### Capturing a baseline
+
+Take LP figures from `zig build bench-lp` on its own. The combined
+`zig build bench` step runs all three benchmarks in parallel, so its numbers are
+contended with two other benchmark processes and are not a baseline; the
+per-file steps exist for exactly this. Measure on an otherwise idle machine, and
+compare minima across runs rather than single figures.
+
+**Capturing a run to a file is part of that, and it is now trustworthy.** The
+benchmark report is written to stderr through a streaming, line-buffered writer.
+It used to go through a writer that recorded byte offsets and wrote
+positionally: correct on a terminal, wrong on a regular file, where redirecting a
+run into a capture file lost rows with no error anywhere. That was found by
+doing the capture, not by reading the code, so the rule recorded here is the
+honest one — **capture by redirecting, then read the file back**, rather than
+assuming a printed table equals a written one. The clock behind the numbers is
+unchanged (`std.Io.Clock.real`, wall time), and no figure in either document was
+produced by anything other than the recipe above.
+
+**Every `ns/op` figure recorded so far predates the second allocator section and
+stays historical until a new dated capture replaces it.** The numbers in
+[docs/performance-handover.md](docs/performance-handover.md) are the 2026-09-30
+capture, nothing since has refreshed them, and this document does not compare
+the two allocators against each other.
+
+**One capture of all three has actually been done, dated 2026-10-02.** On
+`buildhost` with Zig 0.16.0 each benchmark was compiled as its own `ReleaseFast`
+executable — root `bench/bench.zig`, `bench/bench_vec.zig` or `bench/bench_lp.zig`,
+with `-Minterval` pointing at `src/root.zig` — then run on its own, in turn,
+stderr redirected into its own regular file and read back afterwards. The counts
+below were counted in those files, which is the check the positional writer could
+not pass.
+
+| Benchmark | Wall | Captured | Timed rows | Checksum lines | Final fold |
+| --- | --- | --- | --- | --- | --- |
+| scalar | 4.517 s | 134 lines | 60 | 62 | `c164c6b626ff0b52` |
+| vector | 620.824 s | 831 lines | 276 | 277 | `290f6cab53aace7f` |
+| Fourier-Motzkin | 52.010 s | 144 lines | 26 — 13 `dbg`, 13 `smp` | 28 | `4b4f94d960b30e8e` |
+
+The workload did not move to produce them: the thirteen LP bodies keep their
+names, iteration counts, elimination orders, bodies and seeds, the budget is
+still 20,000 rows, and `reps` and `warmup` are still 7 and 1. **The wall times
+are not `ns/op`**. This is one program run per benchmark, not a three-run baseline.
+**No speedup is claimed**; the three-run baseline is still unmeasured.
+
 ## Development
 
-The required acceptance gate is:
+The required acceptance gate is the installed `zig-gate`, run from the prefix it
+was installed into rather than from `PATH`:
 
 ```sh
-zig-gate
+QUALITY_TOOLS_PREFIX=/home/tmp2/$USER/zig-interval/quality-tools
+"$QUALITY_TOOLS_PREFIX/bin/zig-gate"
 ```
 
-Install `zig-gate`, `ziglint`, `zlint`, `zbc`, `zwanzig` and `cross-test` before
-running it. The gate runs formatting, build, tests, AST checks, both linters,
-`zbc`, `zwanzig` and the cross-target profile. Missing required tools fail the
-gate. `.vf/gates.yml` uses this command for the full suite; its focused target
-command remains `zig 0.16.0 build test`.
+There is deliberately no bare `zig-gate` in this project's contract: `.vf/gates.yml`
+runs that same absolute path, so the gate that decides acceptance is the one whose
+bytes are in the prefix and whose analysers are the pinned ones, not whichever
+copy happens to be first on `PATH`.
+
+### Installing the gate
+
+`zig-gate` is not a system binary, and nothing about it has to be fetched from a
+developer's home directory. It is installed from this repository, from pinned
+sources, into a prefix you choose:
+
+```sh
+QUALITY_TOOLS_PREFIX=/home/tmp2/$USER/zig-interval/quality-tools
+QUALITY_TOOLS_WORK_ROOT=/home/tmp2/$USER/zig-interval/quality-build
+ZIG=/home/tmp2/$USER/zigbin/zig     # a real 0.16.0; a PATH `zig` shim will not do
+
+bash scripts/install-quality-tools.sh \
+  --prefix "$QUALITY_TOOLS_PREFIX" \
+  --work-root "$QUALITY_TOOLS_WORK_ROOT" \
+  --zig "$ZIG"
+```
+
+Three required arguments, all absolute paths: `--prefix` is where the tools
+land, `--work-root` is the installer's own fetch/patch/build/cache root, and
+`--zig` is a real Zig 0.16.0 — the installer refuses a compiler that reports
+anything else, which is why a version shim on `PATH` will not do. The remaining
+flags narrow or re-check the run rather than change the recipe: `--only LIST`
+builds a subset (`zbc, ziglint, zlint, zwanzig, cross-test, zig-gate, harness,
+analyzers, all`), `--manifest PATH` reads an alternative source manifest,
+`--optimize MODE` selects the mode the tools are built in (`ReleaseFast` by
+default), `--list` prints the resolved plan and exits, `--force` overwrites an
+existing prefix, `--verify-only` verifies the checked-in hashes and creates
+nothing, and `--help` prints the same plan.
+Exit status is 0 on success, 1 on a build or install failure, and 2 on a usage
+error, a missing prerequisite, a manifest that does not parse or a checksum
+mismatch; a signal that kills the installer propagates as 130, 143 or 129.
+
+The work root is safe to cache because reuse is checked, not assumed — and the
+check starts from the manifest, not from the stamp. **A stamp is a claim about
+itself**, so a stamp that merely agrees with its own checkout proves nothing:
+the four values it records are first *bound* to the ones this run's manifest row
+lists (the pinned revision, the ordered patch hashes, the `src/**/*.zig` source
+digest), and only then is the disk re-derived and compared — `git rev-parse
+HEAD` against the bound revision, a freshly computed `src/**/*.zig` digest
+against the bound digest, and a digest of the build inputs (`build.zig`,
+`build.zig.zon`, `@embedFile` targets, top-level build files) against what the
+stamp recorded for them. Anything short of all four re-fetches and re-patches.
+
+The binding is the half that is easy to leave out, and it was: a tool with no
+patches — `zlint` — whose pin later moves to a new revision keeps a stamp that
+matches its own checkout perfectly, and would have been reused as though it were
+the new pin. The build-input digest is the other half that is not implied by the
+rest: a revision pin says nothing about a build script, so without it a restored
+work root could run an edited `build.zig` against the pinned sources.
+
+**Each analyzer is built by a named recipe, and `zbc`'s is not the other three's.**
+The manifest's `build_recipe` column names one — `default` for the tool's own
+default step, `cli` for its named install-only step — and the installer
+dispatches that name from a fixed table. The column is never evaluated, never
+expanded and never run as a command: an unrecognised name is exit 2 before
+anything is fetched, never a fallback to a build nothing describes.
+`ziglint`, `zlint` and `zwanzig` are `default`, a plain `zig build`. `zbc` is
+`cli`, so it is built with `zig build cli`.
+
+The reason is upstream's own build script, not a policy this repository
+invented. `zbc`'s `build.zig` leaves its dogfood on the **default** step —
+`zbc src/` over its own `src/`, with a CLI that returns 1 on *any* finding.
+The measured `0001`–`0003` tree analyzed all 153 files and reported 75 findings,
+exit 1. No self-run over current `0001`–`0005` exists; its count is unknown.
+`zig build cli` builds and installs the same `zig-out/bin/zbc` without running
+that self-check.
+
+**The dogfood is not removed, weakened or re-severitised**:
+`b.default_step.dependOn(&self_check.step)` is upstream's line and stays as it
+is, the default step keeps the same artifact-install dependency it always had,
+and no rule, severity or finding is suppressed anywhere to get a binary
+installed.
+
+Read that as the narrow claim it is: **the install step proves the pinned tree
+compiles, links and installs; it says nothing about whether `zbc` finds
+anything in `zbc`.** What the gate asserts about findings is a run over *this*
+project's sources. The dated self-analysis is recorded in
+[`tools/quality/PROVENANCE.md`](tools/quality/PROVENANCE.md); it does not
+establish the current tool's self-findings. Fixing upstream's findings is outside
+this project. The argv that actually ran — step and optimize mode together — is
+recorded per install in `install-manifest.tsv`'s `build_recipe` column and read
+back by the `analyze` job.
+
+What a failed run leaves behind is worth stating precisely, because the useful
+guarantee is narrower than "nothing half-written". Every usage, prerequisite,
+manifest and checksum check finishes **before anything is created**, so a
+malformed manifest or a refused path leaves the filesystem untouched. After
+that the installer creates **both** roots early — the work root first, then an
+empty prefix — and does the real work in a staging tree at
+`$QUALITY_TOOLS_WORK_ROOT/stage/prefix`; the prefix is populated by one copy at
+the very end, after every payload file has been hashed. The manifest cannot hash itself.
+So a build that fails four hours in leaves the **work root** behind (fetched
+sources, stamps, build logs — that is what makes the next run cheap) and
+leaves the **prefix** empty; if that prefix was empty when the run started, the
+installer removes it and says so. **A cold install therefore ends either with a
+complete prefix or with no prefix at all** — but a failed run is not a run that
+wrote nothing, and the work root is deliberately kept. `--force` over a prefix
+that already existed is not transactional: files already replaced stay
+replaced, and the diagnostic names where it stopped.
+
+`--verify-only` is the read-only half, and it is genuinely read-only: it hashes
+`tools/quality/` against `SHA256SUMS`, prints the plan, and exits **before**
+either root is created. Neither path has to exist, and neither has to be a legal
+scratch location for that run. What it proves is about the **checked-in
+sources** — nothing about an installed prefix. Proving an install is intact is
+the other check, and it is a different one: every row of the prefix's
+`install-manifest.tsv` carries the sha256 of the file it names, so a prefix can
+be re-verified byte for byte without re-running the installer:
+
+```sh
+( cd "$QUALITY_TOOLS_PREFIX" \
+    && awk -F'\t' '!/^#/ && NF { print $8 "  " $7 }' install-manifest.tsv \
+    | sha256sum --check --strict - )
+```
+
+That is what the `analyze` job in CI runs, after `--verify-only`; neither one
+stands in for the other.
+
+That interface has a receipt now, dated **2026-10-02**, and the first of them is
+the cold one: fresh prefix, fresh work root, empty `HOME`, nothing reused. On
+host `buildhost`, with a real Zig 0.16.0, the same command as above run against a
+prefix and work root that did not exist beforehand and a `HOME` set to an empty
+throwaway directory that was still empty when the run ended: exit 0 in
+**285.8 s**. `zbc` 0.1.3 was
+built by `zig build cli -Doptimize=ReleaseFast`; `ziglint` 0.5.3, `zlint` 0.10.0
+and `zwanzig` 0.15.1 each by `zig build -Doptimize=ReleaseFast`, from their
+pinned revisions with 4, 1, 0 and 7 patches — **12** in all, each sha256-checked
+before it was applied. `install-manifest.tsv` carries **31** payload hashes and
+the re-hash above printed `OK` 31 times, exit 0; `tools/quality/SHA256SUMS`
+seals the **26** files of the checked-in distribution. `install-manifest.tsv`
+is the one payload file it cannot hash, and every patch row names **both**
+notices its file travels under: the tool's upstream `licenses/<tool>.LICENSE`
+and this repository's own `harness.LICENSE`, because a patched tree is neither
+purely upstream nor purely local.
+
+A second install ran the same day, and it is the one the current gate ran out of:
+a **fresh** prefix that did not exist beforehand and an empty throwaway `HOME`
+still empty when it returned — but a **reused** work root, so it is *not* a second
+cold install and its **276.2 s** is not comparable with the 285.8 s above. Exit 0.
+`install-manifest.tsv` carried **32** payload hashes, the re-hash above printed
+`OK` 32 times, exit 0, and `tools/quality/SHA256SUMS` seals the **27** files of the
+checked-in distribution. It applied **13** patches where the cold run applied 12 —
+one more, a `zbc` source patch, and not a rule, a severity or a whitelist.
+
+**The first gate run out of a prefix of this kind failed, and it stays in the
+record as the red one.** 322.3 s, exit 1. It resolved its analysers inside the
+prefix with `policy=builtin` and no `$HOME` or `PATH` lookup — the wiring claim,
+observed rather than asserted.
+`zig fmt --check`, `zig build`, `zig build test` and `zig ast-check` were green
+and `zlint` and `zwanzig` found nothing; then `ziglint` reported **4** style
+findings in `bench/bench_lp.zig` and `zbc` reported **4** `use-undefined`
+**errors** in `bench/bench_vec.zig`, which fail acceptance under the severity
+split described under [What the gate enforces](#what-the-gate-enforces),
+alongside the **3** advisory float-to-integer warnings this project has always
+carried. Nothing was whitelisted, no rule disabled and no severity lowered. The
+four errors are attributed to the pinned analyzer's `for`-range CFG lowering
+rather than to the source: the four `ziglint` findings were corrected in
+`bench/bench_lp.zig`, and the analyzer half travelled as the extra `zbc` patch
+above. The full receipt of that red run — timings, the per-finding table and its
+cross summary — is in
+[docs/performance-handover.md](docs/performance-handover.md), with the current one
+in the section after it.
+
+**The gate out of that prefix is green.** `$QUALITY_TOOLS_PREFIX/bin/zig-gate` —
+the whole gate, formatting through the cross-target section — exit **0** in
+**1061.0 s** on the same host and the same compiler. Its cross section reports
+`status=partial` with `pass 4, fail 0, build_only 1` and exits 0 itself, read
+from the immutable run directory of its own run id rather than from a rolling
+summary: `x86_64-linux` natively plus `aarch64-linux`, `riscv64-linux` and
+`s390x-linux` under QEMU each built and ran the whole test step at **348** tests,
+**1392 executed tests** in all, while `x86_64-windows` built and did not run —
+`build_only`, `runtime_unavailable`, compile coverage and never a tested target.
+`zbc` reported **0** errors over `selected=32 analyzed=32` and the **3** standing
+advisory float-to-integer warnings, and nothing else.
+
+**Remaining work:** Wave 2's three-run current baseline and Wave 3's measured
+solver optimization. Each benchmark has completed one smoke run with its full
+output captured; no current baseline or speedup is claimed. Remote GitHub
+Actions and the `vf` engine have not been executed. The installed local gate
+above is verified green.
+
+| Under `$QUALITY_TOOLS_PREFIX` | Contents |
+| --- | --- |
+| `bin/` | `zig-gate`, `cross-test`, `ziglint`, `zlint`, `zbc`, `zwanzig` |
+| `lib/cross-test/` | `test.sh`, `test-zig.sh`, `run_policy.zig`, `zig-targets.sh`, `scratch-contract.sh` |
+| `share/zig-interval-quality/` | the resolved `manifest.tsv`, `SHA256SUMS`, `PROVENANCE.md`, `licenses/`, `patches/` |
+| `install-manifest.tsv` | pins, licences and hashes for every payload file, including patches. This manifest does not hash itself. |
+
+**Licensing is stated per file, not implied by a directory name.** `bin/` and
+`lib/cross-test/` are first-party code from this repository and ship under this
+repository's own MIT, whose text is installed beside them as
+`share/zig-interval-quality/licenses/harness.LICENSE`; the four analysers keep
+their own upstream notices as `licenses/{zbc,ziglint,zlint,zwanzig}.LICENSE`.
+The installer refuses a harness install that has no `harness.LICENSE` to ship,
+and every row of `install-manifest.tsv` names the licence it travels under. No
+third-party code is attributed to anyone other than its own authors.
+
+The pins live in the repository, not in the install:
+
+| In the tree | Contents |
+| --- | --- |
+| `tools/quality/manifest.tsv` | one row per tool: repository, pinned revision and its date, the tool's own version, the compiler it was built with, the ordered patch list and their sha256s, license, the **name** of the build recipe (`default` or `cli` — a selector, never a command; the concrete argv is recorded per install in `install-manifest.tsv`), installed path, and a source digest |
+| `tools/quality/patches/` | the reviewed local patches applied on top of those revisions, in the order the manifest lists them |
+| `tools/quality/SHA256SUMS` | a `sha256sum` listing covering every file under `tools/quality/` except itself |
+| `tools/quality/harness/` | `zig-gate` and `cross-test` themselves |
+
+A revision is a full 40-hex commit, and the installer re-checks it after the
+fetch with `git rev-parse FETCH_HEAD`, so a pin is the content that was
+reviewed rather than a tag that can move.
+
+| Tool | Upstream | Pinned revision |
+| --- | --- | --- |
+| `zbc` | `ericsssan/zbc` | `419d153ca411d1698899992d86c51eb9a7e14919` |
+| `ziglint` | `rockorager/ziglint` | `66709a408f2ea9ac1de91a438a83b13f4691a941` |
+| `zlint` | `DonIsaac/zlint` | `3ef67af7dfed776cb03012563942cdf3a97f1b59` |
+| `zwanzig` | `forketyfork/zwanzig` | `1a0768ccd889d3586ec9482f02ffffe872a99749` |
+
+One tool carries more than its upstream, and the base revision is why it reads
+that way: `zwanzig`'s pin is the last revision **published upstream**, and five
+further local commits plus one uncommitted working tree sit above it as an
+ordered, individually hashed patch series under
+`tools/quality/patches/zwanzig/` — one file per commit, plus
+`0006-uncommitted`. That is exactly why the pin is `1a0768c…` and not the tip of
+the local series.
+
+One reading trap, because it looks like a pin that drifted: the installed `zlint`
+prints `v0.0.0` for `--version`. That is upstream's own default for a build made
+from source, not a version marker this install could have got wrong, and the pin
+in the manifest is what the revision rests on.
+
+There is no `~/.local` tool to install first and no `~/.local` policy file to
+fetch: `$QUALITY_TOOLS_PREFIX/bin` and `$QUALITY_TOOLS_PREFIX/lib` are the whole
+runtime dependency. What lands in the prefix is source-equivalent to the pinned
+revisions plus the checked-in patches, and nothing else.
+
+### Running it
+
+```sh
+QUALITY_TOOLS_PREFIX=/home/tmp2/$USER/zig-interval/quality-tools
+"$QUALITY_TOOLS_PREFIX/bin/zig-gate"
+```
+
+The installed gate resolves its required tools — `ziglint`, `zlint`, `zbc`,
+`zwanzig` and `cross-test` — as `$QUALITY_TOOLS_PREFIX/bin/<name>` and nothing
+else: no `$HOME/.local/bin` lookup and no `PATH` fallback.
+`ZIG_GATE_PREFIX` names the prefix explicitly, and an installed
+`$QUALITY_TOOLS_PREFIX/bin/zig-gate` infers it from its own location without
+one. A missing analyser is exit 2, before any project check runs, naming every
+absent file at once rather than substituting something else; an explicit
+`ZIGLINT` / `ZLINT` / `ZBC` / `ZWANZIG` / `CROSS_TEST` override still wins,
+because that is the operator naming a tool on purpose. `zig-cov` is **not**
+installed and is not required: the opt-in `--cov` section reports it as skipped
+and carries on, so an installed prefix is complete without it.
+`zig-gate --help` lists the sections in the order they run and the
+flags; `--no-cross` drops the one section that leaves the host.
+
+### Scratch and cache roots
+
+The installed harness carries its own scratch contract,
+`$QUALITY_TOOLS_PREFIX/lib/cross-test/scratch-contract.sh`, and **no
+machine-wide policy file is a prerequisite**: `zig-gate` and `cross-test`
+enforce the rules themselves, so a cold install with an isolated `HOME` is
+governed exactly like one on this host. Where `~/.local/lib/host-scratch.sh`
+happens to be readable it is still sourced first and its exports still win, and
+nothing in any host's global configuration was modified to make this work.
+
+`scripts/scratch.sh` — the resolver `scripts/build_mpfr.sh` uses — asks that
+**same file**, at `tools/quality/harness/lib/cross-test/scratch-contract.sh`,
+rather than carrying its own copy of the volume list. There is one
+implementation of the rule and three callers of it: `zig-gate`, `cross-test`,
+and this repository's own scripts.
+
+On a managed cluster host — `hostname -s` beginning `buildhost`, the same probe the
+machine policy itself uses — a scratch or cache root must sit under
+`/home/tmp2` or `/home/tmp`: a real mountpoint with at least 100 GiB free,
+symlinks resolved, NFS refused, and `/tmp`, `/var/tmp` and `/dev/shm` refused
+outright. This repository is on NFS, and an NFS mount rejects `renameat2()`, so
+a Zig cache placed there fails with an error naming the syscall rather than the
+volume — which is why `/vol/tmp` and `/vol/tmp2`, sanctioned for scratch but
+NFS, are refused here rather than accepted and left to fail later.
+
+On every other host — a CI runner, a laptop — there is no cluster volume list to
+honour, so the test is explicit ownership: an absolute path that is a real,
+non-symlink directory this user owns and can write, with at least 1 GiB free and
+not on NFS. `/tmp` is ordinary in that mode, because on a runner it is the only
+sane scratch. Name the roots:
+
+| Variable | What it is |
+| --- | --- |
+| `GATE_SCRATCH` | scratch root for this run |
+| `GATE_CACHE_DIR` | Zig local cache |
+| `GATE_GLOBAL_CACHE_DIR` | Zig global cache |
+| `GATE_CROSS_OUTPUT` | the `cross-test --output` directory |
+
+A root named explicitly on a refused volume stops the run; an ambient `TMPDIR`
+on one is corrected with a notice instead. Existing CI may use runner-local
+temporary storage; this cluster's own private root is
+`/tmp/zig-interval`. The installer's own `--prefix` and
+`--work-root` are checked by the same helper, so the rule is one implementation
+rather than two, and neither is ever defaulted.
+
+### What the gate enforces
+
+The gate runs formatting, build, tests, AST checks, both linters, `zbc`,
+`zwanzig` and the cross-target profile. Missing required tools fail the gate.
+Its focused target command remains `zig 0.16.0 build test`.
 
 `ziglint`, `zlint` and `zwanzig` findings fail acceptance without rule
-suppression. `zbc` errors fail; its three float-to-integer warnings require
-the range proofs documented at `criticalRange` and the soundness oracle's
-`expRef`. They remain advisory rather than changing interval arithmetic to
-satisfy a caller-insensitive analysis.
+suppression. `zbc` splits by severity: an `error` finding fails, a warning is
+advisory, and `ZBC_STRICT=1` is the one knob that makes warnings fail too.
+There is no whitelist of permitted findings and no file/line carve-out.
 
-For a focused native test run:
+What is expected on **this** tree is three reviewed zbc warnings — the
+float-to-integer conversions without a clamp — each of which requires the range
+proofs documented at `criticalRange` and the soundness oracle's `expRef`. Those
+three stay advisory — `intfromfloat_without_clamp` is the **one** rule that
+remains a `.warning` by accepted, reviewed policy rather than by upstream
+default, and every other rule in the pinned source runs at upstream's severity.
+**Do not read that as "a clean run is three warnings and
+nothing else":** an `error` from *any* zbc rule fails acceptance, and that
+includes the six rules the pinned source now carries at upstream severity —
+`memset_undef_after_len_truncation`, `f32_narrowing_int_to_float`,
+`index_minus_one_without_zero_guard`, `index_type_narrowing_wraparound`,
+`intcast_of_negated_signed` and `midpoint_addition_overflow` — which an
+unreviewed capture had downgraded to warnings and which were restored on
+purpose. A numerical library of this shape can legitimately trip
+`index_type_narrowing_wraparound` or `intcast_of_negated_signed`; when it does,
+the fix belongs in `src/` and not in a severity edit. The other limit worth
+naming: with `ZBC_STRICT` unset a *fourth warning* would print without failing,
+so read the per-rule histograms — and in neither case is changing interval
+arithmetic to satisfy a caller-insensitive analysis the remedy.
+
+### How `.vf` runs it
+
+`.vf/gates.yml` does not run a bare `zig-gate`. It installs the prefix this
+page describes and then runs the gate out of it, with `ZIG_GATE_PREFIX` bound to
+the same prefix, so a gate run cannot inherit somebody else's tools and a missing
+analyser exits 2 naming the file instead of quietly skipping a section. Its two
+load-bearing keys read:
+
+```yaml
+suite-install: bash scripts/install-quality-tools.sh --prefix "$QUALITY_TOOLS_PREFIX" --work-root "$QUALITY_TOOLS_WORK_ROOT" --zig "$ZIG"
+suite-cmd: ZIG_GATE_PREFIX="$QUALITY_TOOLS_PREFIX" "$QUALITY_TOOLS_PREFIX/bin/zig-gate"
+suite-timeout: 3600
+enforce: true
+```
+
+Both keys guard themselves: `suite-install` exits 2 with a message unless all
+three variables are set, and `suite-cmd` exits 2 rather than run a gate that is
+not installed. Neither falls back to a default path or to `$HOME`, so "which
+tools ran" is never answered silently.
+
+`.vf/gates.yml` names **no** scratch or cache roots of its own. `GATE_SCRATCH`,
+`GATE_CACHE_DIR`, `GATE_GLOBAL_CACHE_DIR` and `GATE_CROSS_OUTPUT` are whatever
+the operator exports: on a managed cluster host the scratch contract picks a
+sanctioned local root itself, and anywhere else they must be named explicitly.
+
+Three variables carry the rest:
+
+| Variable | What it is |
+| --- | --- |
+| `QUALITY_TOOLS_PREFIX` | prefix the installer writes and the gate is run from |
+| `QUALITY_TOOLS_WORK_ROOT` | the installer's fetch/patch/build/cache root |
+| `ZIG` | absolute path to a real Zig 0.16.0 — a version shim on `PATH` is not it |
+
+All three must be absolute paths, and the prefix and work root must also be
+local, writable and owned by the caller, for the reasons the scratch section
+gives: on a managed cluster host that means under `/home/tmp{,2}`, and on a
+runner it means any owned, writable, local path — `/tmp` included.
+`suite-timeout` is 3600 s because the cross section builds and runs the whole
+test step for four foreign targets, and `enforce: true` turns a non-zero exit
+into a red gate rather than a report.
+
+For a focused native test run, without the gate and without its analysers:
 
 ```sh
 zig build test
 ```
 
-On hosts with the local `cross-test` tool, also run the cross-target
-soundness gate:
+### Cross-target verification
+
+`cross-test.profile.sh` is the whole target contract, and it is worth reading
+before quoting a cross-target table as this project's coverage. Five targets:
+`x86_64-linux` natively, `aarch64-linux`, `riscv64-linux` and `s390x-linux` under
+QEMU user-mode, and `x86_64-windows` **build only**. The profile raises the
+execution budget to 900 seconds; two targets run at a time with one job per
+build.
+
+**What the profile also declares is what must actually RUN, and it is declared
+at run time rather than asserted here.** One line in
+`cross-test.profile.sh`,
+`CROSS_REQUIRED_RUN_TARGETS='x86_64-linux aarch64-linux riscv64-linux s390x-linux'`,
+names the four targets for which "it compiled" is not enough. The installed
+`zig-gate` reads that declaration without sourcing the file, validates every
+token against cross-test's own target pattern, binds its own run id, and then
+reads only that run's `summary.json` — requiring `build=pass`, `run=pass`,
+`status=pass` and a test count above zero for each of the four. A `build_only`
+row, a missing row, a zero-test run or an unfinished run fails the section.
+`x86_64-windows` is deliberately not in the list: with no wine it is compile
+coverage, and demanding a runtime pass there would be demanding the impossible.
+A profile that declares nothing keeps the previous, looser reporting.
 
 ```sh
-cross-test --jobs 8 --build-jobs 2
+ZIG=/home/tmp2/$USER/zigbin/zig \
+  "$QUALITY_TOOLS_PREFIX/bin/cross-test" --output /home/tmp2/$USER/cross-out
 ```
 
-Read the target logs and `zig-out/cross-test/cross-test-summary.json`.
-Compilation is not execution evidence: build-only targets remain untested
-at runtime, and `no_test_results` requires investigation of the runner log.
-Do not treat an incomplete runtime check as a passing soundness check.
+`cross-test` manages its own cache and rejects `--cache-dir`, `--prefix`,
+`-Dtarget`, `-j` and `--test-timeout`; `--output` is how you move its run off a
+network mount.
+
+`--output` is not optional on an NFS checkout: it is what moves the prefix, the
+per-target logs and `cross-test-summary.json` off the network mount. Read
+`<output>/cross-test-summary.json` and `<output>/runs/RUN_ID/build-TARGET.log`.
+
+`x86_64-windows` has no runner on this host, so `cross-test` records it as
+`build_only` / `runtime_unavailable` and never counts it as a pass. A clean run
+therefore reports `status=partial`, not `pass`, with `fail=0` and five target
+rows, and still exits 0. "Builds" is the whole of that row's claim: it is
+compile coverage of the Windows ABI and `std` paths, and it is never evidence
+that the tests pass there. `--require-runners` would turn that row into a
+failure and is not usable against this profile, so judge the run by `fail=0`
+plus five target rows.
+
+Compilation is not execution evidence anywhere in that run: build-only targets
+remain untested at runtime, `no_test_results` requires investigation of the
+runner log, and an incomplete runtime check is not a passing soundness check.
 
 The child-process trap probes use the QEMU runner supplied by `cross-test`.
 This does not require a kernel binfmt handler for the child executable.

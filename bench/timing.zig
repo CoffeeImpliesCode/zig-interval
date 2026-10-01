@@ -15,20 +15,20 @@
 //! closest thing available to the cost of the operation itself, and it is
 //! stable run to run in a way the mean is not.
 //!
-//! Timings come from `std.Io.Clock.real`, which is monotonic and is the only
-//! clock worth trusting for this. `std.time.Timer` does not exist in Zig 0.16.
+//! Timings use `std.Io.Clock.real` (wall time). `std.time.Timer` does not exist
+//! in Zig 0.16. The benchmark recipe keeps this clock unchanged.
 
 const std = @import("std");
 
 /// Accumulator and ambient state handed to every benchmark body.
 pub const Ctx = struct {
     io: std.Io,
-    /// The heap a body allocates from: the allocator `Runner.init` was
-    /// given.
+    /// The heap this body allocates from: whatever `Runner.gpa` held when
+    /// `measure` built this `Ctx`.
     ///
-    /// A body is `fn (ctx, i) void` with nowhere to hang a context, so a
-    /// body that has to build something reaches the allocator through here
-    /// rather than through a file-scope global its `run` has published.
+    /// A body is `fn (ctx, i) void` with nowhere to hang a context of its
+    /// own, so this one field is the whole seam between a benchmark and
+    /// the heap its work is measured on.
     gpa: std.mem.Allocator,
     /// Every measured result is summed in here so the work cannot be elided.
     /// Reported once at exit as a checksum, purely to keep it live.
@@ -75,7 +75,7 @@ pub const Out = struct {
 
     /// Writes one formatted line to stderr, in `print` format.
     pub fn print(self: *Out, comptime fmt: []const u8, args: anytype) !void {
-        var stderr = std.Io.File.stderr().writer(self.io, &self.buffer);
+        var stderr = std.Io.File.stderr().writerStreaming(self.io, &self.buffer);
         try stderr.interface.print(fmt, args);
         try stderr.interface.flush();
     }
@@ -164,7 +164,18 @@ pub const Report = struct {
 };
 
 /// Owns the Io the benchmarks need, and the report they fill in.
+///
+/// TWO HEAPS, and the split is the point of the type. `gpa` below is the
+/// heap `measure` hands to every body, so a caller that is timing a
+/// particular workload heap re-points it before its rows run; `bench_lp`
+/// does exactly that once per section. The `Threaded` and the `Report`
+/// below are the heap `init` was given and neither ever moves, so the row
+/// buffer, the thread pool and the allocator that releases them are the
+/// same one by construction and a body is never billed for the table it is
+/// being printed into.
 pub const Runner = struct {
+    /// The heap a measured body allocates from. `init` sets it to its own
+    /// `gpa` argument; a caller may re-point it before timing.
     gpa: std.mem.Allocator,
     threaded: std.Io.Threaded,
     io: std.Io,
@@ -206,6 +217,10 @@ pub const warmup = 1;
 /// MUST report something it computed through `ctx.keep`, or the optimiser is
 /// entitled to delete it. It is passed an index so that a benchmark can vary
 /// its inputs across iterations and avoid measuring a single cached case.
+///
+/// The finished row is appended through `Report.gpa`, the same allocator
+/// `Report.deinit` releases the buffer with, so re-pointing `Runner.gpa`
+/// at a workload heap moves the body and never the harness.
 pub fn measure(
     comptime name: []const u8,
     comptime body: fn (ctx: *Ctx, i: usize) void,
@@ -242,7 +257,7 @@ pub fn measure(
     // wrapping sum is still a perfect witness and an overflow trap in a
     // benchmark's bookkeeping would be a pointless way to end a run.
     runner.report.sink_total +%= @as(u64, @bitCast(ctx.sink));
-    try runner.report.rows.append(runner.gpa, .{
+    try runner.report.rows.append(runner.report.gpa, .{
         .name = name,
         .ns_per_op = ns_per_op,
         .ops_per_sec = if (ns_per_op > 0) 1e9 / ns_per_op else std.math.inf(f64),

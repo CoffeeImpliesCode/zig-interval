@@ -1,0 +1,862 @@
+#!/usr/bin/env bash
+# cross-test -- compile and run Zig tests across a target matrix.
+#
+# Run from the project root. Without artifact hooks, the command runs the
+# project's "zig build test -Dtarget=TARGET" step. The default matrix contains
+# all 53 concrete Tier 1/2 platforms from the Zig 0.16.0 support table:
+# https://ziglang.org/download/0.16.0/release-notes.html#Support-Table
+# Other Zig versions need an explicit CROSS_MATRIX and a compatible build path.
+#
+# Standard builds accept Zig unit tests and executable checks in the requested
+# build step. run.tests counts reported Zig unit tests; it is null when only
+# executables run and no test count is available. Skipped foreign runs are
+# build_only, never a pass. A build step with no executed checks still fails.
+#
+# Quick use:
+#   cross-test                                      # Full published matrix.
+#   cross-test --list                               # Show targets and runners.
+#   cross-test --targets 'x86_64-linux aarch64-linux'
+#   cross-test --profile ./ci/cross-test.profile.sh
+#   cross-test --no-profile                         # Ignore discovered profiles.
+#   cross-test --jobs 4 --build-jobs 1 --timeout 120
+#   cross-test --require-runners                    # Require execution coverage.
+#
+# PROFILES
+# A profile is trusted Bash code, not a data file or a sandbox.
+# Selection order: --profile FILE, CROSS_PROFILE, ./cross-test.profile.sh,
+# then ./test/cross-test.profile.sh. --no-profile disables automatic discovery.
+# It conflicts with an explicit --profile or CROSS_PROFILE.
+# CLI settings override profile defaults. Arguments after -- append to the
+# CROSS_BUILD_ARGS array. Use argv arrays, never eval or encoded shell strings.
+# The parent and phase workers source the profile. Keep top-level code limited
+# to variable and function definitions. Do not change shell options, traps,
+# or the working directory.
+#
+# A settings-only profile keeps the standard build and automatic runners:
+#   CROSS_BUILD_STEP=test
+#   CROSS_JOBS=4
+#   CROSS_TIMEOUT=120
+#   TARGETS=(x86_64-linux aarch64-linux)
+# Omit TARGETS to keep the full matrix. TARGETS and --targets select a subset
+# of the active matrix. They do not add targets.
+# Additional profile settings: CROSS_BUILD_JOBS, CROSS_BUILD_TIMEOUT,
+# CROSS_PREFIX, and CROSS_REQUIRE_RUNNERS (0 or 1).
+# CROSS_LIBC_RUNTIMES supplies foreign libc loaders in the standard build mode.
+#
+# To replace the matrix, set an indexed Bash array:
+#   CROSS_MATRIX=('x86_64-linux|auto' 'aarch64-linux|auto')
+# Each row is TARGET|RUNNER. Targets must be unique. An empty matrix is an error.
+# "auto" detects native/QEMU-user/Wine/Wasmtime execution. The standard build
+# mode accepts only auto. Artifact profiles also accept "skip" (compile-only),
+# "native" (matching host only), or one runner executable name or path.
+# Use cross_run_command for a runner that needs extra arguments.
+#
+# ARTIFACT PROFILES
+# Define BOTH cross_build_command TARGET and cross_artifact TARGET.
+# The build hook sets CROSS_COMMAND=(executable arguments...). The artifact
+# hook prints one path inside CROSS_PREFIX, with no diagnostic text.
+# Use a unique artifact path for each target. Final symlinks are rejected.
+# The command removes stale artifacts before building and requires a fresh file.
+# Hooks must return zero. A failed hook stops that target.
+#
+# Example for a standalone src/root.zig test file, without a build graph:
+#   cross_artifact() { printf '%s/tests-%s\n' "$CROSS_PREFIX" "$1"; }
+#   cross_build_command() {
+#     local artifact
+#     artifact=$(cross_artifact "$1") || return
+#     CROSS_COMMAND=("${ZIG_COMMAND[@]}" test src/root.zig -target "$1"
+#       --test-no-exec "-femit-bin=$artifact" --cache-dir "$CROSS_CACHE_DIR"
+#       "${CROSS_BUILD_ARGS[@]}")
+#   }
+# Leave CROSS_MATRIX unset to inherit the full tier table and selected compiler.
+# With an explicit artifact matrix, ZIG_COMMAND starts with "${ZIG:-zig}".
+# The command does not probe that compiler, so non-Zig build hooks also work.
+# Set ZIG to a real compiler executable if a version shim needs a project pin.
+# CROSS_PREFIX is an absolute output path. CROSS_CACHE_DIR is a fresh cache,
+# shared across targets and removed on exit. Mutable build configurations need
+# target-specific directories, such as "$CROSS_CACHE_DIR/$1".
+#
+# Optional hooks:
+#   cross_run_command TARGET ARTIFACT sets CROSS_COMMAND for execution.
+#   cross_count_tests LOG prints one nonnegative integer and returns zero.
+# The default counter reads Zig test output. A successful run must execute
+# at least one test. Unavailable runners and matrix "skip" produce build_only.
+# Compiler errors, failed tests, unreadable counts, and deadlines remain failures.
+#
+# OUTPUT AND REQUIREMENTS
+# Default output: zig-out/cross-test. Each run retains logs and summary.json in
+# PREFIX/runs/RUN_ID/. PREFIX/cross-test-summary.json is the atomic current result.
+# Exit 0 includes explicit partial/build_only coverage. Use --require-runners
+# to fail incomplete coverage. Exit 1 means failed checks. Exit 2 means setup
+# error. Signals return 130 (INT), 143 (TERM), or 129 (HUP) after child cleanup.
+# State uses the approved host scratch policy's TMPDIR. The fresh cache uses
+# ZIG_GLOBAL_CACHE_DIR when set, otherwise the state base, and an inherited value
+# is held to the same contract as the output prefix -- a refused one exits 2
+# before it creates anything. An output lock rejects
+# concurrent writers. On a managed cluster host (hostname starting buildhost) an
+# output prefix that lands on /tmp, /var/tmp or /dev/shm is refused before
+# anything is created, symlinks resolved first, and NFS is refused in both
+# modes; on any other host those paths are ordinary, because a CI runner has
+# nowhere else to put a run.
+# Requires Linux, Bash 4.4+, GNU coreutils, awk, and util-linux (setsid/flock).
+#
+# DISTRIBUTED COPY. A reviewed source copy, installed by
+# scripts/install-quality-tools.sh into <prefix>/bin/cross-test with its sha256
+# in <prefix>/install-manifest.tsv and its provenance in
+# <prefix>/share/zig-interval-quality/PROVENANCE.md. The matrix, the verdict
+# logic, the summary schema, the artifact safety rules, the worker isolation
+# and every exit code are unchanged. Two things differ, and only these two:
+#   1. ~/.local/lib/host-scratch.sh is no longer a hard startup requirement. The
+#      same rules come from lib/cross-test/scratch-contract.sh, which is
+#      self-contained: on a managed cluster host it enforces the sanctioned
+#      local-volume list itself, and elsewhere it accepts an explicitly chosen
+#      owned, writable, non-NFS local directory. The machine policy is still
+#      sourced first and still wins whenever it is readable.
+#   2. The output-prefix refusal is stated in terms of that contract rather than
+#      in terms of one hostname prefix alone, and it still happens before any
+#      directory, lock file or run directory is created.
+#
+# Keep the sibling lib/cross-test/ helpers when installing this command.
+set -uo pipefail
+set +m
+export LC_ALL=C
+
+SELF=$(realpath -- "${BASH_SOURCE[0]}") || exit 2
+LIB_DIR=${SELF%/bin/cross-test}/lib/cross-test
+# The scratch contract, not a required developer-home file. The machine-wide
+# policy is still sourced first and still wins when it is readable; what changed
+# is that its ABSENCE is no longer fatal, because scratch-contract.sh enforces
+# the same rules on its own. On a managed cluster host that means the sanctioned
+# local-volume list, a real mountpoint, the policy's own free-space floor and the
+# NFS refusal, all applied here; on any other host it means an explicitly chosen
+# local directory this user owns. Sourced before anything reads TMPDIR or
+# ZIG_GLOBAL_CACHE_DIR, because the state and cold-cache directories below are
+# created under it and a missing policy used to leave them unplaced.
+[ -r "$LIB_DIR/scratch-contract.sh" ] ||
+  { printf 'cross-test: missing scratch contract %s\n' "$LIB_DIR/scratch-contract.sh" >&2; exit 2; }
+# shellcheck source=../lib/cross-test/scratch-contract.sh
+source "$LIB_DIR/scratch-contract.sh" ||
+  { printf 'cross-test: scratch contract %s failed\n' "$LIB_DIR/scratch-contract.sh" >&2; exit 2; }
+quality_scratch_load_policy ||
+  { printf 'cross-test: cannot establish a scratch policy on this host\n' >&2; exit 2; }
+# shellcheck source=../lib/cross-test/zig-targets.sh
+source "$LIB_DIR/zig-targets.sh" || exit 2
+unset CROSS_MATRIX
+
+die() { printf 'cross-test: %s\n' "$*" >&2; exit 2; }
+help() {
+  cat <<'HELP'
+Usage: cross-test [options] [-- Zig-build-options...]
+
+Run in a Zig project. Default: every Zig 0.16.0 Tier 1/2 platform, using
+"zig build test -Dtarget=..." and installed native/QEMU/Wine/Wasmtime runners.
+Unavailable runtimes produce explicit build-only coverage, never a test pass.
+Unit tests and executable-based checks are supported. Successful executable
+runs need no unit-test summary; run.tests is null when no count is available.
+
+  --profile FILE       Use this trusted Bash profile (also CROSS_PROFILE)
+  --no-profile         Ignore automatic project profiles
+  --targets LIST       Space/comma/newline-separated matrix subset (TARGETS)
+  --jobs N             Concurrent targets (CROSS_JOBS, default 2)
+  --build-jobs N       Jobs inside one build (CROSS_BUILD_JOBS, default 1)
+  --timeout SECONDS    Artifact execution / individual Zig test timeout (300)
+  --build-timeout SEC  Build or combined Zig-build deadline (900)
+  --output DIR         Install/output prefix (CROSS_PREFIX, zig-out/cross-test)
+  --step NAME          Default Zig build step (CROSS_BUILD_STEP, test)
+  --require-runners    Fail on incomplete execution coverage
+  --list               List selected platforms and detected runners, no builds
+  -h, --help           Show this help
+
+Profile discovery: ./cross-test.profile.sh, then ./test/cross-test.profile.sh.
+A profile may set CROSS_MATRIX=('target|auto' 'target|skip' 'target|runner').
+"skip" means compile-only and requires artifact hooks. An empty matrix is an
+error. Without CROSS_MATRIX, the version-pinned Tier 1/2 table is used.
+Other Zig versions require a matrix. Default Zig-build mode uses auto runners.
+
+For custom artifacts define BOTH hooks:
+  cross_build_command TARGET  sets CROSS_COMMAND=(compiler arguments...)
+  cross_artifact TARGET       prints the expected installed artifact path
+The artifact must be inside CROSS_PREFIX. Hook failures stop that target.
+Optional cross_run_command TARGET ARTIFACT sets CROSS_COMMAND for execution.
+Optional cross_count_tests LOG prints a nonnegative executed-test count.
+Hooks use normal Bash argv arrays, not shell strings or newline-encoded argv.
+CROSS_BUILD_ARGS holds options after --. ZIG selects a compiler executable.
+ZIG_COMMAND holds the selected compiler argv. With an explicit artifact matrix,
+it starts with "${ZIG:-zig}" without probing that executable.
+CROSS_CACHE_DIR is a fresh per-run cache, shared across targets, for build hooks.
+CROSS_LIBC_RUNTIMES supplies Zig's --libc-runtimes directory when needed.
+
+Output: PREFIX/runs/RUN_ID/{build,run}-TARGET.log and summary.json.
+PREFIX/cross-test-summary.json is the atomic current-run summary (schema 2).
+Where PREFIX may point is decided by lib/cross-test/scratch-contract.sh, not by
+this file. On a managed cluster host (hostname starting buildhost) PREFIX must be
+on the sanctioned physical volume /home/tmp{,2}, symlinks resolved first, and
+may not resolve to /tmp, /var/tmp or /dev/shm; the command exits 2 and creates
+nothing. Point it at $HOST_SCRATCH_ROOT/cross-out. On every other host those
+paths are ordinary and only the NFS refusal applies, so a CI runner can use
+/tmp. A machine-wide policy at ~/.local/lib/host-scratch.sh, when readable, is
+sourced first and wins; it is not required. QUALITY_HOST_SCRATCH_POLICY names
+an alternative path for it.
+State goes to TMPDIR when it is set and verifies, otherwise to the per-user
+directory under the approved volumes on a managed host, otherwise to /tmp. The
+per-run Zig cache is ZIG_GLOBAL_CACHE_DIR when that is set and verifies, and the
+state base otherwise; a refused one exits 2 with the reason named.
+Exit: 0 complete or explicitly partial coverage, 1 failed checks, 2 setup error,
+130 interrupted, 143 terminated. Use --require-runners for full-execution CI.
+Linux, Bash 4.4+, GNU coreutils, setsid and flock are required. No installs,
+network tier lookup, Python, jq, Nix, or fixed compiler paths are required.
+HELP
+}
+
+integer() {
+  [[ $2 =~ ^[1-9][0-9]{0,8}$ ]] || die "$1 must be a positive integer"
+}
+indexed_array() {
+  local declaration
+  declaration=$(declare -p "$1" 2>/dev/null) || return 1
+  [[ $declaration == 'declare -a '* ]]
+}
+
+
+validate_command() {
+  indexed_array CROSS_COMMAND && ((${#CROSS_COMMAND[@]} > 0)) && [[ -n ${CROSS_COMMAND[0]} ]]
+}
+
+cross_count_tests() {
+  awk '
+    /^All [0-9]+ tests passed\.$/ { sum += $2; summaries++; next }
+    /^[0-9]+\/[0-9]+ .*\.\.\./ {
+      split($1, p, "/"); if (p[1] == 1) progress += 0;
+      if (p[1] > reached) reached = p[1]; seen = 1
+    }
+    END { if (summaries) print sum; else if (seen) print reached; else exit 1 }
+  ' "$1"
+}
+
+zig_env_path() {
+  local key=$1 information=$2 line raw
+  local pattern="^[[:space:]]*(\\.$key[[:space:]]*=|\\\"$key\\\"[[:space:]]*:)[[:space:]]*\\\"(.*)\\\",?[[:space:]]*$"
+  while IFS= read -r line; do
+    if [[ $line =~ $pattern ]]; then
+      raw=${BASH_REMATCH[2]}
+      printf '%b' "${raw//\\\"/\"}"
+      return
+    fi
+  done <<< "$information"
+  return 1
+}
+
+resolve_zig() {
+  ZIG_COMMAND=("${ZIG:-zig}")
+  command -v "${ZIG_COMMAND[0]}" >/dev/null 2>&1 || die 'Zig not found; set ZIG to a compiler executable'
+  local version installed candidate directory information compiler
+  version=$("${ZIG_COMMAND[@]}" version 2>/dev/null) || version=
+  if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.+-]+)?$ ]]; then
+    # Use an installed real compiler when anyzig has no project version pin.
+    installed=$("${ZIG_COMMAND[@]}" any list-installed 2>/dev/null) || installed=
+    while IFS=$'\t' read -r candidate directory; do
+      if [[ $candidate == 0.16.0 && -x $directory/zig ]]; then
+        ZIG_COMMAND=("$directory/zig")
+        version=$("${ZIG_COMMAND[@]}" version 2>/dev/null) || version=
+        break
+      fi
+    done <<< "$installed"
+  fi
+  [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.+-]+)?$ ]] || die 'cannot determine the Zig version'
+  information=$("${ZIG_COMMAND[@]}" env) || die 'cannot read the Zig environment'
+  compiler=$(zig_env_path zig_exe "$information") || die 'cannot locate the real Zig compiler'
+  CROSS_ZIG_LIB_DIR=$(zig_env_path lib_dir "$information") || die 'cannot locate the Zig library'
+  [[ -x $compiler && -d $CROSS_ZIG_LIB_DIR ]] || die 'invalid Zig compiler or library path'
+  ZIG_COMMAND=("$compiler")
+  CROSS_ZIG_VERSION=$version
+}
+
+prepare_build_runner() {
+  CROSS_BUILD_RUNNER="$CROSS_CACHE_DIR/build_runner.zig"
+  cp -- "$LIB_DIR/run_policy.zig" "$CROSS_CACHE_DIR/run_policy.zig" || die 'cannot stage runner policy'
+  # Patch only the configuration seam in the selected compiler's own runner.
+  awk '
+    /^[[:space:]]*try builder.runBuild\(root\);[[:space:]]*$/ {
+      print; print "        try @import(\"run_policy.zig\").configure(builder);"; hooks++; next
+    }
+    { print }
+    END { if (hooks != 1) exit 1 }
+  ' "$CROSS_ZIG_LIB_DIR/compiler/build_runner.zig" > "$CROSS_BUILD_RUNNER" ||
+    die 'unsupported Zig build-runner configuration seam'
+}
+
+resolve_runner() {
+  local target=$1 runner=${RUNNER_BY_TARGET[$1]}
+  CROSS_RUNNER=()
+  case $runner in
+    auto) cross_detect_runner "$target" ;;
+    skip) CROSS_RUNNER_KIND=unavailable; CROSS_RUNNER_REASON=runner_policy_skip ;;
+    native)
+      cross_detect_runner "$target" || return
+      [[ $CROSS_RUNNER_KIND == native ]] || {
+        CROSS_RUNNER_KIND=unavailable; CROSS_RUNNER=(); CROSS_RUNNER_REASON=native_host_mismatch;
+      }
+      ;;
+    *)
+      local path
+      path=$(command -v "$runner" 2>/dev/null) || path=
+      if [[ -f $path && -x $path ]]; then
+        CROSS_RUNNER_KIND=exec; CROSS_RUNNER=("$path"); CROSS_RUNNER_REASON=profile_runner
+      else
+        CROSS_RUNNER_KIND=unavailable; CROSS_RUNNER_REASON=runner_unavailable
+      fi
+      ;;
+  esac
+}
+
+json_string() {
+  local value=$1 code escaped i
+  value=${value//\\/\\\\}; value=${value//\"/\\\"}
+  for ((i=1; i<32; i++)); do
+    printf -v code '%b' "\\$(printf '%03o' "$i")"
+    printf -v escaped '\\u%04x' "$i"
+    value=${value//"$code"/"$escaped"}
+  done
+  printf '"%s"' "$value"
+}
+json_number() { if [[ -n $1 ]]; then printf '%s' "$1"; else printf null; fi; }
+
+publish_summary() {
+  local overall=$1 code=$2 tmp="$RUN_DIR/.summary.$$" target first=1 document
+  document=$({
+    printf '{"schema":2,"run_id":'; json_string "$CROSS_RUN_ID"
+    printf ',"generated_at":'; json_string "$GENERATED_AT"
+    printf ',"profile":'; json_string "$PROFILE_PATH"
+    printf ',"mode":'; json_string "$MODE"
+    printf ',"zig_version":'; json_string "$CROSS_ZIG_VERSION"
+    printf ',"matrix_source":'; json_string "$CROSS_MATRIX_SOURCE"
+    printf ',"target_jobs":%s,"jobs_per_build":%s,"build_timeout_seconds":%s,"run_timeout_seconds":%s' \
+      "$CROSS_JOBS" "$CROSS_BUILD_JOBS" "$CROSS_BUILD_TIMEOUT" "$CROSS_TIMEOUT"
+    printf ',"target_count":%d,"bookkeeping_failure":%s,"targets":[' "${#TARGETS[@]}" "$BOOKKEEPING_FAILURE"
+    for target in "${TARGETS[@]}"; do
+      ((first)) || printf ','; first=0
+      printf '{"target":'; json_string "$target"
+      printf ',"build":{"status":'; json_string "${BUILD_STATUS[$target]}"
+      printf ',"exit":'; json_number "${BUILD_EXIT[$target]}"
+      printf ',"log":'; json_string "$RUN_DIR/build-$target.log"
+      printf '},"run":{"status":'; json_string "${RUN_STATUS[$target]}"
+      printf ',"exit":'; json_number "${RUN_EXIT[$target]}"
+      printf ',"tests":'; json_number "${RUN_TESTS[$target]}"
+      printf ',"log":'; json_string "$RUN_DIR/${RUN_LOG_PHASE[$target]}-$target.log"
+      printf '},"reason":'; json_string "${REASON[$target]}"
+      printf ',"status":'; json_string "${FINAL_STATUS[$target]}"
+      printf ',"command_exit":'; json_number "${COMMAND_EXIT[$target]}"
+      printf '}'
+    done
+    printf '],"counts":{"pass":%d,"fail":%d,"build_only":%d,"partial":%d},"status":' \
+      "$PASS_COUNT" "$FAIL_COUNT" "$BUILD_ONLY_COUNT" "$PARTIAL_COUNT"
+    json_string "$overall"; printf ',"exit_code":'; json_number "$code"; printf '}\n'
+  }) || return 1
+  printf '%s\n' "$document" > "$tmp" || return 1
+  mv -f -- "$tmp" "$RUN_DIR/summary.json" || return 1
+  cp -- "$RUN_DIR/summary.json" "$CROSS_PREFIX/.summary.$$" || return 1
+  mv -f -- "$CROSS_PREFIX/.summary.$$" "$CROSS_PREFIX/cross-test-summary.json"
+}
+
+write_result() {
+  local target=$1; shift
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$@" > "$STATE_DIR/$PHASE-$target.tmp" &&
+    mv -- "$STATE_DIR/$PHASE-$target.tmp" "$STATE_DIR/$PHASE-$target.status"
+}
+worker_fail() {
+  local target=$1 reason=$2 rc=${3:-125}
+  if [[ $PHASE == run ]]; then
+    write_result "$target" pass 0 fail "$rc" - "$reason" "$rc" || return 125
+  else
+    write_result "$target" fail "$rc" not_run - - "$reason" "$rc" || return 125
+  fi
+  return "$rc"
+}
+print_command() { printf 'command='; printf '%q ' "$@"; printf '\n'; }
+
+artifact_path() {
+  local raw canonical
+  raw=$(cross_artifact "$1") || return 1
+  [[ -n $raw && $raw != *$'\n'* && $raw != *$'\r'* ]] || return 1
+  [[ ! -L $raw ]] || return 1
+  canonical=$(realpath -m -- "$raw") || return 1
+  [[ $canonical == "$CROSS_PREFIX/"* && $canonical != "$CROSS_PREFIX" ]] || return 1
+  CROSS_ARTIFACT=$canonical
+}
+
+parse_build_summary() {
+  awk '
+    /^Build Summary: / {
+      have = 1; steps = $0; sub(/;.*/, "", steps)
+      if (match(steps, /[0-9]+ failed/)) { failed = substr(steps, RSTART, RLENGTH) + 0 }
+      if (match($0, /[0-9]+\/[0-9]+ tests passed/)) {
+        s = substr($0, RSTART, RLENGTH); split(s, p, "/"); total = p[2] + 0
+        tail = substr($0, index($0, ";") + 1)
+        if (match(tail, /[0-9]+ skipped/)) skipped_tests = substr(tail, RSTART, RLENGTH) + 0
+      }
+    }
+    /(compile (test|exe)|zig (test|build-exe)).*(success|cached)/ { compiled++ }
+    /(compile (test|exe)|zig (test|build-exe)).*( [0-9]+ errors| failure)/ { compile_failed++ }
+    /run exe .* success([[:space:]]|$)/ { executed++ }
+    /run exe .* failure([[:space:]]|$)/ { execution_failed++ }
+    /run .* skipped$/ { skipped_runs++ }
+    /^error: (the host system .*unable to execute binaries from the target|unable to spawn foreign binary)/ { foreign++ }
+    /^error: unable to spawn interpreter .*: FileNotFound$/ { foreign++ }
+    END { printf "%d %d %d %d %d %d %d %d %d\n", have, total-skipped_tests, compiled, compile_failed, foreign, failed, skipped_runs, executed, execution_failed }
+  ' "$1"
+}
+
+check_zig_project() {
+  local target=$1 log=$2 rc flags=() have tests compiled compile_failed foreign failed skipped executed execution_failed
+  local test_count=-
+  resolve_runner "$target" || { worker_fail "$target" runner_detection_failed; return $?; }
+  export CROSS_TEST_TARGET="$target" CROSS_TEST_RUNNER_KIND="$CROSS_RUNNER_KIND"
+  export CROSS_TEST_RUNNER="${CROSS_RUNNER[0]:-}" CROSS_TEST_RUNNER_REASON="$CROSS_RUNNER_REASON"
+  [[ -z ${CROSS_LIBC_RUNTIMES:-} ]] || flags+=(--libc-runtimes "$CROSS_LIBC_RUNTIMES")
+  CROSS_COMMAND=("${ZIG_COMMAND[@]}" build "$CROSS_BUILD_STEP" "-Dtarget=$target" "-j$CROSS_BUILD_JOBS"
+    --prefix "$CROSS_PREFIX" --cache-dir "$CROSS_CACHE_DIR" --build-runner "$CROSS_BUILD_RUNNER"
+    --summary all --color off)
+  [[ $CROSS_ZIG_VERSION != 0.16.0 ]] || CROSS_COMMAND+=(--test-timeout "${CROSS_TIMEOUT}s")
+  CROSS_COMMAND+=("${flags[@]}" "${CROSS_BUILD_ARGS[@]}")
+  print_command "${CROSS_COMMAND[@]}"
+  if "${CROSS_COMMAND[@]}"; then rc=0; else rc=$?; fi
+  read -r have tests compiled compile_failed foreign failed skipped executed execution_failed < <(parse_build_summary "$log")
+  ((tests == 0)) || test_count=$tests
+  if ((rc == 0 && have && (tests > 0 || executed > 0))); then
+    if ((skipped > 0)); then
+      write_result "$target" pass 0 partial 0 "$test_count" partial_execution 0 || return 125
+    else
+      write_result "$target" pass 0 pass 0 "$test_count" tests_complete 0 || return 125
+    fi
+    return 0
+  fi
+  if ((have && compiled > 0 && compile_failed == 0 && tests == 0 && executed == 0)) &&
+    { ((rc == 0 && skipped > 0)) || ((rc != 0 && foreign > 0 && foreign == failed)); }; then
+    write_result "$target" pass 0 unavailable "$rc" - runtime_unavailable "$rc" || return 125
+    return "$rc"
+  fi
+  if ((rc != 0 && have && compiled > 0 && compile_failed == 0 &&
+        (tests > 0 || executed > 0 || execution_failed > 0))); then
+    write_result "$target" pass 0 fail "$rc" "$test_count" tests_failed "$rc" || return 125
+    return "$rc"
+  fi
+  ((rc != 0)) || rc=1
+  if ((have && compiled > 0 && compile_failed == 0)); then
+    write_result "$target" pass 0 fail "$rc" - no_test_results "$rc" || return 125
+    return "$rc"
+  fi
+  worker_fail "$target" build_failed "$rc"
+}
+
+worker() {
+  local target=$1 log=$2 rc tests
+  if [[ $MODE == zig-build ]]; then check_zig_project "$target" "$log"; return $?; fi
+  if [[ $PHASE == build ]]; then
+    CROSS_COMMAND=()
+    if ! cross_build_command "$target" || ! validate_command; then
+      worker_fail "$target" build_hook_failed; return $?
+    fi
+    if ! artifact_path "$target"; then worker_fail "$target" unsafe_artifact_path; return $?; fi
+    print_command "${CROSS_COMMAND[@]}"
+    printf 'artifact=%s\n' "$CROSS_ARTIFACT"
+    # Refuse symlinks and paths outside the prefix before removing a stale binary.
+    [[ ! -L $CROSS_ARTIFACT ]] || { worker_fail "$target" artifact_is_symlink; return $?; }
+    rm -f -- "$CROSS_ARTIFACT" || { worker_fail "$target" artifact_remove_failed; return $?; }
+    if "${CROSS_COMMAND[@]}"; then rc=0; else rc=$?; fi
+    if ((rc != 0)); then worker_fail "$target" compiler_failed "$rc"; return $?; fi
+    [[ -f $CROSS_ARTIFACT && ! -L $CROSS_ARTIFACT ]] || { worker_fail "$target" missing_binary 1; return $?; }
+    write_result "$target" pass 0 pending - - compiled 0 || return 125
+    return 0
+  fi
+  if ! artifact_path "$target" || [[ ! -f $CROSS_ARTIFACT || -L $CROSS_ARTIFACT ]]; then
+    worker_fail "$target" build_artifact_missing; return $?
+  fi
+  if [[ ${RUNNER_BY_TARGET[$target]} == skip ]]; then
+    write_result "$target" pass 0 unavailable - - runner_policy_skip 0 || return 125
+    return 0
+  fi
+  CROSS_COMMAND=()
+  if declare -F cross_run_command >/dev/null; then
+    if ! cross_run_command "$target" "$CROSS_ARTIFACT" || ! validate_command; then
+      worker_fail "$target" run_hook_failed; return $?
+    fi
+  else
+    resolve_runner "$target" || { worker_fail "$target" runner_detection_failed; return $?; }
+    if [[ $CROSS_RUNNER_KIND == unavailable ]]; then
+      write_result "$target" pass 0 unavailable - - "$CROSS_RUNNER_REASON" 0 || return 125
+      return 0
+    fi
+    if [[ $CROSS_RUNNER_KIND == native && ! -x $CROSS_ARTIFACT ]]; then
+      worker_fail "$target" binary_not_executable 126; return $?
+    fi
+    CROSS_COMMAND=("${CROSS_RUNNER[@]}" "$CROSS_ARTIFACT")
+    case $CROSS_RUNNER_REASON in
+      wine|wine64|wine_wow64)
+        CROSS_COMMAND=(env "WINEDEBUG=${WINEDEBUG:--all}" "${CROSS_COMMAND[@]}")
+        ;;
+    esac
+  fi
+  print_command "${CROSS_COMMAND[@]}"
+  if "${CROSS_COMMAND[@]}"; then rc=0; else rc=$?; fi
+  if tests=$(cross_count_tests "$log") && [[ $tests =~ ^(0|[1-9][0-9]{0,8})$ ]]; then :; else
+    if ((rc == 0)); then worker_fail "$target" test_count_failed 1; return $?; fi
+    tests=-
+  fi
+  if ((rc != 0)); then
+    write_result "$target" pass 0 fail "$rc" "$tests" runner_failed "$rc" || return 125
+    return "$rc"
+  fi
+  if [[ $tests == 0 ]]; then worker_fail "$target" no_tests_executed 1; return $?; fi
+  write_result "$target" pass 0 pass 0 "$tests" tests_complete 0 || return 125
+}
+
+worker_main() {
+  local config=$1 phase=$2 target=$3 log=$4
+  exec >> "$log" 2>&1
+  source "$config" || return 125
+  if [[ -n $PROFILE_PATH ]]; then
+    source "$PROFILE_PATH" || return 125
+    source "$config" || return 125
+  fi
+  PHASE=$phase
+  ulimit -c 0 || return 125
+  worker "$target" "$log"
+}
+
+recount() {
+  local target
+  PASS_COUNT=0 FAIL_COUNT=0 BUILD_ONLY_COUNT=0 PARTIAL_COUNT=0
+  for target in "${TARGETS[@]}"; do
+    if [[ ${BUILD_STATUS[$target]} == pass ]]; then
+      case ${RUN_STATUS[$target]} in
+        pass) FINAL_STATUS[$target]=pass; ((PASS_COUNT+=1)) ;;
+        unavailable|skip) FINAL_STATUS[$target]=build_only; ((BUILD_ONLY_COUNT+=1)) ;;
+        partial) FINAL_STATUS[$target]=partial; ((PARTIAL_COUNT+=1)) ;;
+        pending) FINAL_STATUS[$target]=pending ;;
+        *) FINAL_STATUS[$target]=fail; ((FAIL_COUNT+=1)) ;;
+      esac
+    elif [[ ${BUILD_STATUS[$target]} == pending ]]; then FINAL_STATUS[$target]=pending
+    else FINAL_STATUS[$target]=fail; ((FAIL_COUNT+=1)); fi
+  done
+}
+
+stop_workers() {
+  local pid
+  for pid in "${PIDS[@]}"; do kill -TERM -- "-$pid" 2>/dev/null || :; done
+  if ((${#PIDS[@]})); then sleep 0.2; fi
+  for pid in "${PIDS[@]}"; do kill -KILL -- "-$pid" 2>/dev/null || :; wait "$pid" 2>/dev/null || :; done
+  PIDS=(); PID_TARGETS=()
+}
+cleanup() {
+  local rc=$?
+  trap - EXIT INT TERM HUP
+  stop_workers
+  if [[ ${SUMMARY_STARTED:-0} == 1 && ${SUMMARY_FINISHED:-0} != 1 ]]; then
+    local target
+    for target in "${TARGETS[@]}"; do
+      [[ ${FINAL_STATUS[$target]} != pending ]] || {
+        if [[ ${BUILD_STATUS[$target]} == pending ]]; then BUILD_STATUS[$target]=interrupted; fi
+        RUN_STATUS[$target]=interrupted; REASON[$target]=interrupted;
+      }
+    done
+    recount
+    publish_summary interrupted "$rc" || printf 'cross-test: interrupted summary write failed\n' >&2
+  fi
+  [[ -z ${CACHE_DIR:-} ]] || rm -rf -- "$CACHE_DIR"
+  [[ -z ${STATE_DIR:-} ]] || rm -rf -- "$STATE_DIR"
+}
+interrupted() { exit "$1"; }
+
+collect_batch() {
+  local phase=$1 i pid target waited b be r re tests reason recorded extra state
+  for i in "${!PIDS[@]}"; do
+    pid=${PIDS[$i]}; target=${PID_TARGETS[$i]}
+    if wait "$pid"; then waited=0; else waited=$?; fi
+    state="$STATE_DIR/$phase-$target.status"
+    if grep -q '^timeout: sending signal ' "$STATE_DIR/$phase-$target.timeout"; then
+      if [[ $phase == run ]]; then b=pass; be=0; r=timeout; re=$waited; else b=timeout; be=$waited; r=not_run; re=-; fi
+      tests=-; reason=per_${phase}_timeout
+    else
+      b= be= r= re= tests= reason= recorded= extra=
+      if [[ -r $state ]] && IFS=$'\t' read -r b be r re tests reason recorded extra < "$state" &&
+        [[ -z $extra && $recorded =~ ^[0-9]+$ && $recorded == "$waited" &&
+           $b =~ ^(pass|fail)$ && $r =~ ^(pending|not_run|pass|fail|unavailable|partial)$ &&
+           $be =~ ^[0-9]+$ && $re =~ ^(-|[0-9]+)$ && $tests =~ ^(-|0|[1-9][0-9]{0,8})$ &&
+           $reason =~ ^[a-z0-9_]+$ ]]; then :; else
+        b=fail; be=$waited; r=not_run; re=-; tests=-; reason=missing_status_record; BOOKKEEPING_FAILURE=true
+      fi
+    fi
+    BUILD_STATUS[$target]=$b; BUILD_EXIT[$target]=$be; RUN_STATUS[$target]=$r
+    if [[ $re == - ]]; then RUN_EXIT[$target]=; else RUN_EXIT[$target]=$re; fi
+    if [[ $tests == - ]]; then RUN_TESTS[$target]=; else RUN_TESTS[$target]=$tests; fi
+    REASON[$target]=$reason; COMMAND_EXIT[$target]=$waited
+    RUN_LOG_PHASE[$target]=$phase
+    printf 'cross-test: target=%s build=%s run=%s tests=%s reason=%s\n' "$target" "$b" "$r" "${RUN_TESTS[$target]:--}" "$reason"
+  done
+  PIDS=(); PID_TARGETS=()
+  recount
+  publish_summary running '' || die 'cannot publish progress summary'
+}
+
+launch() {
+  local phase=$1 target=$2 seconds=$CROSS_BUILD_TIMEOUT log="$RUN_DIR/$1-$2.log"
+  [[ $phase != run ]] || seconds=$CROSS_TIMEOUT
+  printf 'run_id=%s target=%s phase=%s\n' "$CROSS_RUN_ID" "$target" "$phase" > "$log" || die "cannot create $log"
+  (
+    exec {LOCK_FD}>&-
+    exec setsid timeout --verbose --kill-after=5s "${seconds}s" "$SELF" --internal-worker "$STATE_DIR/config.sh" "$phase" "$target" "$log"
+  ) 2> "$STATE_DIR/$phase-$target.timeout" &
+  PIDS+=("$!"); PID_TARGETS+=("$target")
+  ((${#PIDS[@]} < CROSS_JOBS)) || collect_batch "$phase"
+}
+
+if [[ ${1:-} == --internal-worker ]]; then
+  [[ $# == 5 ]] || exit 125
+  worker_main "$2" "$3" "$4" "$5"
+  exit $?
+fi
+
+((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4))) || die 'Bash 4.4 or newer is required'
+PROFILE_PATH=${CROSS_PROFILE:-}
+NO_PROFILE=0 LIST_ONLY=0
+CLI_TARGETS= CLI_JOBS= CLI_BUILD_JOBS= CLI_TIMEOUT= CLI_BUILD_TIMEOUT= CLI_PREFIX= CLI_STEP=
+CLI_REQUIRE=
+CLI_BUILD_ARGS=()
+while (($#)); do
+  case $1 in
+    -h|--help) help; exit 0 ;;
+    --no-profile) NO_PROFILE=1; shift ;;
+    --list) LIST_ONLY=1; shift ;;
+    --require-runners) CLI_REQUIRE=1; shift ;;
+    --profile|--targets|--jobs|--build-jobs|--timeout|--build-timeout|--output|--step)
+      (($# >= 2)) && [[ -n $2 ]] || die "missing value for $1"
+      case $1 in
+        --profile) PROFILE_PATH=$2 ;;
+        --targets) CLI_TARGETS=$2 ;;
+        --jobs) CLI_JOBS=$2 ;;
+        --build-jobs) CLI_BUILD_JOBS=$2 ;;
+        --timeout) CLI_TIMEOUT=$2 ;;
+        --build-timeout) CLI_BUILD_TIMEOUT=$2 ;;
+        --output) CLI_PREFIX=$2 ;;
+        --step) CLI_STEP=$2 ;;
+      esac
+      shift 2 ;;
+    --) shift; CLI_BUILD_ARGS=("$@"); break ;;
+    *) die "unknown argument: $1 (see --help)" ;;
+  esac
+done
+if ((NO_PROFILE)); then
+  [[ -z $PROFILE_PATH ]] || die '--no-profile conflicts with --profile or CROSS_PROFILE'
+else
+  if [[ -z $PROFILE_PATH ]]; then
+    if [[ -f ./cross-test.profile.sh ]]; then PROFILE_PATH=./cross-test.profile.sh
+    elif [[ -f ./test/cross-test.profile.sh ]]; then PROFILE_PATH=./test/cross-test.profile.sh; fi
+  fi
+fi
+if [[ -n $PROFILE_PATH ]]; then
+  PROFILE_PATH=$(realpath -e -- "$PROFILE_PATH") || die 'profile does not exist'
+  [[ -f $PROFILE_PATH ]] || die 'profile must be a regular file'
+  source "$PROFILE_PATH" || die "cannot load profile: $PROFILE_PATH"
+fi
+CROSS_JOBS=${CLI_JOBS:-${CROSS_JOBS:-${MAX_JOBS:-2}}}
+CROSS_BUILD_JOBS=${CLI_BUILD_JOBS:-${CROSS_BUILD_JOBS:-${ZIG_JOBS:-1}}}
+CROSS_TIMEOUT=${CLI_TIMEOUT:-${CROSS_TIMEOUT:-${RUN_TIMEOUT:-300}}}
+CROSS_BUILD_TIMEOUT=${CLI_BUILD_TIMEOUT:-${CROSS_BUILD_TIMEOUT:-900}}
+CROSS_PREFIX=${CLI_PREFIX:-${CROSS_PREFIX:-./zig-out/cross-test}}
+CROSS_BUILD_STEP=${CLI_STEP:-${CROSS_BUILD_STEP:-test}}
+CROSS_REQUIRE_RUNNERS=${CLI_REQUIRE:-${CROSS_REQUIRE_RUNNERS:-0}}
+[[ $CROSS_REQUIRE_RUNNERS == 0 || $CROSS_REQUIRE_RUNNERS == 1 ]] || die 'CROSS_REQUIRE_RUNNERS must be 0 or 1'
+if declare -p CROSS_BUILD_ARGS >/dev/null 2>&1; then
+  indexed_array CROSS_BUILD_ARGS || die 'CROSS_BUILD_ARGS must be an indexed array'
+else CROSS_BUILD_ARGS=(); fi
+CROSS_BUILD_ARGS+=("${CLI_BUILD_ARGS[@]}")
+CROSS_ZIG_VERSION= CROSS_MATRIX_SOURCE=${CROSS_MATRIX_SOURCE:-profile}
+# Explicit artifact matrices can use non-Zig hooks without probing a compiler.
+ZIG_COMMAND=("${ZIG:-zig}")
+CROSS_HOST_ARCH=$(uname -m); CROSS_HOST_OS=$(uname -s)
+MODE=zig-build
+if declare -F cross_build_command >/dev/null || declare -F cross_artifact >/dev/null; then
+  declare -F cross_build_command >/dev/null && declare -F cross_artifact >/dev/null || die 'custom artifacts require both cross_build_command and cross_artifact'
+  MODE=artifact
+fi
+MATRIX_OVERRIDE=0
+if declare -p CROSS_MATRIX >/dev/null 2>&1; then MATRIX_OVERRIDE=1; fi
+if [[ $MODE == zig-build ]] || ((MATRIX_OVERRIDE == 0)); then resolve_zig; fi
+if ((MATRIX_OVERRIDE == 0)); then
+  cross_default_matrix "$CROSS_ZIG_VERSION" || die 'no verified tier table for this Zig version; set CROSS_MATRIX in a profile'
+fi
+indexed_array CROSS_MATRIX || die 'CROSS_MATRIX must be an indexed Bash array'
+((${#CROSS_MATRIX[@]})) || die 'CROSS_MATRIX must not be empty'
+integer CROSS_JOBS "$CROSS_JOBS"; integer CROSS_BUILD_JOBS "$CROSS_BUILD_JOBS"
+integer CROSS_TIMEOUT "$CROSS_TIMEOUT"; integer CROSS_BUILD_TIMEOUT "$CROSS_BUILD_TIMEOUT"
+[[ $CROSS_BUILD_STEP =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die 'unsafe build step name'
+for arg in "${CROSS_BUILD_ARGS[@]}"; do
+  case $arg in
+    --summary*|--color*|--cache-dir*|--prefix*|-p|-Dtarget*|-j*|--test-timeout*|--build-file*|--build-runner*|--watch*|--fuzz*|--webui*) die "cross-test manages this option: $arg" ;;
+  esac
+done
+
+declare -a TARGET_ORDER=() TARGETS_SELECTED=()
+declare -A RUNNER_BY_TARGET=() SELECTED=()
+for row in "${CROSS_MATRIX[@]}"; do
+  [[ $row == *'|'* && ${row#*|} != *'|'* ]] || die "invalid matrix row: $row"
+  target=${row%%|*}; runner=${row#*|}
+  [[ $target =~ ^[a-z0-9_]+-[a-z0-9_.]+(-[a-z0-9_.]+)*$ && -n $runner ]] || die "invalid matrix row: $row"
+  [[ $MODE != zig-build || $runner == auto ]] || die 'custom runner policies require artifact hooks'
+  [[ -z ${RUNNER_BY_TARGET[$target]+yes} ]] || die "duplicate matrix target: $target"
+  TARGET_ORDER+=("$target"); RUNNER_BY_TARGET[$target]=$runner
+done
+if [[ -n $CLI_TARGETS ]] || declare -p TARGETS >/dev/null 2>&1; then
+  if [[ -n $CLI_TARGETS ]]; then selection=$CLI_TARGETS
+  elif indexed_array TARGETS; then selection=$(printf '%s\n' "${TARGETS[@]}")
+  elif [[ $(declare -p TARGETS 2>/dev/null) == 'declare -A '* ]]; then die 'TARGETS must not be associative'
+  else selection=${TARGETS:-}; fi
+  selection=${selection//,/ }; selection=${selection//$'\n'/ }; selection=${selection//$'\r'/ }
+  read -r -a TARGETS_SELECTED <<< "$selection"
+  ((${#TARGETS_SELECTED[@]})) || die 'TARGETS must name at least one target'
+  for target in "${TARGETS_SELECTED[@]}"; do
+    [[ -n ${RUNNER_BY_TARGET[$target]+yes} ]] || die "unknown target: $target"
+    [[ -z ${SELECTED[$target]+yes} ]] || die "duplicate target: $target"
+    SELECTED[$target]=1
+  done
+  TARGETS=()
+  for target in "${TARGET_ORDER[@]}"; do [[ -z ${SELECTED[$target]+yes} ]] || TARGETS+=("$target"); done
+else TARGETS=("${TARGET_ORDER[@]}"); fi
+if ((LIST_ONLY)); then
+  printf 'cross-test: zig=%s mode=%s targets=%d matrix=%s\n' "${CROSS_ZIG_VERSION:-profile}" "$MODE" "${#TARGETS[@]}" "$CROSS_MATRIX_SOURCE"
+  for target in "${TARGETS[@]}"; do
+    resolve_runner "$target" || die "cannot resolve $target"
+    printf '%-27s %-12s %-28s' "$target" "$CROSS_RUNNER_KIND" "$CROSS_RUNNER_REASON"
+    printf ' %q' "${CROSS_RUNNER[@]}"; printf '\n'
+  done
+  exit 0
+fi
+[[ $MODE != zig-build || -f build.zig ]] || die 'run from a project root containing build.zig, or provide artifact hooks'
+for tool in timeout setsid flock awk grep realpath mktemp date cp mv stat df hostname uname tr dirname; do command -v "$tool" >/dev/null 2>&1 || die "$tool is required"; done
+command -v mountpoint >/dev/null 2>&1 || quality_scratch_managed ||
+  die 'mountpoint is required on a managed cluster host'
+ulimit -c 0 || die 'cannot disable core dumps'
+umask 077
+CROSS_PREFIX=$(realpath -m -- "$CROSS_PREFIX") || die 'cannot resolve output directory'
+# Where a run's logs, artifacts and lock file may live. The rule is the
+# contract's, not one hostname literal: on a managed cluster host the output
+# prefix must be on the sanctioned physical volume, symlinks resolved first, and
+# the small system temp volumes are refused with the reason named; on any other
+# host the same NFS refusal applies and a /tmp prefix is ordinary, because a CI
+# runner has nowhere else to put a run. Validation happens BEFORE anything is
+# created, so a refusal leaves no directory, no lock file and no run id behind.
+quality_scratch_path_ok "$CROSS_PREFIX" ||
+  die "output $CROSS_PREFIX cannot host a run: $QUALITY_SCRATCH_WHY"
+if quality_scratch_managed; then
+  for system_temp_root in $QUALITY_SYSTEM_TEMP_ROOTS; do
+    case "$CROSS_PREFIX" in
+      "$system_temp_root" | "$system_temp_root"/*)
+        die "output resolves to system temp storage: $CROSS_PREFIX; use ${HOST_SCRATCH_ROOT:-/home/tmp{,2}/${USER:-$(id -un)}}/cross-out"
+        ;;
+    esac
+  done
+fi
+# Then judged as a DIRECTORY, which is the check a location check cannot make
+# about a path that does not exist yet: real, writable, and this user's on a
+# managed host -- exactly what the state base below already goes through, and
+# for the same reason. Both orders are covered, because a prefix can already be
+# there: an existing directory is judged before a lock file or run directory is
+# written into it, a new one is judged the moment it exists. A prefix in
+# another user's tree, or one that is not writable, now fails with the
+# contract's explanation instead of a bare mkdir error.
+quality_scratch_make "$CROSS_PREFIX" ||
+  die "output $CROSS_PREFIX cannot host a run: $QUALITY_SCRATCH_WHY"
+mkdir -p -- "$CROSS_PREFIX/runs" || die 'cannot create the run index directory'
+exec {LOCK_FD}> "$CROSS_PREFIX/.cross-test.lock" || die 'cannot open output lock'
+flock -n "$LOCK_FD" || die 'another cross-test invocation owns this output directory'
+CROSS_RUN_ID=${CROSS_RUN_ID:-"$(date -u +%Y%m%d-%H%M%S)-$$-$RANDOM"}
+[[ $CROSS_RUN_ID =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die 'CROSS_RUN_ID contains unsafe path characters'
+RUN_DIR="$CROSS_PREFIX/runs/$CROSS_RUN_ID"
+mkdir -- "$RUN_DIR" || die 'run id already exists; choose a new CROSS_RUN_ID'
+# State lives under a verified scratch directory, chosen the same way the gate
+# chooses one: TMPDIR when the operator set it and it verifies, otherwise the
+# per-user directory under the approved volumes on a managed host, otherwise /tmp.
+# The old behaviour was to require TMPDIR and exit 2 when it was unset, which is
+# right on a cluster host and wrong everywhere else: cross-test REFUSES to start
+# without a state base, so an unset TMPDIR turned into a hard failure on any
+# runner that had not been told to export one.
+if [[ -n ${TMPDIR:-} ]]; then
+  quality_scratch_make "$TMPDIR" ||
+    die "TMPDIR=$TMPDIR cannot host cross-test state: $QUALITY_SCRATCH_WHY"
+  TMP_BASE=$TMPDIR
+elif quality_scratch_managed; then
+  TMP_BASE=$(quality_scratch_pick "${HOST_SCRATCH_ROOT:+$HOST_SCRATCH_ROOT/tmp}" \
+    "/home/tmp2/$(id -un)/tmp" "/home/tmp/$(id -un)/tmp") ||
+    die 'set TMPDIR to approved scratch storage'
+else
+  TMP_BASE=$(quality_scratch_pick /tmp) || die 'set TMPDIR to a writable local directory'
+fi
+TMP_BASE=$(realpath -m -- "$TMP_BASE") || die 'cannot resolve the temporary base'
+STATE_DIR=$(mktemp -d "$TMP_BASE/cross-test.XXXXXXXX") || die 'cannot create temporary state'
+CACHE_DIR=
+GENERATED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+declare -A BUILD_STATUS=() BUILD_EXIT=() RUN_STATUS=() RUN_EXIT=() RUN_TESTS=() REASON=() FINAL_STATUS=() COMMAND_EXIT=() RUN_LOG_PHASE=()
+declare -a PIDS=() PID_TARGETS=()
+BOOKKEEPING_FAILURE=false PASS_COUNT=0 FAIL_COUNT=0 BUILD_ONLY_COUNT=0 PARTIAL_COUNT=0
+SUMMARY_STARTED=0 SUMMARY_FINISHED=0
+trap cleanup EXIT
+trap 'interrupted 130' INT
+trap 'interrupted 143' TERM
+trap 'interrupted 129' HUP
+# One cold cache per invocation keeps test results fresh without duplicating build
+# runners. An INHERITED ZIG_GLOBAL_CACHE_DIR is held to the same contract as
+# TMPDIR and --output, and for the same reason: this directory hosts a Zig
+# cache, so a value that is relative, on NFS or on any other refused volume is a
+# storage refusal, not a slow path. It used to be created unvalidated, which
+# turned that refusal into a renameat2 error inside every `zig build` of the
+# run and left the directory behind on the volume the refusal was about. The
+# location is cleared before anything is created, so a refused value writes
+# nothing at all -- and it is never quietly replaced with a working directory
+# either, because a caller that named a cache needs to be told its cache moved.
+if [ -n "${ZIG_GLOBAL_CACHE_DIR:-}" ]; then
+  CACHE_BASE=$ZIG_GLOBAL_CACHE_DIR; CACHE_BASE_NAMED='ZIG_GLOBAL_CACHE_DIR'
+else
+  CACHE_BASE=$TMP_BASE; CACHE_BASE_NAMED='the state base'
+fi
+quality_scratch_make "$CACHE_BASE" ||
+  die "$CACHE_BASE_NAMED $CACHE_BASE cannot host the cross-test cache: $QUALITY_SCRATCH_WHY"
+CACHE_BASE=$(realpath -m -- "$CACHE_BASE") || die 'cannot resolve the cache base'
+CACHE_DIR=$(mktemp -d "$CACHE_BASE/cross-test-cache.XXXXXXXX") || die 'cannot create temporary cache'
+CROSS_CACHE_DIR=$CACHE_DIR
+CROSS_BUILD_RUNNER=
+[[ $MODE != zig-build ]] || prepare_build_runner
+for target in "${TARGETS[@]}"; do
+  BUILD_STATUS[$target]=pending; BUILD_EXIT[$target]=; RUN_STATUS[$target]=pending; RUN_EXIT[$target]=
+  RUN_TESTS[$target]=; REASON[$target]=pending; FINAL_STATUS[$target]=pending; COMMAND_EXIT[$target]=; RUN_LOG_PHASE[$target]=build
+done
+# Private snapshot restores CLI precedence after each worker sources the profile.
+declare -p PROFILE_PATH CROSS_PREFIX CROSS_JOBS CROSS_BUILD_JOBS CROSS_TIMEOUT CROSS_BUILD_TIMEOUT CROSS_BUILD_STEP \
+  CROSS_BUILD_ARGS CROSS_CACHE_DIR CROSS_BUILD_RUNNER CROSS_ZIG_VERSION CROSS_HOST_ARCH CROSS_HOST_OS \
+  RUN_DIR STATE_DIR MODE ZIG_COMMAND RUNNER_BY_TARGET \
+  > "$STATE_DIR/config.sh" || die 'cannot snapshot worker configuration'
+if [[ -n ${CROSS_LIBC_RUNTIMES:-} ]]; then declare -p CROSS_LIBC_RUNTIMES >> "$STATE_DIR/config.sh"; fi
+publish_summary running '' || die 'cannot publish current-run summary'
+SUMMARY_STARTED=1
+printf 'cross-test: run_id=%s mode=%s targets=%d target_jobs=%s jobs_per_build=%s output=%s\n' \
+  "$CROSS_RUN_ID" "$MODE" "${#TARGETS[@]}" "$CROSS_JOBS" "$CROSS_BUILD_JOBS" "$CROSS_PREFIX"
+for target in "${TARGETS[@]}"; do launch build "$target"; done
+((${#PIDS[@]} == 0)) || collect_batch build
+if [[ $MODE == artifact ]]; then
+  for target in "${TARGETS[@]}"; do
+    [[ ${BUILD_STATUS[$target]} == pass ]] || continue
+    launch run "$target"
+  done
+  ((${#PIDS[@]} == 0)) || collect_batch run
+fi
+recount
+status=pass code=0
+if [[ $BOOKKEEPING_FAILURE == true ]] || ((FAIL_COUNT > 0)); then status=fail; code=1
+elif ((CROSS_REQUIRE_RUNNERS && (BUILD_ONLY_COUNT > 0 || PARTIAL_COUNT > 0))); then status=incomplete; code=1
+elif ((BUILD_ONLY_COUNT > 0 || PARTIAL_COUNT > 0)); then
+  if ((PASS_COUNT == 0 && PARTIAL_COUNT == 0)); then status=build_only; else status=partial; fi
+fi
+publish_summary "$status" "$code" || die 'cannot publish final summary'
+SUMMARY_FINISHED=1
+printf 'cross-test: status=%s pass=%d fail=%d build_only=%d partial=%d summary=%s\n' \
+  "$status" "$PASS_COUNT" "$FAIL_COUNT" "$BUILD_ONLY_COUNT" "$PARTIAL_COUNT" "$CROSS_PREFIX/cross-test-summary.json"
+exit "$code"

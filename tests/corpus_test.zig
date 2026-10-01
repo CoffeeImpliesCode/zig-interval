@@ -9,10 +9,12 @@
 //!
 //! So the reference here is MPFR at 256 bits, called with a declared rounding
 //! direction, by `scripts/gen_corpus.c`, and committed as
-//! `tests/corpus/elementary.txt`. It is 450 rows over the twenty-one operations
-//! the in-tree oracle does not judge. The generator's reasoning, and the two
-//! ways an earlier version of it produced plausible rows that were not the
-//! image, are in that file's header.
+//! `tests/corpus/elementary.txt`. It is 1886 rows over 24 operation labels, of
+//! which 21 are operations the in-tree oracle does not judge — `sqrt`, `cbrt`
+//! and `tanh` are already members of `Op`, so those rows corroborate rather than
+//! extend the oracle's coverage. 427 of the rows are exactly representable. The
+//! generator's reasoning, and the two ways an earlier version of it produced
+//! plausible rows that were not the image, are in that file's header.
 //!
 //! **What is asserted, and what is not.** Containment, only: the library's
 //! answer must contain the certified bracket. Tightness is never asserted. A

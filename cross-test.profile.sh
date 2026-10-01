@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
 # cross-test profile for zig-interval.
 #
-# cross-test is ~/.local/bin/cross-test: OUTSIDE this repository - not
-# vendored, not a submodule, not on PATH by default, and nothing `jj status`
-# will show it. It discovers this file at ./cross-test.profile.sh and SOURCES
-# it, as trusted bash and not as data, both in its own process and in every
-# per-target phase worker. A profile in the tree therefore decides what a green
-# run COVERS, so read this file before quoting a cross-target table as the
-# project's coverage.
+# cross-test is the pinned, checksummed harness in tools/quality/harness/,
+# installed by scripts/install-quality-tools.sh into $QUALITY_TOOLS_PREFIX/bin.
+# CI installs it the same way in its `cross` job and runs it there; the installed
+# zig-gate runs it as section 9. A developer's own ~/.local/bin/cross-test is the
+# same reviewed source, and nothing in this file depends on which copy ran. It
+# discovers this file at ./cross-test.profile.sh and SOURCES it, as trusted bash
+# and not as data, both in its own process and in every per-target phase worker.
+# A profile in the tree therefore decides what a green run COVERS, so read this
+# file before quoting a cross-target table as the project's coverage.
 #
-# Nothing else is set here. The build step is cross-test's own `zig build test`,
-# its cache is its own, its concurrency is its default, and CROSS_MATRIX is
-# untouched - this file narrows which of the 53 published targets run, it does
-# not replace the table. Do not add `set -e`, traps, or a `cd` to this file:
-# cross-test runs `set -uo pipefail` without `-e` and forbids a profile from
-# changing shell options, traps, or the working directory.
+# What is set here, and only this: the execution budget, the concurrency, the
+# five targets, the rows that have to have EXECUTED, and the PATH guard at the
+# bottom. The build step is cross-test's own `zig build test`, its cache is its
+# own, and CROSS_MATRIX is untouched - this file narrows which of the 53
+# published targets run, it does not replace the table. Do not add `set -e`,
+# traps, or a `cd` to this file: cross-test runs `set -uo pipefail` without `-e`
+# and forbids a profile from changing shell options, traps, or the working
+# directory.
 #
 # ---------------------------------------------------------------------------
 # READ THIS BEFORE YOU BELIEVE A `status=fail`
@@ -36,7 +40,14 @@
 #      reported build_only/runtime_unavailable and never counted as a pass. A
 #      green default run says `partial`, not `pass`, and exit status is 0.
 #      `--require-runners` would turn that into a failure and is NOT usable
-#      here; judge the run by `fail=0` plus five target rows.
+#      here, because the Windows row legitimately has no runtime. The rows that
+#      DO have one are named in CROSS_REQUIRED_RUN_TARGETS below, which the
+#      installed zig-gate reads out of this file and enforces: each of the four
+#      must show build=pass, run=pass and an executed-test count above zero in
+#      that run's own summary.json, or section 9 is red. A green gate run
+#      therefore means four Linux test suites actually executed. A bare
+#      `cross-test` outside the gate says the same run as exit 0 and
+#      `partial`, which is honest but is the weaker claim.
 #
 # A `status=fail` that shows the timeout again means the 900 s budget was
 # overridden: `--timeout` on the command line beats this file.
@@ -44,10 +55,15 @@
 # ---------------------------------------------------------------------------
 # HOW TO RUN IT ON THIS CHECKOUT
 # ---------------------------------------------------------------------------
+#   export QUALITY_TOOLS_PREFIX=/home/tmp2/$USER/quality      # where you installed
 #   export PATH=/home/tmp2/$USER/zigbin:$PATH   # real 0.16.0; PATH `zig` is an anyzig shim
-#   ZIG=/home/tmp2/$USER/zigbin/zig cross-test --output /home/tmp2/$USER/cross-out
+#   ZIG=/home/tmp2/$USER/zigbin/zig \
+#     "$QUALITY_TOOLS_PREFIX/bin/cross-test" --output /home/tmp2/$USER/cross-out
 #
-# Both paths are on a large LOCAL volume, never /tmp. Rechnerbetriebsgruppe
+# CI's `cross` job sets the same three things (QUALITY_TOOLS_PREFIX, ZIG, an
+# absolute --output on the runner's local volume) and adds only its own run id.
+#
+# All three paths are on a large LOCAL volume, never /tmp. Rechnerbetriebsgruppe
 # (2026-10-01) asked that processes stop filling local /tmp and /var/tmp; on
 # buildhost /tmp is a 10 G local ext4 volume. `scripts/scratch.sh` resolves a
 # sanctioned location if you would rather not write it out - see the storage
@@ -56,10 +72,13 @@
 #
 # `--output` is not optional here: /nfs rejects `renameat2` with
 # EINVAL, so a Zig build cannot keep a cache on the network mount. cross-test
-# puts ITS cache under TMPDIR by itself; `--output` is what moves the rest of
-# the run - prefix, logs, cross-test-summary.json - onto local disk. Logs and
-# the summary land in `--output/cross-test-summary.json` and
-# `--output/runs/RUN_ID/build-TARGET.log`.
+# puts ITS cache under ZIG_GLOBAL_CACHE_DIR when that is set and under the state
+# base it picks from TMPDIR when it is not, and holds either to the same rule
+# before creating anything; `--output` is what moves the rest of the run onto
+# local disk - prefix, artifacts, logs, both summaries. A run leaves
+# `--output/runs/RUN_ID/{build,run}-TARGET.log` and the run-scoped
+# `--output/runs/RUN_ID/summary.json`, plus `--output/cross-test-summary.json`
+# as the atomically replaced pointer to the same document.
 #
 # cross-test also owns several options and refuses them outright
 # (`cross-test manages this option: --cache-dir`, and likewise --prefix,
@@ -87,14 +106,30 @@
 # 900 is measured, not chosen for looks: re-run with `--timeout 900` and those
 # same two targets report `run=pass tests=348 reason=tests_complete` and the
 # run reports `status=pass`. The value reaches Zig as `zig build --test-timeout
-# 900s` (cross-test:365), so it is the number the `timed out after 5m98.663ms`
+# 900s` (cross-test:419), so it is the number the `timed out after 5m98.663ms`
 # above is measured against; it is also the wall clock of the run phase for an
-# artifact-mode profile (cross-test:549).
+# artifact-mode profile (cross-test:603).
 #
 # CROSS_BUILD_TIMEOUT is deliberately NOT raised: its default of 900 seconds
 # already covers compile and run for every target here, and that deadline never
 # fired.
 CROSS_TIMEOUT=900
+
+# ---------------------------------------------------------------------------
+# CROSS_JOBS / CROSS_BUILD_JOBS - the concurrency this project claims.
+# ---------------------------------------------------------------------------
+# cross-test resolves them as CROSS_JOBS=${CLI_JOBS:-${CROSS_JOBS:-${MAX_JOBS:-2}}}
+# and CROSS_BUILD_JOBS=${CLI_BUILD_JOBS:-${CROSS_BUILD_JOBS:-${ZIG_JOBS:-1}}}: with
+# nothing set here, an ambient MAX_JOBS or ZIG_JOBS silently becomes this
+# project's concurrency. Both readers of the claim are worse than useless in
+# that state - CI's guard expands ${CROSS_JOBS:-2}, which is the default and so
+# passes vacuously, and its summary check compares target_jobs/jobs_per_build
+# with 2 and 1 only after up to two hours of emulated runs. Pinning them here
+# makes the claimed profile the effective one: two targets in flight, one build
+# job each, whatever the surrounding shell exports. A --jobs or --build-jobs on
+# the command line still wins, as CLI precedence says; change this file instead.
+CROSS_JOBS=2
+CROSS_BUILD_JOBS=1
 
 # ---------------------------------------------------------------------------
 # TARGETS - five of the 53, for an ordinary edit. The full table is one flag
@@ -114,10 +149,11 @@ CROSS_TIMEOUT=900
 #                   is the oracle's own: src/rounding.zig:164-199 steps f64
 #                   neighbours by u64 bit pattern and the NaN contract trap
 #                   reads bit patterns (tests/nan_probe.zig). A green run on
-#                   every other target is not evidence about s390x at all, and
-#                   nothing else in the repository runs a big-endian target -
-#                   CI's cross job is compile-only. Drop this row and the
-#                   project has no byte-order coverage whatsoever.
+#                   every other target is not evidence about s390x at all. CI's
+#                   cross job runs this same profile with qemu-user present and
+#                   asserts the runtime rows, so this row is the project's
+#                   byte-order coverage in CI as well as here. Drop this row and
+#                   the project has no byte-order coverage whatsoever.
 #                   (`aarch64_be-linux` is big-endian too and has a runner on
 #                   this host, but s390x-linux is the row this project has
 #                   actually run 348/348 on.)
@@ -136,6 +172,28 @@ TARGETS=(
     x86_64-windows
 )
 
+# ---------------------------------------------------------------------------
+# CROSS_REQUIRED_RUN_TARGETS - the rows that must have EXECUTED, not compiled.
+# ---------------------------------------------------------------------------
+# Exactly the four Linux rows above, and deliberately NOT x86_64-windows: on a
+# host with no wine that row is compile coverage, and naming it would turn every
+# honest green run red.
+#
+# Read by the installed zig-gate (section 9) straight out of this file, as text,
+# in one space-separated list on ONE line; cross-test itself does not read it.
+# For every name the gate requires, in the summary.json of the run the gate
+# itself bound by CROSS_RUN_ID and nothing older: build=pass, run=pass,
+# status=pass, and an executed-test count above zero. A build_only row, a row
+# that ran nothing, and a row missing from the summary all fail the section.
+#
+# That check exists because `fail=0` alone cannot tell a test run from a compile:
+# with qemu_user absent every Linux row degrades to build_only/runtime_unavailable
+# and an exit-0 cross-test then reports pass=0 with nothing executed anywhere.
+# Keep this list and TARGETS in step, keep it on one line, and keep the names
+# exactly as cross-test prints them (`cross-test --no-profile --list` is where
+# they come from).
+CROSS_REQUIRED_RUN_TARGETS='x86_64-linux aarch64-linux riscv64-linux s390x-linux'
+
 # The full table: this profile narrows the SET and leaves CROSS_MATRIX alone,
 # so `--targets` still selects from all 53. A release sweep is the same command
 # with the list swapped:
@@ -146,8 +204,10 @@ TARGETS=(
 #
 # `cross-test --no-profile --list` prints every platform in the table with the
 # runner detected for it on this host, and is where those names come from. Note
-# what `--no-profile` costs: it drops this file, so the 900 s budget above goes
-# with it and the timeout trap comes straight back - pass `--timeout 900` too.
+# what `--no-profile` costs: it drops this file, so the 900 s budget, the pinned
+# concurrency and the required-run set all go with it - pass `--timeout 900`,
+# `--jobs 2 --build-jobs 1` too, and note that the gate cannot read a
+# declaration out of a profile it is not given.
 
 # ---------------------------------------------------------------------------
 # Nested-build compiler: make the fixture's `zig` the same binary as ours.
@@ -170,7 +230,7 @@ TARGETS=(
 # below covers every target and both phases.
 #
 # What it does NOT fix: which compiler cross-test itself uses. It probes and
-# resolves AFTER this file is sourced (cross-test:602-630), so ZIG_COMMAND is
+# resolves AFTER this file is sourced (cross-test:684), so ZIG_COMMAND is
 # still empty in the parent and this guard is a no-op there. Pin the outer
 # compiler from the command line with ZIG=, as the invocation above does.
 if [[ -n ${ZIG_COMMAND[0]:-} ]]; then

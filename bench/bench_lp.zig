@@ -130,6 +130,63 @@
 //! 3,991,524 prediction, and four pairs cross it on the fourth round. The
 //! chosen order still costs four rows on the same system, which is the whole
 //! point of the comparison.
+//!
+//! ## Two allocators, one recipe
+//!
+//! Every figure below is a time, and a time here is a property of a PAIR:
+//! these systems allocate, grow geometrically and free, so which heap they
+//! are built on is part of what is being timed. A `DebugAllocator` charges
+//! its own bookkeeping to every round trip, which is a reason to quote a
+//! figure measured under one as a measurement of the allocator - and it is
+//! also the only allocator here that can say what it still holds when the
+//! run ends, which is a reason to keep it. Neither reading wins, so the
+//! recipe is run TWICE, unchanged: the same thirteen bodies, under the same
+//! names, with the same iteration counts and the same seeds, once on a
+//! `DebugAllocator` and once on `std.heap.smp_allocator`, under the
+//! `allocator=dbg` and `allocator=smp` headings.
+//!
+//! What the two runs have in common is everything that is not allocation
+//! cost, and the output carries the check: the geometry report and every
+//! per-row checksum are functions of the inputs alone, so the second
+//! section printing the first section's figures is the evidence that the
+//! second run really is the first recipe again, and that whatever is left
+//! between the two tables is the allocator and nothing else.
+//!
+//! Nothing belonging to the harness is charged to either measurement. The
+//! Io thread pool and each report's row buffer come from a THIRD
+//! allocator, `host`, which `Runner.init` builds them on and which releases
+//! them again, so a body can never be billed for the table it is being
+//! printed into. Both `DebugAllocator`s in this file are asked for `.ok` at
+//! the end, through `requireNoLeaks`.
+//!
+//! ## The accounting, and why it is outside every timer
+//!
+//! Allocation counts cannot be read out of a timed run. A counter
+//! increment and a vtable hop inside the region the clock brackets are
+//! exactly the work the figure is supposed to exclude, so the counts come
+//! from a separate untimed pass: after its own timed table, each section
+//! sweeps every body once per iteration that row runs - the same varying
+//! inputs, `reps = 1` against the harness's seven - through
+//! `std.testing.FailingAllocator` with both of its fail limits left at
+//! `maxInt`. Those limits inject no failure of the wrapper's own, so every
+//! count below is of an allocation that really was made; an allocation the
+//! underlying heap refuses is still an error, and it reaches the body's
+//! own `catch` and ends the run rather than being counted. The wrapper is
+//! the standard library's own, so this file writes no counting allocator
+//! of its own, and it lives only inside this pass - the timed rows on
+//! either side of it run on the bare heap.
+//!
+//! Its counters are printed with their exact definitions, which are not the
+//! obvious ones. `allocated_bytes` counts the bytes of every SUCCESSFUL
+//! allocation plus the positive growth of every successful `resize` or
+//! `remap`; it is not a sum of requested sizes, and such a growth is not a
+//! new allocation for the call counters either. `freed_bytes` counts the
+//! bytes handed to `free` plus the shrinkage of those same resizes. Each
+//! sweep is run TWICE and the two must be identical, because a count that
+//! drifts between two identical sweeps is a count of something other than
+//! the work, and every body must come back balanced - as many frees as
+//! allocations, as many freed bytes as allocated bytes - because a workload
+//! allocation that outlived its call is a defect and not a figure.
 
 const std = @import("std");
 const interval = @import("interval");
@@ -919,64 +976,375 @@ fn reportGeometry(gpa: std.mem.Allocator, io: std.Io) !void {
     }
 }
 
-/// Measures everything and appends to a shared report. The runner owns the
-/// report and prints it, so several benchmark files can feed one table, and
-/// its allocator is the heap every body below builds from.
-///
-/// The wall time is printed here because the practical question about this
-/// file is not whether a row is fast but whether the whole run finishes: a
-/// benchmark that takes an hour is a benchmark nobody runs a second time.
-pub fn run(runner: *timing.Runner) !void {
-    const started = std.Io.Clock.real.now(runner.io);
-    try reportGeometry(runner.gpa, runner.io);
+// -- the recipe, in one place --------------------------------------------
 
-    try timing.measure("add 8 rows x 4 vars", add8x4, runner, 20_000);
-    try timing.measure("add 64 rows x 8 vars", add64x8, runner, 2_000);
+/// One measured row: the name its table line carries, the body that
+/// produces the number, and how many times that body runs.
+const Case = struct {
+    name: []const u8,
+    /// The body as it is written. Both passes call it directly - `measure`
+    /// for the timed row, `accountSweep` for the untimed count - and each
+    /// builds the `Ctx` that body runs on, so neither pass can reach a
+    /// heap the other does not.
+    body: fn (ctx: *timing.Ctx, i: usize) void,
+    iterations: usize,
+};
+
+/// The thirteen rows, in the order this file has always printed them and
+/// with the iteration counts it has always used.
+///
+/// THE SINGLE CATALOG. Every section below reads this one array: the timed
+/// run on a `DebugAllocator`, the timed run on `smp_allocator`, and the
+/// untimed accounting that follows each of them. A second copy of a list
+/// this long is a second thing to forget to update, and a benchmark that
+/// runs two recipes and prints them under one name is worse than one that
+/// ran only the first.
+///
+/// `timing.measure` takes its body as a COMPTIME parameter, so every
+/// consumer iterates this with `inline for` and the row being measured is a
+/// compile-time constant by the time the measurement is built. These
+/// thirteen rows are all that is unrolled anywhere in this file, which is
+/// nowhere near the comptime quota; `bench_vec` is the file in this project
+/// that approaches it, and what it unrolls is a whole input table.
+const cases = [_]Case{
+    .{ .name = "add 8 rows x 4 vars", .body = add8x4, .iterations = 20_000 },
+    .{ .name = "add 64 rows x 8 vars", .body = add64x8, .iterations = 2_000 },
 
     // Build time is reported on its own so the elimination row below can be
     // read as a difference.
-    try timing.measure("build 6 rows x 4 vars (control)", build6x4, runner, 20_000);
-    try timing.measure("eliminate k=0, 6 rows x 4 vars", eliminateOne, runner, 20_000);
+    .{
+        .name = "build 6 rows x 4 vars (control)",
+        .body = build6x4,
+        .iterations = 20_000,
+    },
+    .{
+        .name = "eliminate k=0, 6 rows x 4 vars",
+        .body = eliminateOne,
+        .iterations = 20_000,
+    },
 
     // Iteration counts. The four slow rows used to run 5,000 to 10,000 times
     // each, because each one paid a final round of 223,269 rows on top of
     // every sweep. At the sizes above a whole sweep costs a few hundred
     // microseconds instead, so their counts come down and the run finishes in
     // tens of seconds rather than the minutes it cost before. They are not a
-    // tuning knob: the harness reports the MINIMUM over 7 repetitions, so what
-    // matters is only that there are enough calls to reach a steady state,
-    // and 500 calls at ~300 us is well past that.
+    // tuning knob: the harness reports the MINIMUM over 7 repetitions, so
+    // what matters is only that there are enough calls to reach a steady
+    // state, and 500 calls at ~300 us is well past that.
     //
     // `eliminateAll ascending` moves the other way, 20 to 100: the heuristic
     // system is half the size it was, the ascending sweep costs ~500 us rather
     // than a millisecond, and 20 calls was too few for a stable minimum.
-    try timing.measure("eliminationOrder, mixed 14x2", orderOnly, runner, 500);
-    try timing.measure("eliminateInOrderOfChoice, mixed 14x2", inOrderOfChoice, runner, 500);
+    .{ .name = "eliminationOrder, mixed 14x2", .body = orderOnly, .iterations = 500 },
+    .{
+        .name = "eliminateInOrderOfChoice, mixed 14x2",
+        .body = inOrderOfChoice,
+        .iterations = 500,
+    },
 
-    try timing.measure("bounds k=0, mixed 14x2", boundsOne, runner, 500);
-    try timing.measure("box, mixed 14x2", boxAll, runner, 200);
-    try timing.measure("bounds k=1, straddling 11x2", boundsStraddle, runner, 100);
-    try timing.measure("box, straddling 11x2", boxStraddle, runner, 50);
+    .{ .name = "bounds k=0, mixed 14x2", .body = boundsOne, .iterations = 500 },
+    .{ .name = "box, mixed 14x2", .body = boxAll, .iterations = 200 },
+    .{ .name = "bounds k=1, straddling 11x2", .body = boundsStraddle, .iterations = 100 },
+    .{ .name = "box, straddling 11x2", .body = boxStraddle, .iterations = 50 },
 
-    try timing.measure("eliminateAll chosen, mixed 14x2", eliminateAllMixed, runner, 200);
-    try timing.measure("eliminateAll chosen, heuristic 4v", eliminateAllHeuristic, runner, 2_000);
-    try timing.measure("eliminateAll ascending, heuristic 4v", eliminateAllNaive, runner, 100);
+    .{
+        .name = "eliminateAll chosen, mixed 14x2",
+        .body = eliminateAllMixed,
+        .iterations = 200,
+    },
+    .{
+        .name = "eliminateAll chosen, heuristic 4v",
+        .body = eliminateAllHeuristic,
+        .iterations = 2_000,
+    },
+    .{
+        .name = "eliminateAll ascending, heuristic 4v",
+        .body = eliminateAllNaive,
+        .iterations = 100,
+    },
+};
+
+/// The whole recipe, once, on the workload allocator `solver`.
+///
+/// `label` names that allocator on every line this prints, because a table
+/// that does not say which heap its figures came from is the defect
+/// `bench_vec` already had once. It is a COMPTIME parameter and the rows
+/// come from the one catalog above, so the two sections of the run differ
+/// by that name and by the heap behind `solver` and by nothing else -
+/// which is what makes their checksums comparable at all.
+///
+/// This section's heap reaches the bodies through one store into
+/// `runner.gpa`, below: `timing.measure` builds every body's `Ctx` from
+/// that field, while the report rows it appends stay on `host`.
+///
+/// The wall time is printed here because the practical question about this
+/// file is not whether a row is fast but whether the whole run finishes: a
+/// benchmark that takes an hour is a benchmark nobody runs a second time.
+/// It covers the geometry report and the thirteen timed rows; the
+/// accounting that follows prints its own header and no timer.
+fn runUnder(
+    comptime label: []const u8,
+    solver: std.mem.Allocator,
+    runner: *timing.Runner,
+) !void {
+    const started = std.Io.Clock.real.now(runner.io);
+    var out = timing.Out.init(runner.io);
+    try out.print("\n=== bench_lp: allocator={s} ===\n", .{label});
+
+    // The geometry report is given this section's heap too, because it
+    // builds the systems it reports on rather than measuring anything.
+    try reportGeometry(solver, runner.io);
+
+    // The one binding from this section's heap to the bodies: written
+    // before the first of them runs and read by every `Ctx` `measure`
+    // builds. The harness's own memory does not follow it here, because a
+    // finished row is appended through `runner.report.gpa`.
+    runner.gpa = solver;
+    inline for (cases) |case| try timing.measure(case.name, case.body, runner, case.iterations);
 
     const elapsed: i96 = std.Io.Clock.real.now(runner.io).nanoseconds - started.nanoseconds;
-    var out = timing.Out.init(runner.io);
-    try out.print("\nbench_lp: {d:.3} s total, row budget {d} rows\n", .{
+    try out.print("\nbench_lp: allocator={s}: {d:.3} s total, row budget {d} rows\n", .{
+        label,
         @as(f64, @floatFromInt(elapsed)) / 1e9,
         row_budget,
     });
+
+    try reportAccounting(label, solver, runner.io);
+}
+
+// -- allocation accounting ------------------------------------------------
+
+/// What one untimed sweep of one body allocated and freed, in total.
+///
+/// These are sums over the sweep's whole input range rather than per-call
+/// figures, because a per-call average over inputs that were never built is
+/// not a figure at all. The timed table above cannot answer this question
+/// about itself, which is the reason it exists.
+const Account = struct {
+    /// Successful `alloc` calls through the wrapper. A successful `resize`
+    /// or `remap` is NOT one of these: it grows an allocation that already
+    /// exists rather than creating another one.
+    allocations: usize,
+    /// `free` calls through the wrapper.
+    deallocations: usize,
+    /// `FailingAllocator.allocated_bytes`: the bytes returned by those
+    /// successful allocations PLUS the positive growth of every successful
+    /// `resize` or `remap`. It is not a sum of requested sizes.
+    allocated_bytes: usize,
+    /// `FailingAllocator.freed_bytes`: the bytes handed to `free` PLUS the
+    /// shrinkage of every successful `resize` or `remap`.
+    freed_bytes: usize,
+    /// This body's `Ctx.sink` over the sweep: what it kept, once per call,
+    /// in the order the calls ran. Its own checksum, not the timed table's.
+    sink: f64,
+};
+
+/// One untimed sweep of one body, with everything it allocated counted and
+/// no clock anywhere near it.
+///
+/// The wrapper is `std.testing.FailingAllocator`, the standard library's
+/// own, around the SAME workload allocator the timed rows above used: these
+/// are that allocator's figures and not another heap's. It is built here
+/// and dies with this call, so no timed region on either side of it ever
+/// allocates through anything but the bare heap, and the counting is
+/// untimed because a vtable hop and two increments inside the region the
+/// clock brackets would be part of the number being reported.
+///
+/// Its `.{}` configuration leaves `fail_index` and `resize_fail_index` at
+/// `maxInt`, so the wrapper injects no failure of its own and every count
+/// is of an allocation that really was made. That does not make the sweep
+/// infallible: an allocation the underlying heap refuses reaches the
+/// body's own `catch` and ends the run through `trap`, uncounted.
+///
+/// THE INPUT RANGE IS THE TIMED RANGE. Every index the timed row iterates
+/// runs once, so this is `reps = 1` against the harness's seven and the
+/// aggregate covers the same varying systems the timed row actually built.
+/// A single index would have been cheaper and would have described one
+/// cached case, and calling these totals "the workload's" while running a
+/// tenth of its inputs would be the one thing this table must not do.
+fn accountSweep(
+    solver: std.mem.Allocator,
+    io: std.Io,
+    body: fn (ctx: *timing.Ctx, i: usize) void,
+    iterations: usize,
+) Account {
+    var counting: std.testing.FailingAllocator = .init(solver, .{});
+    // The body runs on the counting wrapper and on nothing else: the `Ctx`
+    // it is handed carries it, and the wrapper dies with this call.
+    var ctx: timing.Ctx = .{ .io = io, .gpa = counting.allocator() };
+    for (0..iterations) |i| body(&ctx, i);
+    return .{
+        .allocations = counting.allocations,
+        .deallocations = counting.deallocations,
+        .allocated_bytes = counting.allocated_bytes,
+        .freed_bytes = counting.freed_bytes,
+        .sink = ctx.sink,
+    };
+}
+
+/// Whether two sweeps of one body over one input range counted the same
+/// thing, which they must.
+///
+/// The sink is compared as a BIT PATTERN for the reason
+/// `Report.sink_total` gives: these values are sums of interval endpoints
+/// and are legitimately unbounded, and a float comparison of two identical
+/// NaNs is false.
+fn sameAccount(a: Account, b: Account) bool {
+    return a.allocations == b.allocations and
+        a.deallocations == b.deallocations and
+        a.allocated_bytes == b.allocated_bytes and
+        a.freed_bytes == b.freed_bytes and
+        @as(u64, @bitCast(a.sink)) == @as(u64, @bitCast(b.sink));
+}
+
+/// Every body of the section, accounted twice, after its timed table.
+///
+/// TWO SWEEPS PER BODY rather than one, because these counters are the only
+/// claim in this file that nothing is drifting between iterations: a body
+/// whose second sweep allocated a different number of bytes allocated
+/// something other than a deterministic function of its index, and a
+/// checksum that moved between two identical sweeps would be a checksum of
+/// the run rather than of the work.
+///
+/// Each body must also come back BALANCED - as many frees as allocations,
+/// as many freed bytes as allocated bytes - because an allocation that
+/// outlived its call is a defect in the caller rather than a figure, and a
+/// leak found here is the same leak the `dbg` section's `.ok` check would
+/// report at the end of the run.
+///
+/// The totals line counts ONE sweep of each body. The second sweep exists
+/// to be compared and is printed by neither, exactly as it is untimed.
+fn reportAccounting(comptime label: []const u8, solver: std.mem.Allocator, io: std.Io) !void {
+    var out = timing.Out.init(io);
+    try out.print("\n=== bench_lp: allocator={s}: untimed allocation accounting ===\n", .{label});
+    try out.print(
+        \\    Every body, once per timed iteration over indices 0 to iters-1, so the same varying
+        \\    inputs as the timed row and reps 1 against timing's {d}, with no clock running,
+        \\    through std.testing.FailingAllocator with fail_index and resize_fail_index at
+        \\    maxInt. The wrapper injects no failure; a refusal from the underlying heap
+        \\    ends the run through the body's own trap rather than being counted. Counters are
+        \\    totals over that whole range, not per-call figures. allocs/frees are successful
+        \\    alloc and free calls, and a successful resize or remap counts as neither. alloc B is
+        \\    FailingAllocator.allocated_bytes: the bytes of those allocations PLUS the positive
+        \\    growth of every successful resize or remap, which is not a sum of requested raw
+        \\    sizes. freed B is FailingAllocator.freed_bytes: the bytes handed to free plus the
+        \\    shrinkage of those same resizes. checksum is this body's own Ctx sink over the
+        \\    sweep, not the timed table's checksum over its warmup call and seven repetitions.
+        \\    Each body is swept twice; the two must be identical and balanced or the run ends.
+        \\
+    , .{timing.reps});
+    // The headings of the columns the rows below print, in those columns'
+    // own widths, so the numbers are read against names rather than against
+    // a row of escaped format placeholders.
+    try out.print(
+        "    {s: <40}  {s:>6}  {s:>6}  {s:>12}  {s:>12}  {s}\n",
+        .{ "body", "allocs", "frees", "alloc B", "freed B", "checksum" },
+    );
+
+    var allocs: usize = 0;
+    var frees: usize = 0;
+    var alloc_bytes: usize = 0;
+    var freed_bytes: usize = 0;
+    inline for (cases) |case| {
+        const first = accountSweep(solver, io, case.body, case.iterations);
+        const second = accountSweep(solver, io, case.body, case.iterations);
+        if (!sameAccount(first, second)) {
+            trap(
+                case.name ++ ": two identical untimed sweeps accounted differently",
+                io,
+                error.AccountingDrift,
+            );
+        }
+        if (first.allocations != first.deallocations or
+            first.allocated_bytes != first.freed_bytes)
+        {
+            trap(
+                case.name ++ ": a workload allocation outlived its call",
+                io,
+                error.UnfreedAllocation,
+            );
+        }
+        allocs += first.allocations;
+        frees += first.deallocations;
+        alloc_bytes += first.allocated_bytes;
+        freed_bytes += first.freed_bytes;
+        try out.print(
+            "    {s: <40}  {d:>6} allocs  {d:>6} frees  {d:>12} alloc B  {d:>12} freed B  checksum {d}\n",
+            .{
+                case.name,
+                first.allocations,
+                first.deallocations,
+                first.allocated_bytes,
+                first.freed_bytes,
+                first.sink,
+            },
+        );
+    }
+    try out.print(
+        "    {s: <40}  {d:>6} allocs  {d:>6} frees  {d:>12} alloc B  {d:>12} freed B " ++
+            " (one sweep of each of {d} bodies)\n",
+        .{ "all bodies", allocs, frees, alloc_bytes, freed_bytes, cases.len },
+    );
+}
+
+/// Measures everything and appends to a shared report. The runner owns the
+/// report and prints it, so several benchmark files can feed one table.
+///
+/// This is the file's original entry point and it keeps its original
+/// meaning: the runner's OWN allocator is the workload heap, so a caller
+/// that hands this a `DebugAllocator`-backed runner runs the recipe on
+/// that heap, under the `allocator=dbg` heading and with the untimed
+/// accounting after it. `main` is where the two heaps are kept apart,
+/// because only there is the harness's heap and the solver's heap two
+/// allocators that can each be asked whether they leaked.
+pub fn run(runner: *timing.Runner) !void {
+    try runUnder("dbg", runner.gpa, runner);
 }
 
 /// Standalone entry point, so this file can be built and run on its own
 /// without waiting for the shared driver to pick it up.
+///
+/// THREE HEAPS, each here for a reason. `threaded` is the process's own
+/// `Io`, built on `smp_allocator` and on neither `DebugAllocator`, because
+/// it has to outlive every runner below: the two `.ok` checks are made
+/// after the runner they are about has been torn down, and an `Io` that
+/// belonged to a torn-down runner is nowhere to print a leak through.
+/// `host` is the harness - the two reports' row buffers and their Io thread
+/// pools, released by each runner's own `deinit` and charged to no body.
+/// `dbg` is the workload heap of the first section.
 pub fn main() !void {
+    var threaded: std.Io.Threaded = .init(std.heap.smp_allocator, .{});
+    const io = threaded.io();
+    defer threaded.deinit();
+
+    var host: std.heap.DebugAllocator(.{}) = .init;
+    // Outer defers run after runner teardown, including on propagated errors.
+    // These checks remain active in ReleaseFast.
+    defer requireNoLeaks("harness", io, host.deinit());
     var dbg: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = dbg.deinit();
-    var runner = try timing.Runner.init(dbg.allocator());
-    defer runner.deinit();
-    try run(&runner);
-    try runner.report.print();
+    defer requireNoLeaks("allocator=dbg section", io, dbg.deinit());
+
+    {
+        var runner = try timing.Runner.init(host.allocator());
+        defer runner.deinit();
+        try runUnder("dbg", dbg.allocator(), &runner);
+        try runner.report.print();
+    }
+    {
+        var runner = try timing.Runner.init(host.allocator());
+        defer runner.deinit();
+        try runUnder("smp", std.heap.smp_allocator, &runner);
+        try runner.report.print();
+    }
+}
+
+/// Ends the run unless `status` is `.ok`.
+///
+/// `std.debug.assert` is not usable here and the reason is the build: this
+/// file is `ReleaseFast`, and there an assertion is compiled out, so the
+/// check would be the `defer _ = dbg.deinit()` it replaced. A non-`.ok`
+/// answer leaves through the same plain line on stderr and the same
+/// non-zero exit as every other failure in this file.
+fn requireNoLeaks(comptime what: []const u8, io: std.Io, status: std.heap.Check) void {
+    if (status != .ok) timing.fail("bench_lp: " ++ what, io, error.LeakedMemory);
 }

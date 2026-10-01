@@ -1,0 +1,199 @@
+# tools/quality/manifest.tsv -- schema v1
+#
+# The pinned source manifest for the quality analyzers. Tab-separated; '#'
+# starts a comment; the first '#' line below is the column header. Read by
+# scripts/install-quality-tools.sh, which verifies every value in this file and
+# nothing else.
+#
+# WHAT A PIN IS HERE. `revision` is a full 40-hex commit id, never a tag and
+# never a branch name. The installer fetches it with `git fetch --depth 1` and
+# re-reads it with `git rev-parse FETCH_HEAD`, so the pin IS the content hash:
+# it cannot move, and it is the thing that decides whether the build is the
+# build this file describes.
+#
+# WHY tool_version AND compiler ARE SEPARATE COLUMNS. They answer different
+# questions and conflating them produces a claim that is not true. A tool's
+# `tool_version` is the version its own build.zig.zon declares; `compiler` is
+# the Zig toolchain it is compiled with. zbc declares 0.1.3 and is compiled with
+# Zig 0.16.0. zwanzig declares 0.15.1 while its build.zig.zon still names a
+# 0.15.2 minimum, because it is a dual-frontend analyzer. Neither fact is
+# about the other, so neither is implied by the other.
+#
+# COLUMNS
+#   id                install name; also the --only selector
+#   kind              analyzer (all rows today; harness rows are not pinned here)
+#   repo              clone URL. Must be one this file pins by full commit id.
+#   revision          full 40-hex commit id, verified after fetch
+#   revision_date     the commit's own committer date, for a human reading it
+#   tool_version      the analyzer's declared version from its build.zig.zon
+#   compiler          the Zig toolchain the build recipe runs
+#   patches           comma-separated patch paths under tools/quality/, in apply
+#                     order, or "-" for an unpatched build
+#   patch_sha256      comma-separated sha256 of each patch, in the same order
+#   license           license file under tools/quality/licenses/, verbatim
+#   install_path      where the built artifact lands, relative to --prefix
+#   build_recipe      the build step to run: a NAME, dispatched from a fixed
+#                     table in scripts/install-quality-tools.sh whose only
+#                     entries are `default` and `cli`. It is never eval'd,
+#                     never expanded and never run as a shell command, and any
+#                     other value is a manifest error, not a fallback. The
+#                     installer supplies -Doptimize, --prefix and both cache
+#                     directories itself and records the resolved argv per tool
+#                     in install-manifest.tsv column `build_recipe`.
+#                     `cli` is the named step zbc/0004 adds: it builds and
+#                     installs the artifact and runs nothing else, because plain
+#                     `zig build` also runs upstream's dogfood — `zbc src/` on
+#                     zbc itself — which exits 1 on any finding, including the
+#                     self-findings this source has about itself (75, as measured
+#                     on the 0001-0003 tree; see the zbc row for what has and
+#                     has not been re-measured since). `cli` is a BUILD recipe
+#                     and not a lint claim: nothing here asserts the source is
+#                     clean, and the default step, its install dependency and
+#                     its self-check are all still there for anyone who runs
+#                     them. The other three analyzers take `default`.
+#   install_artifact  path inside the tool's own zig-out, relative to its root
+#   source_digest     sha256 over the sorted `sha256  path` listing of
+#                     src/**/*.zig, verified after patching and before cache
+#                     reuse. Reproduce it with
+#                       find src -name '*.zig' -type f | LC_ALL=C sort \
+#                         | xargs -r sha256sum | sha256sum
+#                     and a local tree that no longer matches says so.
+#                     A patch that touches only build.zig cannot move it, which
+#                     is why zbc/0004 leaves this column alone.
+#
+# PROVENANCE NOTES PER ROW, including what the pin does NOT establish.
+#
+#   zbc      ericsssan/zbc at 419d153 is origin/main HEAD. The upstream
+#            build.zig.zon declares .minimum_zig_version 0.17.0-dev.607+456b2ec07;
+#            0001 changes it to 0.16.0 together with the rest of the 0.16 port.
+#            That is a source change, not a version claim, which is why the
+#            compiler column exists. 0002 adds four files that do not exist
+#            upstream at all. 0001 and 0002 are the two verbatim captures and
+#            are left byte-for-byte untouched; together they reproduce the src
+#            digest bf5331d6…c07df this file used to record. 0003 and 0004 are
+#            NOT captures from anyone's working copy: both are authored against
+#            the tree 0001+0002 produce, and between them they are what makes
+#            that tree correct and installable, so the shipped source is
+#            0001+0002+0003+0004. 0003 touches src/ only and its digest is the
+#            source_digest column; it repairs three compile defects, restores the
+#            double_optional_ptr rule registration 0001 deleted, restores the six
+#            severities 0001 downgraded, turns SourceSelection's silent drops of
+#            explicitly named inputs into reported failures, and initialises the
+#            elements of a list that 0001 resized without initialising them (a
+#            heap-corruption crash on every file; verified fixed by a ReleaseFast
+#            build of the patched tree). One advisory severity
+#            (intfromfloat_without_clamp) stays a warning by accepted, reviewed
+#            policy and is disclosed in PROVENANCE.md and at the call site. Each
+#            patch's own header is the full statement of that patch, including
+#            one thing 0003 does NOT fix and does not hide: upstream's build.zig
+#            dogfood runs `zbc src/` on every `zig build` and the CLI exits 1 on
+#            ANY finding, so that self-check cannot pass for a source that has
+#            findings on itself, at any severity.
+#            0004 is also authored, also against that tree, and touches
+#            build.zig ONLY: it names the install-artifact step and hangs a new
+#            `cli` step on it, so the artifact can be built and installed
+#            without the dogfood self-check, which cannot pass for this source.
+#            It is that source_digest column's reason for staying put: build.zig
+#            is not under src/, so the digest is b794e308…e5e3d2 before and
+#            after it. What 0004 does NOT do is weaken anything: the default
+#            step still installs the artifact AND still runs the self-check and
+#            still fails; `zig build cli` is not a self-lint pass and no
+#            severity, rule, finding or exclusion was touched to make it green.
+#            The project's own gate, which runs all four analyzers and fails on
+#            ERROR, is separate from both and unchanged.
+#            0005 is also authored, against the tree 0001+0002+0003+0004 produce, and touches
+#            src/flow/cfg_builder.zig and src/flow/worklist.zig, so this row's source_digest
+#            column MOVES, from b794e308…e5e3d2 to ddcb7de4…c868, and now names 0001-0005.
+#            Its full statement is its own header. In short: a false use-undefined, reported
+#            on a path where a fully filling `for` body never ran — bench/bench_vec.zig
+#            buildPlan and buildSeedNames were four such errors. It proves that shape from
+#            the loop AST and the EXISTING FileCache .fixedArrayLenOf / .comptimeIntValueOf,
+#            then emits ONE .pointer_write on the loop's exit, before any `else` is lowered
+#            onto it. NO CFG EDGE TOUCHED, no `merge` clear added, emitWritesInLhs untouched,
+#            no element-granular state, all 113 rules and severities unchanged, no name or
+#            input special-cased, no benchmark or exported API touched. 20 tests: 4 expect no
+#            findings, 16 the rule SET {use-undefined}. OBSERVED, two runs of the same
+#            --test-filter "use_undefined:", 29 selected each and all passed: 7.4878057 s
+#            (waves/wave1-zbc-array-green-final.log) BEFORE the review correction folded into
+#            the patch, and 13.7402239 s (waves/wave1-zbc-array-reviewed-green.log) OVER the
+#            bytes as shipped, so that correction is witnessed. BUILT AND GATED: the tree
+#            0001-0005 produces was built with `zig build cli`, installed into a fresh prefix
+#            under an empty HOME with a REUSED work cache (276.1623 s, so not a cold install),
+#            and the full gate from that prefix is exit 0 (1061.0422 s) — zbc
+#            selected=32 analyzed=32 failed=0, 0 errors and the 3 standing intfromfloat
+#            advisories, so the four historical bench_vec use-undefined errors are gone from
+#            the project's own gate; cross run gate-20261002-045938-6457-7192, four Linux
+#            targets 348 tests each, x86_64-windows build_only.
+#            NOT PROVED: no `zbc src/` self-run over 0001-0005, so its self-finding count is
+#            unknown and the untouched default dogfood would still exit 1 on any finding —
+#            the 75 self-findings recorded for 0003 are dated evidence about that tree, not a
+#            current count; no three-run benchmark baseline, no remote GitHub Actions run and
+#            no vf engine run.
+#   ziglint  rockorager/ziglint at 66709a4 is origin/main HEAD, and its own
+#            commit subject is "Z030: allow deinit to destroy self". One patch,
+#            two files — src/Linter.zig and src/rules.zig — and NOT one rule.
+#            It adds a .merge_error_sets arm to isTypeExpression (Z015 stops
+#            firing on a pub fn returning a merged error set), replaces the
+#            builtin-call arms of isTypeExpression and isTypeAlias with one
+#            shared 14-name isBuiltinTypeConstructor predicate (Z006 stops
+#            firing on @Int/@Enum/… aliases), rewrites Z030's receiver-lifetime
+#            analysis and its diagnostic wording, and DELETES the eight
+#            literal-message-rendering tests for Z002, Z003, Z004, Z017, Z020
+#            (two), Z021 and Z030 with no replacement. Only Z030's wording
+#            change requires those deletions; the rest pin exact message prose
+#            rather than consumer-visible detection. They are enumerated here
+#            instead of being described as one rule or as test coverage.
+#   zlint    DonIsaac/zlint at 3ef67af is origin/main HEAD and is also the commit
+#            tagged v0.10.0. NO PATCHES. The binary this replaces prints
+#            `v0.0.0`, and that string identifies nothing: it is build.zig:329's
+#            `orelse "v0.0.0"` default for the --version build option, so every
+#            build from source prints it. The pin rests on fingerprints the
+#            binary does expose: dependency hashes chameleon-2.0.1 and
+#            smart_pointers-0.0.4 identical to the upstream zon, src/Semantic/Cfg
+#            present (added 2026-08-16), and the `-c, --config` and `zlint.json`
+#            help strings (added 2026-08-23 and 2026-09-15). 3ef67af is the
+#            newest revision consistent with all of them. No byte-level match is
+#            claimed; the installed analyzer is source-equivalent to this pin and
+#            to nothing more.
+#   zwanzig  forketyfork/zwanzig at 1a0768c is origin/main HEAD. It is NOT the
+#            956bc69 the local checkout sits on: that commit, and the four
+#            before it, appear in no origin ref of that repository, so pinning
+#            them would pin something `git fetch` cannot retrieve. The five
+#            local commits are therefore carried as five ordered per-commit
+#            patches (0001-674c36b, 0002-19d6a7b, 0003-4f3fbce, 0004-351ae9b,
+#            0005-956bc69), each header naming its commit and stating that it is
+#            not published upstream, and the local working tree on top of them
+#            is 0006-uncommitted. docs/, CHANGELOG.md, justfile, AGENTS.md,
+#            CLAUDE.md, GEMINI.md and .zig-cache/ from that checkout are NOT
+#            archived, and neither are zbc's README.md and .github/.
+#
+# WHEN EACH PATCH WAS WRITTEN. There is no single instant for this directory
+# and none is invented here; every patch states its own in its own header, and
+# these are those headers transcribed.
+#   zbc/0001        captured 2026-10-01T23:43:59Z from the local working copy
+#   zbc/0002        captured 2026-10-01T23:43:14Z from the same copy, 45s
+#                   BEFORE 0001; that is the order the tree moved in, and the
+#                   reason the first zbc capture was discarded and retaken
+#   zbc/0003        AUTHORED, not captured: 2026-10-02T01:28:36Z for items 1-4
+#                   and 2026-10-02T04:12Z for items 5-6, both against the tree
+#                   0001+0002 produce. It re-captures nothing, and no working
+#                   copy, drifting or not, is its base
+#   zbc/0004        AUTHORED, not captured: header records 2026-10-02T01:57Z,
+#                   against the tree 0001+0002+0003 produce. The author-recorded
+#                   timestamps do not establish chronology. Apply patches in
+#                   numbered order.
+#   zbc/0005        AUTHORED, not captured, against the tree
+#                   0001+0002+0003+0004 produce. Its header records no
+#                   instant, so none is recorded here either.
+#   ziglint/0001    captured 2026-10-02. Its header carries a date and no
+#                   instant, so none is recorded here either
+#   zwanzig/0001-0005  per-commit diffs, not working-tree captures. Their
+#                   headers name the commit and its subject and say nothing
+#                   about when the file was written
+#   zwanzig/0006    captured 2026-10-01T23:43:14Z from the local working copy
+#
+#id	kind	repo	revision	revision_date	tool_version	compiler	patches	patch_sha256	license	install_path	build_recipe	install_artifact	source_digest
+zbc	analyzer	https://github.com/ericsssan/zbc	419d153ca411d1698899992d86c51eb9a7e14919	2026-06-11	0.1.3	zig 0.16.0	patches/zbc/0001-zig-0.16-port-and-local-analysis.patch,patches/zbc/0002-new-analysis-sources.patch,patches/zbc/0003-pinned-source-completion.patch,patches/zbc/0004-named-cli-install-step.patch,patches/zbc/0005-for-loop-full-array-fill-proof.patch	bae0ea6884d2433276c0a8278602fc5f5a2f80087f8bede51daf879468bd0a5f,644b5bf1a445464ab8585fd473e0cc17ed6af6ba12754426b8631611cf94d982,35cea1a76d6b180458eda1ad3397f0dc7cacbeb48f3e96f052adb38b91770484,9d6fff4c86fa798523f907056aa6f455d71d9c54429522cab162d8955faceb59,5d895c28b63044f78659676b6cc1c62af81e4e7aa9e4a377278c2d42434ecab7	licenses/zbc.LICENSE	bin/zbc	cli	zig-out/bin/zbc	ddcb7de4c311651caba3133fa3e15915bc4bf4df3815da36bc0442962c56c868
+ziglint	analyzer	https://github.com/rockorager/ziglint	66709a408f2ea9ac1de91a438a83b13f4691a941	2026-08-11	0.5.3	zig 0.16.0	patches/ziglint/0001-Z030-deinit-destroys-self.patch	946ae79969ceec59a0b2007beac08996a5ee40cd2c2d65bc59aed4d31f607530	licenses/ziglint.LICENSE	bin/ziglint	default	zig-out/bin/ziglint	b70c237d4edf9f40062f32b77c50580670ab11a161bb019e7a67eaffde30211f
+zlint	analyzer	https://github.com/DonIsaac/zlint	3ef67af7dfed776cb03012563942cdf3a97f1b59	2026-09-17	0.10.0	zig 0.16.0	-	-	licenses/zlint.LICENSE	bin/zlint	default	zig-out/bin/zlint	c6919ca8eb7453cdeeb580b32d97d57e58fb5192c7d5570796eada9efbd259d9
+zwanzig	analyzer	https://github.com/forketyfork/zwanzig	1a0768ccd889d3586ec9482f02ffffe872a99749	2026-09-25	0.15.1	zig 0.16.0	patches/zwanzig/0001-674c36b.patch,patches/zwanzig/0002-19d6a7b.patch,patches/zwanzig/0003-4f3fbce.patch,patches/zwanzig/0004-351ae9b.patch,patches/zwanzig/0005-956bc69.patch,patches/zwanzig/0006-uncommitted.patch,patches/zwanzig/0007-captured-source-syntax-fix.patch	00063df1b4b0dc3e798275cf464aba1f350a1aac89600be814c38ed66ab28cdd,7988be6e6e12d9228b8ac1d91cc747f76e3837866409740543b88ff9795e4378,a3f25d3d27b7e245dd6a8e0348fd57f43f7e1455f6bbfe8f45ddc83cd436195a,ba82d8baeae6df75421911280f7e69bf0bbeb00303ab488a184c9b6b1e4e92f1,cdb5ffece1c08804795f1f23f8729e52af87a565a1f80510363b4c771f026e63,5fef5e9465bb74b61c41cad3a533b86b34bf52790f88c4c9434ff8ece3969b5a,5c591e87c1b50254af2a6a679fc4207b028217e797b133465d2f9f707c84a543	licenses/zwanzig.LICENSE	bin/zwanzig	default	zig-out/bin/zwanzig	50e2cee8c769f5045e08f24e3c7bbddc6480e3a91b18cfc2eaa193a35558e23c

@@ -1,0 +1,58 @@
+# zwanzig: complete the captured optional-unwrap guard source for Zig 0.16.
+# Base: 1a0768ccd889d3586ec9482f02ffffe872a99749 plus 0001 through 0006.
+# Authored 2026-10-02 after cold installation exposed compile failures.
+# Fix two switch endings and explicitly convert typed AST indexes, following
+# adjacent code. Remove nonexistent enum_simple/union_simple tags. Zig 0.16
+# represents those declarations with the container_decl tags already handled.
+# Preserve the six original captures. No rule, severity or input policy changes.
+# Apply after 0006 with: git apply -p1 <this file>
+diff --git a/src/checkers/optional_unwrap/guards.zig b/src/checkers/optional_unwrap/guards.zig
+--- a/src/checkers/optional_unwrap/guards.zig
++++ b/src/checkers/optional_unwrap/guards.zig
+@@ -1731,7 +1731,7 @@
+             }
+             // A declaration or rebinding written after the use site cannot
+             // have shaped the value that site reads.
+-            if (query.firstToken(index) >= use_token) continue;
++            if (query.firstToken(@intCast(index)) >= use_token) continue;
+             if (value_expr == 0 or value_expr >= tags.len) continue;
+             if (!expressionNamesBinding(query, value_expr, source)) continue;
+             if (!expressionMentionsBinding(query, value_expr, source)) continue;
+@@ -1799,8 +1799,8 @@ fn declaredByValueContainer(query: *const QueryContext, expr: u32) bool {
+             // `*T` and `[]T` keep sharing the original storage.
+             .ptr_type, .ptr_type_aligned, .ptr_type_bit_range, .ptr_type_sentinel => return false,
+             // `?T` and `E!T` carry the value itself.
+-            .optional_type => node = datas[node].node,
+-            .error_union => node = datas[node].node_and_node[1],
++            .optional_type => node = @intFromEnum(datas[node].node),
++            .error_union => node = @intFromEnum(datas[node].node_and_node[1]),
+             else => break,
+         }
+     }
+@@ -2611,7 +2611,7 @@ fn rootContainerDeclForType(
+                 continue;
+             },
+             else => break,
+-        },
++        }
+     }
+     if (node >= tags.len or tags[node] != .identifier or node >= main_tokens.len) return null;
+     const name = import_resolver.normalizeIdentifier(tree.tokenSlice(main_tokens[node]));
+@@ -2663,8 +2663,6 @@ fn containerDeclNode(tree: *const std.zig.Ast, node: u32) ?u32 {
+         .tagged_union_enum_tag_trailing,
+         .tagged_union_two,
+         .tagged_union_two_trailing,
+-        .enum_simple,
+-        .union_simple,
+         => node,
+         else => null,
+     };
+@@ -2709,7 +2709,7 @@ fn isVerifiedStdArrayListTypeNode(
+                 continue;
+             },
+             else => break,
+-        },
++        }
+     }
+     if (node >= tags.len) return false;
+     return isVerifiedStdArrayListValueTypeNode(query, tree, node, tags, datas);

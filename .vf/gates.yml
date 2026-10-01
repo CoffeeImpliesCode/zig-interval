@@ -1,6 +1,39 @@
-suite-cmd: zig-gate
-suite-install:
+# The acceptance gate for a cold session, and how its tools get installed.
+#
+# suite-cmd is the gate from THIS repository's own install prefix, named by
+# QUALITY_TOOLS_PREFIX. It is not a bare `zig-gate`: a bare name resolves
+# through PATH and, failing that, through $HOME/.local/bin, so the gate a cold
+# session ran would be whatever binaries happened to be on that machine's disk.
+# With ZIG_GATE_PREFIX bound to the same prefix, the installed gate resolves
+# ziglint, zlint, zbc, zwanzig and cross-test to $QUALITY_TOOLS_PREFIX/bin and
+# to nothing else, and a missing analyzer exits 2 naming the file instead of
+# quietly skipping a section. There is no alias, no shim and no fallback here.
+#
+# suite-install is the repository-owned installer that produces that prefix,
+# from tools/quality/manifest.tsv (pinned upstream revisions and reviewed local
+# patches) and tools/quality/SHA256SUMS. It is the same command CI runs.
+#
+# THE THREE VARIABLES ARE THE OPERATOR'S, and none of them has a default:
+#   QUALITY_TOOLS_PREFIX     absolute install prefix (holds bin/, lib/, share/)
+#   QUALITY_TOOLS_WORK_ROOT  absolute fetch/patch/build/cache root; not on NFS
+#   ZIG                      absolute path to a real Zig 0.16.0
+# An unset variable stops the suite here with a message rather than falling back
+# to a default path or to $HOME, so "which tools ran" is never a question this
+# file answers silently.
+suite-install: >-
+  { test -n "${QUALITY_TOOLS_PREFIX:-}" && test -n "${QUALITY_TOOLS_WORK_ROOT:-}" && test -n "${ZIG:-}"; }
+  || { printf 'vf: set QUALITY_TOOLS_PREFIX, QUALITY_TOOLS_WORK_ROOT and ZIG to absolute paths (a real Zig 0.16.0); there is no default and no ~/.local fallback.\n' >&2; exit 2; };
+  bash scripts/install-quality-tools.sh --prefix "$QUALITY_TOOLS_PREFIX" --work-root "$QUALITY_TOOLS_WORK_ROOT" --zig "$ZIG"
+suite-cmd: >-
+  { test -n "${QUALITY_TOOLS_PREFIX:-}"; } || { printf 'vf: QUALITY_TOOLS_PREFIX is not set, so there is no installed gate to run; suite-install sets it up first.\n' >&2; exit 2; };
+  ZIG_GATE_PREFIX="$QUALITY_TOOLS_PREFIX" "$QUALITY_TOOLS_PREFIX/bin/zig-gate"
+# target-cmd keeps the focused, TDD-shaped command: one build, one test step, on
+# the compiler version the manifest requires. It is NOT the suite: the suite
+# above also runs the analyzers and cross-test.
 target-cmd: zig 0.16.0 build test
 test-paths: tests/**,**/test_*.py,**/*_test.py
+# 3600 s, because suite-cmd's last section builds AND runs the test step for
+# every target in cross-test.profile.sh - five targets, four of them executed,
+# three of those under qemu_user - at the profile's CROSS_TIMEOUT=900 s each.
 suite-timeout: 3600
 enforce: true

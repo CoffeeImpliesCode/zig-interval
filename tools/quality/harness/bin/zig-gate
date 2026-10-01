@@ -1,0 +1,1181 @@
+#!/usr/bin/env bash
+# zig-gate — run the common quality gates for a zig project.
+# Prefers locally built tools (~/.local/bin/*) which may be patched for this setup.
+# Exit code: 0 = all gates pass, 1 = issues found, 2 = usage/env error.
+#
+# DISTRIBUTED COPY. This is a reviewed source copy, installed by
+# scripts/install-quality-tools.sh into <prefix>/bin/zig-gate; its sha256 is in
+# <prefix>/install-manifest.tsv and its provenance in
+# <prefix>/share/zig-interval-quality/PROVENANCE.md. The gate logic, the ten
+# sections, the fail-closed verdict rules and every lint rule are unchanged from
+# the reviewed original. Two things differ, and only these two:
+#   1. It resolves its analyzers inside an explicit prefix and does NOT fall
+#      back to a developer's home or to PATH once one is selected.
+#   2. It takes the scratch contract from ../lib/cross-test/scratch-contract.sh
+#      instead of requiring ~/.local/lib/host-scratch.sh, and it gains a default
+#      file-list exclusion for the quality-tools sources under
+#      tools/quality/harness/.
+set -u
+
+cd "${ZIG_GATE_DIR:-$(pwd)}" || exit 2
+
+use_zbc=true
+use_zwanzig=true
+use_cross=true
+use_cov=false
+for a in "$@"; do
+    case "$a" in
+        --no-zbc) use_zbc=false ;;
+        --no-zwanzig) use_zwanzig=false ;;
+        --no-cross) use_cross=false ;;
+        --cov) use_cov=true ;;
+        -h | --help)
+            cat <<'USAGE'
+usage: zig-gate [--no-zbc] [--no-zwanzig] [--no-cross] [--cov]
+
+sections (in order)
+  1 fmt         zig fmt --check over the project file list
+  2 build       zig build
+  3 test        zig build test
+  4 ast-check   zig ast-check over the project file list
+  5 ziglint     ziglint over the project file list          (asserts)
+  6 zlint       zlint -S over the project file list         (asserts)
+  7 zbc         zbc escape analysis                         (advisory)
+  8 zwanzig     zwanzig over the project file list         (asserts all findings)
+  9 cross-test  cross-test matrix, narrowed by ./cross-test.profile.sh
+                         (rows the profile declares as REQUIRED must execute)
+ 10 zig-cov     coverage, opt-in via --cov                  (advisory)
+
+  --no-zbc and --no-zwanzig drop sections 7 and 8 when a project gate owns
+  separate strict analysis stages.
+
+  --no-cross drops section 9, which is the only section that leaves the host:
+  it builds and RUNS the test suite for every target in the profile, under
+  qemu_user where there is no native runner. Budget tens of minutes. The other
+  sections are all host-local.
+
+environment
+  ZIG_GATE_PREFIX         the installed prefix this gate belongs to. When it is
+                          set, or when this script is running as
+                          <prefix>/bin/zig-gate, every analyzer resolves to
+                          <prefix>/bin/<name> and to nothing else: no
+                          $HOME/.local/bin lookup and no PATH fallback. A
+                          missing analyzer is exit 2 naming the exact file,
+                          because a gate that silently runs a different
+                          analyzer is worse than one that does not run.
+                          Unset and not installed under bin/ means the
+                          developer layout: $HOME/.local/bin first, then PATH.
+  ZIG                     compiler; default `zig` on PATH. Pin it (ZIG=/path/to/zig)
+                          where PATH `zig` is a version-selecting shim.
+  GATE_CACHE_DIR          --cache-dir for sections 2, 3, 10. Defaults to
+                          $ZIG_LOCAL_CACHE_DIR -- the shared host policy's
+                          per-user local cache -- and otherwise to
+                          $GATE_SCRATCH/cache; without either, Zig writes
+                          ./.zig-cache, and this repository is on NFS.
+  GATE_GLOBAL_CACHE_DIR   --global-cache-dir likewise. Defaults to
+                          $ZIG_GLOBAL_CACHE_DIR -- inside devenv that is this
+                          project's own warm cache -- and otherwise to
+                          $GATE_SCRATCH/zig-global. An explicit value still wins,
+                          and is held to the same physical-mount rule.
+  GATE_SYSTEM_PACKAGE_DIR --system package pool for build/test/coverage checks.
+                          Unset keeps Zig's normal dependency resolution.
+  GATE_EXCLUDE            space-separated BRE patterns removed from the file list.
+                          Overrides the built-in default; to extend rather than
+                          replace it, include the default patterns yourself.
+  GATE_MAX_LINES          lines of raw output shown per failing section
+                          (default 60). Every lint section prints a per-rule
+                          histogram first, so the shape survives any truncation.
+  GATE_SCRATCH            root for this run's scratch: this run's log
+                          directory, the private mktemp -d, and the parent of
+                          the Zig cache directories. On a managed cluster host
+                          (hostname starting buildhost) it must be under
+                          /home/tmp or /home/tmp2, on a real mountpoint, with at
+                          least 100 GiB free. On every other host any absolute
+                          path is accepted when it is a real, non-symlink
+                          directory this user owns and can write, has at least
+                          1 GiB free, and is not on NFS. /tmp, /var/tmp,
+                          /dev/shm and the NFS exports are always refused.
+                          Defaults to TMPDIR, then to a verified candidate.
+  GATE_CROSS_OUTPUT       cross-test --output directory (default
+                          $GATE_SCRATCH/zig-gate-cross). Kept after the run —
+                          section 9 reads its per-target logs back — and never
+                          deleted by the gate. Held to the same rule as
+                          GATE_SCRATCH. The gate binds its own CROSS_RUN_ID for
+                          that run and reads only runs/<that id>/summary.json,
+                          so evidence can never come from another run in the
+                          same tree.
+  QUALITY_HOST_SCRATCH_POLICY
+                          path to an optional machine-wide scratch policy
+                          script, default $HOME/.local/lib/host-scratch.sh when
+                          HOME is set and that file is readable. A host with no
+                          HOME simply has no home policy. It is sourced first
+                          and its exports win.
+                          It is NOT required: a cold install with an isolated
+                          HOME and no such file is enforced by
+                          ../lib/cross-test/scratch-contract.sh instead, which
+                          applies the same rules.
+  ZIGLINT_ARGS            extra ziglint args       (e.g. "--ignore Z024")
+  ZLINT_ARGS              extra zlint args         (e.g. "--deny-warnings")
+  ZWANZIG_ARGS            extra zwanzig args
+  CROSS_TEST_ARGS         extra cross-test args. Do NOT put --timeout here: a
+                          command-line --timeout beats ./cross-test.profile.sh,
+                          and the profile's 900 s budget is what keeps a
+                          108 s native test from dying under qemu_user.
+
+profile declaration read by section 9
+  CROSS_REQUIRED_RUN_TARGETS=<targets>, a space-separated list on ONE line of
+                          ./cross-test.profile.sh (or ./test/cross-test.profile.sh),
+                          optionally quoted, with no comment after it. Every target
+                          it names must show build=pass, run=pass, status=pass and
+                          an executed-test count above zero in that run's
+                          summary.json, or section 9 fails: compile coverage with
+                          no runner is not a runtime result. That summary is read
+                          strictly or not at all: it must be a JSON object
+                          declaring schema=2, this gate's own run_id, a finished
+                          status (pass, partial or build_only), the integer
+                          exit_code 0, bookkeeping_failure exactly false, and a
+                          list of targets whose rows are unique and each made of
+                          build and run objects -- an executed-test count has to
+                          be an integer above zero, not a bool, a float or a
+                          string. A missing, truncated, foreign-run, unfinished
+                          or malformed summary fails the section, because a run
+                          that cannot be shown to have executed these rows is not
+                          a pass. A profile that declares nothing keeps the
+                          build-only reporting, which is the truth for a project
+                          whose claim is compile coverage. The declaration is read
+                          as text and never sourced. Reading it needs python3
+                          (standard library json only), and only when a set is
+                          declared; cross-test itself needs no Python.
+  ZBC_STRICT=1            make section 7 advisory findings fail
+  ZIG_COV_FAIL_UNDER=<p>  make section 10's coverage threshold fail
+
+WHERE SCRATCH GOES, AND WHY THE RULE IS THE HOST'S
+  One constraint is not up for taste. Every directory this gate writes is
+  either a Zig cache or is read back by one, and a Zig cache needs
+  renameat2(). An NFS mount rejects it with EINVAL, so a cache there is
+  refused with that prerequisite named, rather than accepted and left to fail
+  inside `zig build` with an error that names the syscall and not the volume.
+  That is why "sanctioned scratch" is not the test. /vol/tmp and /vol/tmp2 are
+  sanctioned and are NFS.
+
+  On a managed cluster host -- `hostname -s` starting with buildhost, the same
+  probe ~/.local/lib/host-scratch.sh uses to decide whether it applies at all
+  -- the sanctioned list is short and physical: /home/tmp2 and /home/tmp, each
+  required to be a real mountpoint with at least 100 GiB free. The cluster has
+  asked processes to keep the small system volumes clear (Rechnerbetriebsgruppe,
+  2026-10-01): /tmp is a 9.8 G local ext4 volume here and /var is 20 G, and
+  user processes have repeatedly filled both. So /tmp, /var/tmp and /dev/shm
+  are refused there, never as a last resort.
+
+  On every other host -- a CI runner, a laptop, anything without that volume
+  list -- there is nothing to honour and nothing to guess, so the test is
+  explicit ownership: an absolute path that is a real, non-symlink directory
+  this user owns and can write, with at least 1 GiB free and not on NFS. /tmp
+  is ordinary in that mode, because on a runner it is the only sane scratch.
+  The NFS test and the symlink resolution are the same in both modes; only the
+  volume list and the free-space floor differ.
+
+  ~/.local/lib/host-scratch.sh, when it is readable, is sourced first and its
+  exports win. It is not required: ../lib/cross-test/scratch-contract.sh
+  enforces the same rules on its own, so a cold install with an isolated HOME
+  and no such file is not weaker than one with it.
+
+  Order: GATE_SCRATCH, then TMPDIR, then a verified candidate -- the per-user
+  directories under the approved volumes on a managed host, and TMPDIR or /tmp
+  elsewhere. An explicit GATE_SCRATCH that does not verify stops the run
+  (exit 2) instead of being quietly replaced, because the sections below print
+  paths from this run; an ambient TMPDIR that does not verify is corrected
+  with a notice, because that was not this gate's operator speaking. Each run
+  then gets ONE private mktemp -d directory for its logs, removed on success,
+  on failure and on interruption alike.
+
+WHY THE CACHE DEFAULTS LIVE UNDER THE SCRATCH, NOT BESIDE THE SOURCES
+  Zig's cache needs renameat2(). A filesystem that rejects it with EINVAL kills
+  the build before it compiles anything:
+      programmer bug caused syscall error: INVAL
+  Left to itself Zig puts the local cache in ./.zig-cache -- inside this
+  repository, which is NFS -- and, with neither cache variable set, the global
+  one in $HOME/.cache/zig, which is NFS as well. Each default therefore
+  follows what the environment already declared: $ZIG_LOCAL_CACHE_DIR and
+  $ZIG_GLOBAL_CACHE_DIR, which the shared host policy and devenv both point at
+  approved storage, and falls back to the validated scratch only when the
+  environment named nothing. That is why neither is hardcoded to a project
+  path — the gate reuses the policy it was handed instead of stating a second
+  one. An explicit GATE_CACHE_DIR or GATE_GLOBAL_CACHE_DIR overrides the
+  default and is validated against the same rule, because an inherited cache
+  path is no more trusted than an inherited TMPDIR: one that resolves to /tmp
+  would move the very failure this section exists to prevent into the run it
+  was supposed to check.
+
+WHY GATE_EXCLUDE IS THE DEFAULT MECHANISM AND NOT A SIXTH find -not -path
+  build.zig's external-consumer step runs a NESTED `zig build` with
+  --cache-dir .zig-cache and setCwd(fixture), so fixture/.zig-cache/ lands
+  INSIDE the repository. The five top-level -not -path patterns never matched
+  it, and every source-selection consumer (fmt, ast-check, ziglint, zlint, zbc,
+  and now zwanzig) then reported build artifacts as defects. Measured on this
+  tree before the fix: `zig fmt --check` failed on 5 files, all of them Zig's
+  own builtin.zig/dependencies.zig copies under fixture/.zig-cache/; zlint
+  reported 4 of its 211 findings there; zwanzig reported 78 of its 166. Those
+  numbers were a function of BUILD STATE, not source state. A named mechanism
+  the project already owns extends to the next nested cache; a sixth hardcoded
+  path does not.
+USAGE
+            exit 0
+            ;;
+        *)
+            echo "zig-gate: unknown option: $a"
+            exit 2
+            ;;
+    esac
+done
+
+# Fail before project checks if the shell cannot run the gate's own helpers.
+ZIG="${ZIG:-zig}"
+for helper in "$ZIG" find grep head tail cat sed awk rm wc tr sort uniq \
+    mktemp realpath mkdir df id ln hostname uname mountpoint ls dirname stat; do
+    if ! command -v "$helper" >/dev/null 2>&1; then
+        echo "zig-gate: required command not found: $helper" >&2
+        exit 2
+    fi
+done
+
+# The scratch contract, not a hard-coded volume list, and not a required
+# developer-home file. <self>/../lib/cross-test/scratch-contract.sh is the
+# installed sibling of this script; in the source tree it is the same relative
+# path under tools/quality/harness/. Sourced before anything here writes a byte.
+GATE_SELF=$(realpath -- "${BASH_SOURCE[0]}") || exit 2
+GATE_CONTRACT="${GATE_SELF%/bin/zig-gate}/lib/cross-test/scratch-contract.sh"
+[ -r "$GATE_CONTRACT" ] ||
+    { echo "zig-gate: missing scratch contract $GATE_CONTRACT" >&2; exit 2; }
+# shellcheck source=../lib/cross-test/scratch-contract.sh
+. "$GATE_CONTRACT" ||
+    { echo "zig-gate: scratch contract $GATE_CONTRACT failed" >&2; exit 2; }
+quality_scratch_load_policy ||
+    { echo "zig-gate: cannot establish a scratch policy on this host" >&2; exit 2; }
+
+# WHERE THE ANALYZERS COME FROM. Two layouts, and the difference is not
+# cosmetic.
+#
+# Installed layout: this script is <prefix>/bin/zig-gate, or ZIG_GATE_PREFIX
+# names the prefix. Every analyzer then resolves to <prefix>/bin/<name> and to
+# nothing else. There is no $HOME/.local/bin lookup and no PATH fallback, and a
+# missing analyzer is exit 2 naming the file, because a gate that silently runs
+# a DIFFERENT analyzer than the one it was installed with reports findings
+# about a tool nobody pinned. An explicit ZIGLINT/ZLINT/ZBC/... override still
+# wins, since that is the operator naming a tool deliberately.
+#
+# Developer layout: no prefix, and the historical preference for
+# $HOME/.local/bin (tools built from patched local checkouts) with PATH as
+# fallback. Unchanged.
+GATE_PREFIX="${ZIG_GATE_PREFIX:-}"
+if [ -z "$GATE_PREFIX" ]; then
+    GATE_CANDIDATE="${GATE_SELF%/zig-gate}"
+    case "${GATE_CANDIDATE##*/}" in bin) GATE_PREFIX="${GATE_CANDIDATE%/bin}" ;; esac
+fi
+gate_tool() {
+    # $1 = the name, $2 = any explicit override. Prints the resolved path, or
+    # nothing when prefix mode is on and the file is absent.
+    if [ -n "$2" ]; then printf '%s\n' "$2"; return 0; fi
+    if [ -n "$GATE_PREFIX" ]; then
+        [ -x "$GATE_PREFIX/bin/$1" ] && printf '%s\n' "$GATE_PREFIX/bin/$1"
+        return 0
+    fi
+    if [ -x "$HOME/.local/bin/$1" ]; then
+        printf '%s\n' "$HOME/.local/bin/$1"
+        return 0
+    fi
+    command -v "$1" 2>/dev/null || true
+}
+ZIGLINT=$(gate_tool ziglint "${ZIGLINT:-}")
+ZLINT=$(gate_tool zlint "${ZLINT:-}")
+ZBC=$(gate_tool zbc "${ZBC:-}")
+ZWANZIG=$(gate_tool zwanzig "${ZWANZIG:-}")
+CROSS_TEST=$(gate_tool cross-test "${CROSS_TEST:-}")
+ZIG_COV=$(gate_tool zig-cov "${ZIG_COV:-}")
+if [ -n "$GATE_PREFIX" ]; then
+    # Fail closed, once, naming every absent analyzer at once rather than
+    # reporting a missing tool per section after minutes of other work.
+    gate_missing=
+    for gate_need in "${ZIGLINT:-}:ziglint" "${ZLINT:-}:zlint" "${ZBC:-}:zbc" \
+        "${ZWANZIG:-}:zwanzig" "${CROSS_TEST:-}:cross-test"; do
+        [ -n "${gate_need%%:*}" ] || gate_missing="$gate_missing ${gate_need##*:}"
+    done
+    if [ -n "$gate_missing" ]; then
+        echo "zig-gate: prefix $GATE_PREFIX is selected and is missing:" >&2
+        for gate_need in $gate_missing; do
+            echo "            $GATE_PREFIX/bin/$gate_need" >&2
+        done
+        echo "            install it with scripts/install-quality-tools.sh, or unset" >&2
+        echo "            ZIG_GATE_PREFIX to fall back to the developer layout." >&2
+        exit 2
+    fi
+fi
+if [ -n "$GATE_PREFIX" ]; then
+    echo "gate: analyzers resolved inside prefix $GATE_PREFIX (no HOME or PATH lookup)"
+fi
+
+
+# Per-project tuning (set in devenv.nix via env.*):
+#   ZIGLINT_ARGS  extra ziglint args (e.g. "--ignore Z024")
+#   ZLINT_ARGS    extra zlint args (e.g. "--deny-warnings")
+#   GATE_EXCLUDE  space-separated path patterns excluded from lint steps
+#   GATE_SCRATCH  root for this run's logs and cross output; see --help
+ZIGLINT_ARGS="${ZIGLINT_ARGS:-}"
+ZLINT_ARGS="${ZLINT_ARGS:-}"
+ZWANZIG_ARGS="${ZWANZIG_ARGS:-}"
+CROSS_TEST_ARGS="${CROSS_TEST_ARGS:-}"
+GATE_EXCLUDE="${GATE_EXCLUDE:-}"
+GATE_MAX_LINES="${GATE_MAX_LINES:-60}"
+
+
+GATE_USER="${USER:-$(id -un)}"
+
+# The acceptance rule itself lives in scratch-contract.sh, because cross-test
+# has to apply the same one and two copies of a volume list would drift the
+# first time an administrator changed one of them. These are thin wrappers,
+# kept as functions because the sections below read better against the names
+# they already use. The first is a LOCATION check and works on a path that does
+# not exist yet, which is what lets the cache directories be cleared before
+# anything is created; the second is the full check, for a directory that has
+# to be there and has to be this user's.
+#
+# WHY NOTHING HERE RE-DERIVES THE REASON. Both predicates set
+# QUALITY_SCRATCH_WHY to the sentence that describes the refusal they just made,
+# and that sentence is what a failure prints. Re-deriving one from the path with
+# quality_scratch_why instead is how a directory that does not exist is reported
+# as "it is on the approved volume, which only takes scratch when it is really
+# mounted and has 100 GiB free" - true of the volume, useless to the reader, and
+# about a check this gate did not even run. The two are different questions: the
+# location rules come from the path, the ownership and existence rules do not.
+gate_approved_path() { quality_scratch_path_ok "$1"; }
+gate_usable_root() { quality_scratch_ok "$1"; }
+gate_make_root() { quality_scratch_make "$1"; }
+
+gate_select_root() {
+    local root d
+    if quality_scratch_managed; then
+        # Same layout the machine policy uses — tmp/ beside cache/ — and created
+        # when the volume allows it, so this path is the one a later run of any
+        # tool gets from TMPDIR rather than a second private corner.
+        for root in "/home/tmp2/$GATE_USER" "/home/tmp/$GATE_USER"; do
+            for d in "$root/tmp" "$root"; do
+                if gate_make_root "$d"; then
+                    printf '%s\n' "$(realpath -m -- "$d")"
+                    return 0
+                fi
+            done
+        done
+        return 1
+    fi
+    # Off the cluster there is no sanctioned list to search, so the platform
+    # default is the whole of the fallback: TMPDIR when it verifies, /tmp
+    # otherwise. Both are explicit in what the gate prints, and both are held
+    # to the same ownership, free-space and NFS rules as anything named.
+    quality_scratch_pick "${TMPDIR:-}" /tmp
+}
+
+# GATE_SCRATCH is this gate's own knob, so a value that does not verify is a
+# mistake worth stopping for; TMPDIR is ambient (shells set it to /tmp by
+# default) and is corrected with a notice instead.
+gate_named=0
+[ -n "${GATE_SCRATCH:-}" ] && gate_named=1
+GATE_SCRATCH="${GATE_SCRATCH:-${TMPDIR:-}}"
+if [ -n "$GATE_SCRATCH" ] && ! gate_usable_root "$GATE_SCRATCH"; then
+    if [ "$gate_named" -eq 1 ]; then
+        echo "zig-gate: refusing scratch path $GATE_SCRATCH:" >&2
+        echo "          $QUALITY_SCRATCH_WHY" >&2
+        echo "          mode=$(quality_scratch_mode); see --help for the rule" >&2
+        exit 2
+    fi
+    echo "notice: TMPDIR=$GATE_SCRATCH cannot host this gate's scratch:" >&2
+    echo "        $QUALITY_SCRATCH_WHY" >&2
+    echo "        an ambient TMPDIR is not this gate's operator speaking, so a" >&2
+    echo "        verified directory is selected instead." >&2
+    GATE_SCRATCH=""
+fi
+if [ -z "$GATE_SCRATCH" ]; then
+    GATE_SCRATCH=$(gate_select_root) || {
+        if quality_scratch_managed; then
+            echo "zig-gate: no usable volume under /home/tmp{,2}/$GATE_USER; set GATE_SCRATCH" >&2
+        else
+            echo "zig-gate: no usable scratch directory (tried \$TMPDIR and /tmp);" >&2
+            echo "          set GATE_SCRATCH to a directory you own with at least 1 GiB free" >&2
+        fi
+        exit 2
+    }
+fi
+gate_make_root "$GATE_SCRATCH" ||
+    { echo "zig-gate: cannot use scratch $GATE_SCRATCH: $QUALITY_SCRATCH_WHY" >&2; exit 2; }
+GATE_SCRATCH=$(realpath -m -- "$GATE_SCRATCH") || exit 2
+echo "gate: scratch=$GATE_SCRATCH mode=$(quality_scratch_mode) policy=${QUALITY_SCRATCH_POLICY_USED:-builtin}"
+
+# ONE private directory per run for everything ephemeral this run writes: the
+# per-section logs and show()'s spool. mktemp creates it 0700 under a name no
+# other run can guess, so concurrent gates cannot collide, and the EXIT trap
+# removes exactly this directory and nothing else.
+GATE_TMP=$(mktemp -d "$GATE_SCRATCH/zig-gate.XXXXXXXX") || exit 2
+trap 'rm -rf -- "$GATE_TMP"' EXIT
+
+# The cross-test tree is EVIDENCE, not scratch: section 9 reads its per-target
+# logs back after the run and prints the directory to look at, so it lives
+# beside the run directory, outlives it, and is never deleted here. The same
+# location rule applies, because cross-test builds a Zig cache under it.
+GATE_CROSS_OUTPUT="${GATE_CROSS_OUTPUT:-$GATE_SCRATCH/zig-gate-cross}"
+if ! gate_approved_path "$GATE_CROSS_OUTPUT"; then
+    echo "zig-gate: refusing non-approved cross output $GATE_CROSS_OUTPUT:" >&2
+    echo "          $QUALITY_SCRATCH_WHY" >&2
+    echo "          mode=$(quality_scratch_mode); see --help for the rule" >&2
+    exit 2
+fi
+GATE_CROSS_OUTPUT=$(realpath -m -- "$GATE_CROSS_OUTPUT") || exit 2
+
+# Every command this gate runs gets the private directory as its temporary
+# area. cross-test REFUSES to start without TMPDIR and creates its state, and
+# its cache when ZIG_GLOBAL_CACHE_DIR is unset, under it — so without this it
+# would either die or land on /tmp. It deletes those itself; this is the
+# backstop, and it is what keeps a tool's own tempfile fallback off the small
+# volumes even when the environment named nothing.
+export TMPDIR="$GATE_TMP" TMP="$GATE_TMP" TEMP="$GATE_TMP"
+
+# Build cache location. Each follows what the environment already declared and
+# only then the validated scratch, because Zig's own fallback is worse than
+# slow: no --cache-dir writes ./.zig-cache, inside this NFS repository, and
+# with no --global-cache-dir at all the global cache is $HOME/.cache/zig, NFS
+# here as well. The shared host policy and devenv already point both variables
+# at approved storage -- inside devenv the global one is this project's own
+# warm cache -- so no default costs a re-fetch.
+#
+# An explicit value overrides the default but does NOT override the rule: an
+# inherited GATE_CACHE_DIR is no more trusted than an inherited TMPDIR, and one
+# that resolves to /tmp or /var/tmp would put the cache on the volume this
+# script exists to keep clear. Both are therefore held to gate_approved_path
+# and refused before anything is created -- creating first would leave a
+# directory on the very volume the refusal is about.
+GATE_CACHE_DIR="${GATE_CACHE_DIR:-${ZIG_LOCAL_CACHE_DIR:-$GATE_SCRATCH/cache}}"
+GATE_GLOBAL_CACHE_DIR="${GATE_GLOBAL_CACHE_DIR:-${ZIG_GLOBAL_CACHE_DIR:-$GATE_SCRATCH/zig-global}}"
+for gate_dir in "$GATE_CACHE_DIR" "$GATE_GLOBAL_CACHE_DIR"; do
+    if ! gate_approved_path "$gate_dir"; then
+        echo "zig-gate: refusing Zig cache directory $gate_dir:" >&2
+        echo "         $QUALITY_SCRATCH_WHY" >&2
+        exit 2
+    fi
+done
+for gate_dir in "$GATE_CACHE_DIR" "$GATE_GLOBAL_CACHE_DIR"; do
+    gate_make_root "$gate_dir" ||
+        { echo "zig-gate: cannot use Zig cache directory $gate_dir: $QUALITY_SCRATCH_WHY" >&2; exit 2; }
+done
+echo "gate: cache=$GATE_CACHE_DIR global=$GATE_GLOBAL_CACHE_DIR"
+# A string, not an array, and expanded UNQUOTED at the call sites on purpose:
+# an empty array is an unbound-variable error under `set -u` on bash < 4.4,
+# and an empty string is simply empty. The price is that a cache path
+# containing a space will not survive word splitting — the same price the
+# file list below already pays, and not one a cache path plausibly has.
+BUILD_ARGS=""
+if [ -n "$GATE_CACHE_DIR" ]; then BUILD_ARGS="--cache-dir $GATE_CACHE_DIR"; fi
+if [ -n "$GATE_GLOBAL_CACHE_DIR" ]; then
+    BUILD_ARGS="$BUILD_ARGS --global-cache-dir $GATE_GLOBAL_CACHE_DIR"
+fi
+
+zig_build() {
+    if [ -n "${GATE_SYSTEM_PACKAGE_DIR:-}" ]; then
+        "$ZIG" build --system "$GATE_SYSTEM_PACKAGE_DIR" "$@" $BUILD_ARGS
+    else
+        "$ZIG" build "$@" $BUILD_ARGS
+    fi
+}
+
+fail=0
+step() { printf '\n== %s ==\n' "$1"; }
+
+# Signal handlers, so that this run's private log directory is removed by the
+# EXIT trap above instead of surviving an interrupted or piped gate:
+# `zig-gate | head` closes the pipe, Ctrl-C lands mid-section, and a volume
+# that collects one abandoned directory per invocation is its own bug.
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 141' PIPE
+
+# Show a failing section's raw output, and say how much was dropped.
+# The old fixed `head -30` is what let three failing lint sections read as one
+# undifferentiated wall: the shape of a section lives in its rule histogram and
+# in its tail, and the tail was cut. Every lint section prints the histogram
+# first and this cap second, so no cap can hide the shape again.
+show() {
+    local n="${1:-$GATE_MAX_LINES}" tmp="$GATE_TMP/show" total
+    cat >"$tmp"
+    total=$(wc -l <"$tmp")
+    if [ "$total" -gt "$n" ]; then
+        head -n "$n" "$tmp"
+        printf '    ... %d more line(s) not shown\n' "$((total - n))"
+    else
+        cat "$tmp"
+    fi
+    rm -f "$tmp"
+}
+
+# Project zig files, excluding quality-tools and build dirs, generated bindings
+# and project-configured exclusions (GATE_EXCLUDE: space-separated BRE patterns,
+# one `grep -v` each, OR-ed).
+#
+# The default below is a GATE_EXCLUDE value, not extra -not -path clauses, so
+# a project that already sets GATE_EXCLUDE keeps full control and one that does
+# not still stops reporting build artifacts. Patterns are written in the
+# intersection of BRE and ERE ([.] rather than \.) so they mean the same thing
+# under either grep flavour. Each matches at ANY depth, which is the entire
+# point: the caches that are not at the top level are the ones that leaked.
+#
+# One more pattern, and it is not the same kind of entry as the other four. Those
+# four drop BUILD ARTIFACTS, which is this project's own output. This one drops
+# the QUALITY-TOOLS DISTRIBUTION: everything under tools/quality/harness/ is the
+# gate, the cross-test driver, and cross-test's lib/ — its scratch contract, its
+# runner policy, its target tables and its two regression suites. That is
+# tooling this project ships and versions as a unit, not the library this gate
+# is here to police, so it is read against its own suites rather than as if it
+# were the interval library's source.
+#
+# tools/quality/harness/lib/cross-test/run_policy.zig is the only Zig file in
+# that tree, and it is FIRST-PARTY, not vendored code. cross-test copies it next
+# to the compiler build runner it patches (bin/cross-test, prepare_build_runner)
+# so it is authored and reviewed here and ships under this repository's own MIT
+# terms — harness.LICENSE, with the classification and its provenance in
+# tools/quality/PROVENANCE.md. Calling it third-party was wrong in the only
+# respect that matters here: it would credit a copyright this repository does
+# not hold, and it would misname the terms the file is under.
+#
+# The classification is narrow, and it answers whose code this is rather than
+# which findings are acceptable. Every .zig file the library is made of is still
+# scanned — src/, tests/, bench/, probe/, fixture/ and build.zig — no analyser
+# rule, severity or threshold is relaxed anywhere to accommodate it, and nothing
+# here is a list of tolerated findings. A project that sets GATE_EXCLUDE itself
+# keeps full control and must include this pattern to get it.
+if [ -z "$GATE_EXCLUDE" ]; then
+    GATE_EXCLUDE="/[.]zig-cache/ /zig-out/ /zig-cache/ /zig-global-cache/ /tools/quality/harness/"
+fi
+files() {
+    local out
+    out=$(find . -name '*.zig' \
+        -not -name 'vk.zig' \
+        -not -path './zig-pkg/*' \
+        -not -path './.zig-cache/*' \
+        -not -path './zig-out/*' \
+        -not -path './zig-cache/*' \
+        -not -path './zig-global-cache/*')
+    for p in $GATE_EXCLUDE; do
+        out=$(printf '%s\n' "$out" | grep -v "$p")
+    done
+    printf '%s\n' "$out"
+}
+
+# 1. fmt
+step "zig fmt --check"
+fmt_files=$(files)
+if [ -z "$fmt_files" ]; then
+    echo "  fmt: skipped (no project zig files)"
+elif out=$("$ZIG" fmt --check $fmt_files 2>&1); then
+    echo "  fmt: OK"
+else
+    n=$(printf '%s\n' "$out" | grep -c '^\./')
+    echo "  fmt: $n file(s) need formatting"
+    printf '%s\n' "$out" | show
+    fail=1
+fi
+
+# 2. build
+step "zig build"
+if zig_build >"$GATE_TMP/build" 2>&1; then
+    echo "  build: OK"
+else
+    echo "  build: FAILED"
+    tail -30 "$GATE_TMP/build"
+    fail=1
+fi
+
+# 3. test (skipped when the project has no test step)
+step "zig build test"
+if zig_build test >"$GATE_TMP/test" 2>&1; then
+    echo "  test: OK"
+elif grep -q "no step named 'test'" "$GATE_TMP/test"; then
+    echo "  test: skipped (no test step)"
+else
+    echo "  test: FAILED"
+    tail -30 "$GATE_TMP/test"
+    fail=1
+fi
+
+# 4. ast-check on every project zig file
+step "zig ast-check"
+ast_fail=0
+while IFS= read -r f; do
+    if ! "$ZIG" ast-check "$f" >"$GATE_TMP/ast" 2>&1; then
+        echo "  AST error in $f"
+        cat "$GATE_TMP/ast"
+        ast_fail=1
+    fi
+done < <(files)
+if [ "$ast_fail" -eq 0 ]; then
+    echo "  ast-check: OK"
+else
+    echo "  ast-check: FAILED"
+    fail=1
+fi
+
+# 5. ziglint (local)
+step "ziglint"
+if [ -z "$ZIGLINT" ]; then
+    echo "  ziglint: FAILED (required tool not found)"
+    fail=1
+else
+    out=$("$ZIGLINT" $ZIGLINT_ARGS $(files) 2>&1)
+    status=$?
+    n=$(printf '%s\n' "$out" | grep -cE '^Z[0-9]+')
+    if [ "$n" -eq 0 ] && [ "$status" -eq 0 ]; then
+        echo "  ziglint: OK"
+    else
+        echo "  ziglint: found $n issue(s), exit $status"
+        echo "    by rule:"
+        printf '%s\n' "$out" | grep -oE '^Z[0-9]+' | sort | uniq -c | sort -rn |
+            sed 's/^/      /'
+        printf '%s\n' "$out" | show
+        fail=1
+    fi
+fi
+
+# 6. zlint (local, stdin mode)
+step "zlint"
+if [ -z "$ZLINT" ]; then
+    echo "  zlint: FAILED (required tool not found)"
+    fail=1
+else
+    out=$(files | "$ZLINT" -S $ZLINT_ARGS 2>&1)
+    status=$?
+    # zlint prints "Found N errors and M warnings across F files in Tms."
+    # Count from the summary (diagnostic lines are multi-line, error/warning
+    # words also appear in it — do not grep raw output).
+    n=$(printf '%s\n' "$out" | sed -E 's/\x1b\[[0-9;]*m//g' |
+        sed -nE 's/.*Found ([0-9]+) errors and ([0-9]+) warnings.*/\1 \2/p' |
+        awk '{s += $1 + $2} END {print s + 0}')
+    if [ "$n" -eq 0 ] && [ "$status" -eq 0 ]; then
+        echo "  zlint: OK"
+    else
+        echo "  zlint: found $n issue(s), exit $status"
+        # The count above stays where it was — zlint's own summary line. The
+        # histogram is a SECOND, cheap pass in json mode purely to name the
+        # rules: the text rendering repeats one rule's message for every hit,
+        # so a truncated sample of it shows one rule and hides the rest.
+        echo "    by rule:"
+        files | "$ZLINT" -S -f json 2>/dev/null | grep -oE '"code":"[^"]*"' |
+            sed -E 's/"code":"([^"]*)"/\1/' | sort | uniq -c | sort -rn |
+            sed 's/^/      /'
+        printf '%s\n' "$out" | show
+        fail=1
+    fi
+fi
+
+# 7. zbc (default; advisory unless ZBC_STRICT=1 — its findings need project
+#    judgment, and there is no per-finding suppression mechanism)
+if $use_zbc; then
+    step "zbc"
+    if [ -z "$ZBC" ]; then
+        echo "  zbc: FAILED (required tool not found)"
+        fail=1
+    else
+        out=$("$ZBC" $(files) 2>&1)
+        status=$?
+        errors=$(printf '%s\n' "$out" | grep -c 'error(')
+        warnings=$(printf '%s\n' "$out" | grep -c 'warning(')
+        if [ "$errors" -eq 0 ] && [ "$warnings" -eq 0 ] && [ "$status" -eq 0 ]; then
+            echo "  zbc: OK"
+        else
+            echo "  zbc: $errors error(s), $warnings warning(s) (advisory), exit $status"
+            echo "    by rule:"
+            printf '%s\n' "$out" | grep -oE '(error|warning)\([a-z0-9-]+\)' |
+                sort | uniq -c | sort -rn | sed 's/^/      /'
+            printf '%s\n' "$out" | show
+            if [ "$errors" -gt 0 ] || [ "${ZBC_STRICT:-0}" = "1" ] || [ "$status" -gt 1 ] ||
+                { [ "$status" -ne 0 ] && [ "$errors" -eq 0 ] && [ "$warnings" -eq 0 ]; }; then
+                fail=1
+            fi
+        fi
+    fi
+fi
+
+# 8. zwanzig — static and path-sensitive analysis over the SAME
+#    explicit file list as every other section above.
+#
+#    SCOPING. zwanzig reads no .gitignore, has no path-exclusion flag, and
+#    ignores only the four directories it names in its own help text
+#    (zig-cache/, zig-out/, .zigmod/, .gyro/) — none of which is `.zig-cache/`.
+#    Its positional arguments are therefore the only path lever, and a bare `.`
+#    or a directory argument makes its finding count a function of BUILD STATE:
+#    run it after a `zig build` and it analyses Zig's own builtin.zig and
+#    dependencies.zig copies. Passing files() explicitly is what keeps its
+#    numbers about this project. Verified: an explicit 37-file list makes it
+#    report "discovered 37 file(s)", and a directory argument does not.
+#
+#    Every diagnostic is asserted. Setup errors, crashes, inconsistent exit
+#    codes and unparseable output fail independently of the finding count.
+if ! $use_zwanzig; then
+    :
+elif [ -z "$ZWANZIG" ]; then
+    step "zwanzig"
+    echo "  zwanzig: FAILED (required tool not found)"
+    fail=1
+else
+    step "zwanzig"
+    zw_files=$(files)
+    if [ -z "$zw_files" ]; then
+        echo "  zwanzig: skipped (no project zig files)"
+    else
+        out=$("$ZWANZIG" $ZWANZIG_ARGS $zw_files 2>&1)
+        status=$?
+        # A finding is ONE line, and it is the only line in the output shaped
+        # like this:
+        #     {file}:{line}:{col}: {severity}: [{rule}] {message}
+        # zwanzig 0.15.1 prints exactly that from Diagnostic.format
+        # (tools/zwanzig/src/diagnostic.zig), severity being one of
+        # note/warning/error, optionally followed by `  related: l:c`, then the
+        # offending source line and a caret line. Matching a bare
+        # `[class]` ANYWHERE in the output counted Zig indexing in those
+        # echoed source lines — out[at], gc[i] — as two more rule classes:
+        # 122 findings in 9 classes for a run that reported 120 in 7, with two
+        # "classes" that exist only inside someone else's source text and,
+        # being unrecognised, were charged as asserted findings. The whole
+        # head line is anchored below so only head lines can ever match.
+        # Colour is stripped first, for the reason section 6 strips it: Zig's
+        # std.Io.tty honours CLICOLOR_FORCE, so an SGR sequence can reach this
+        # pipe, and one inside a severity word or a class name breaks every
+        # anchor at once.
+        zw_re='^[^[:space:]]+:[0-9]+:[0-9]+: (note|warning|error): \[[a-z0-9_][a-z0-9_.-]*\]'
+        zw_text=$(printf '%s\n' "$out" | sed -E 's/\x1b\[[0-9;]*m//g')
+        zw_heads=$(printf '%s\n' "$zw_text" | grep -E "$zw_re")
+        n=$(printf '%s\n' "$zw_heads" | grep -c .)
+        hist=$(printf '%s\n' "$zw_heads" |
+            sed -E 's/^[^[:space:]]+:[0-9]+:[0-9]+: (note|warning|error): \[([^]]+)\].*$/\2/' |
+            sort | uniq -c | sort -k2)
+        nclass=$(printf '%s\n' "$hist" | grep -cE '[^ 0-9]+$')
+        # "Found 120 issue(s):" is zwanzig's own count of diagnostics, so it is
+        # an independent witness for the parse. It is matched whole-line: the
+        # phrase is a plausible thing for a source echo to contain.
+        zw_claimed=$(printf '%s\n' "$zw_text" |
+            sed -nE 's/^Found ([0-9]+) issue\(s\):$/\1/p' | tail -1)
+        zw_errs=$(printf '%s\n' "$zw_text" | grep -cE '^Error: ')
+        # Every one of these fails the section on its own, BEFORE the class
+        # policy below is consulted. Ordering matters: they are the only thing
+        # standing between a dead analyser that happened to hold advisory
+        # findings and a green run.
+        zw_bad=""
+        if [ "$zw_errs" -gt 0 ]; then
+            zw_bad="$(printf '%s\n' "$zw_text" | grep -m1 -E '^Error: ')"
+        elif [ "$status" -ne 0 ] && [ "$status" -ne 1 ]; then
+            zw_bad="exit $status is outside zwanzig's contract (0 = nothing found, 1 = findings or a setup error; a signal death is 128+N)"
+        elif [ "$status" -ne 0 ] && [ "$n" -eq 0 ]; then
+            zw_bad="exit $status but no diagnostic line parsed"
+        elif [ "$status" -eq 0 ] && [ "$n" -gt 0 ]; then
+            zw_bad="exit 0 with $n diagnostic(s); zwanzig exits 1 whenever it has any"
+        elif [ -n "$zw_claimed" ] && [ "$zw_claimed" != "$n" ]; then
+            zw_bad="zwanzig reported $zw_claimed issue(s) but $n diagnostic line(s) parsed; the output format moved"
+        fi
+        if [ -z "$zw_bad" ] && [ "$n" -eq 0 ]; then
+            echo "  zwanzig: OK"
+        else
+            if [ -n "$zw_claimed" ]; then
+                echo "  zwanzig: found $n finding(s) in $nclass rule class(es), exit $status"
+            else
+                echo "  zwanzig: no summary line, parsed $n diagnostic line(s), exit $status"
+            fi
+            asserted=0
+            while read -r c rule; do
+                [ -n "${rule:-}" ] || continue
+                echo "      $c $rule (asserted)"
+                asserted=$((asserted + c))
+            done <<HIST
+$hist
+HIST
+            if [ -n "$zw_bad" ]; then
+                echo "  zwanzig: FAILED ($zw_bad)"
+                fail=1
+            elif [ "$asserted" -gt 0 ]; then
+                fail=1
+            fi
+            printf '%s\n' "$out" | show
+        fi
+    fi
+fi
+
+# 9. cross-test — the cross-compilation matrix, narrowed by the project's own
+#    ./cross-test.profile.sh. This is the only section that leaves the host, and
+#    it is ON BY DEFAULT for that reason: it is the project's only big-endian
+#    and only foreign-ABI execution coverage, and a gate that has to be asked
+#    for coverage is not a gate. --no-cross drops it.
+#
+#    Two properties of cross-test that a naive exit-code check gets wrong, both
+#    documented in ./cross-test.profile.sh and both handled here:
+#
+#    1. A GREEN RUN SAYS `status=partial`, not `status=pass`. x86_64-windows
+#       has no runner on this host, so cross-test records it
+#       build_only/runtime_unavailable and deliberately never counts it as a
+#       pass. Exit status is 0. `--require-runners` would turn that normal
+#       result into a failure and is NOT passed here. This section therefore
+#       judges `partial` and `build_only` by fail=0, which is exactly what the
+#       profile says to judge them by.
+#
+#    2. `status=fail` CANNOT DISTINGUISH A TIMEOUT FROM A WRONG ANSWER. Both
+#       print run=FAIL reason=tests_failed, and the tests=N on that line counts
+#       tests that RAN. So this section does not stop at the one-line summary:
+#       on any failure it opens the per-target build logs under --output and
+#       classifies the failure itself. A `timed out` in a log is a BUDGET, and
+#       with the profile in place it means the 900 s CROSS_TIMEOUT was
+#       overridden (a command-line --timeout beats the profile). A failing
+#       assertion with no `timed out` is a REAL failure and the only thing in a
+#       status=fail worth debugging.
+#
+#    Either way the section fails: a run that lost a test has not proved the
+#    assertions, whether it lost it to a wrong answer or to a budget. The point
+#    is that it says WHICH, instead of reporting 347/348 tests passed as a
+#    broken test suite.
+#
+#    --output must be off a network mount for the same renameat2 reason as the
+#    Zig cache, and it is read back after the run, so it defaults to a stable
+#    directory under the approved scratch root instead of into this run's
+#    private one. cross-test manages its own cache
+#    and REFUSES --cache-dir, --prefix, -Dtarget, -j and --test-timeout, so the
+#    gate does not pass them. Two things ARE handed to it, because they are
+#    this gate's decisions and not defaults: the run id, so every piece of
+#    evidence below comes from the run just performed, and this gate's already
+#    validated global cache, so an ambient ZIG_GLOBAL_CACHE_DIR cannot decide
+#    where cross-test's per-run cache lives.
+#
+#    3. WHAT RAN IS NOT THE SAME QUESTION AS WHAT FAILED. `fail=0` is compatible
+#       with zero executed tests: without qemu_user every Linux row degrades to
+#       build_only/runtime_unavailable, and this section would print OK having
+#       executed nothing. A profile that declares
+#       CROSS_REQUIRED_RUN_TARGETS=<space-separated targets> therefore gets a
+#       per-target check against THIS run's summary. An absent declaration keeps
+#       honest compile-only reporting; an explicit empty list is rejected.
+if $use_cross; then
+    step "cross-test"
+    # The profile is the contract, so the target set, the budget and now the set
+    # of rows that have to EXECUTE all come from that one file. The gate reads
+    # the declaration as text and does not source it: cross-test sources the
+    # file in its own process, and a gate that evaluated project code would be a
+    # new trust surface rather than a new check.
+    ct_profile=./cross-test.profile.sh
+    [ -f "$ct_profile" ] || ct_profile=./test/cross-test.profile.sh
+    ct_required=
+    ct_decl_error=
+    if [ -f "$ct_profile" ]; then
+        ct_required=$(sed -nE 's/^[[:space:]]*CROSS_REQUIRED_RUN_TARGETS=([^#]*).*$/\1/p' \
+            "$ct_profile" | tail -1 |
+            sed -E "s/^[[:space:]]*//; s/[[:space:]]*\$//; s/^[\"']//; s/[\"']\$//")
+        if [ -z "${ct_required//[[:space:]]/}" ] &&
+            grep -Eq '^[[:space:]]*CROSS_REQUIRED_RUN_TARGETS=' "$ct_profile"; then
+            ct_decl_error="$ct_profile declares an empty CROSS_REQUIRED_RUN_TARGETS list"
+        fi
+        for ct_name in $ct_required; do
+            printf '%s' "$ct_name" |
+                grep -Eq '^[a-z0-9_]+-[a-z0-9_.]+(-[a-z0-9_.]+)*$' || {
+                ct_decl_error="$ct_profile declares CROSS_REQUIRED_RUN_TARGETS='$ct_required', and '$ct_name' is not a target name. It is one space-separated list of matrix targets on a single line, optionally quoted, with no comment after it."
+                ct_required=
+                break
+            }
+        done
+    fi
+    if [ -z "$CROSS_TEST" ]; then
+        echo "  cross-test: FAILED (required tool not found)"
+        fail=1
+    elif [ ! -f "$ct_profile" ]; then
+        echo "  cross-test: FAILED (required profile not found)"
+        fail=1
+    elif [ -n "$ct_decl_error" ]; then
+        echo "  cross-test: FAILED ($ct_decl_error)"
+        fail=1
+    else
+        echo "  (runs and executes the profile's targets; under qemu_user this is"
+        echo "   the slowest section by an order of magnitude — --no-cross skips it)"
+        # THIS RUN'S ID, bound here and not guessed afterwards. The output
+        # directory keeps every run it has ever done, so "whichever is newest" is
+        # not evidence about this run: it can be another process's run, and a
+        # summary written last week reads exactly like one written tonight.
+        # cross-test takes CROSS_RUN_ID, refuses unsafe characters in it and
+        # refuses to reuse an existing run directory, so a name generated here
+        # cannot collide with older evidence.
+        ct_run_id="gate-$(date -u +%Y%m%d-%H%M%S)-$$-$RANDOM"
+        ct_rundir=$GATE_CROSS_OUTPUT/runs/$ct_run_id
+        ct_summary=$ct_rundir/summary.json
+        if CROSS_RUN_ID=$ct_run_id ZIG_GLOBAL_CACHE_DIR="$GATE_GLOBAL_CACHE_DIR" ZIG="$ZIG" \
+            "$CROSS_TEST" --output "$GATE_CROSS_OUTPUT" $CROSS_TEST_ARGS \
+            >"$GATE_TMP/cross" 2>&1; then
+            ct_status=0
+        else
+            ct_status=$?
+        fi
+        ct_line=$(grep -E '^cross-test: status=' "$GATE_TMP/cross" | tail -1)
+        printf '%s\n' "$ct_line" | sed 's/^/  /'
+        ct_state=$(printf '%s' "$ct_line" |
+            sed -nE 's/.*status=([a-z_]+).*/\1/p')
+        ct_fail=$(printf '%s' "$ct_line" | sed -nE 's/.*[^_]fail=([0-9]+).*/\1/p')
+        [ -n "$ct_fail" ] || ct_fail=unknown
+        if [ -z "$ct_state" ]; then
+            # No summary line at all: cross-test died before reporting. Exit 2
+            # is its setup error, 130/143 its interruption/termination.
+            echo "  cross-test: FAILED (exit $ct_status, no status line — setup error or interrupted)"
+            tail -30 "$GATE_TMP/cross" | sed 's/^/    /'
+            fail=1
+        elif [ "$ct_state" = fail ] || [ "$ct_state" = incomplete ]; then
+            # The trap the profile warns about. Classify it from THIS run's logs.
+            ct_timedout=$(grep -lE 'timed out' "$ct_rundir"/build-*.log 2>/dev/null |
+                sed 's|.*/||; s|^build-||; s|\.log$||' | sort | tr '\n' ' ')
+            if [ -n "$ct_timedout" ]; then
+                echo "  cross-test: FAILED — BUDGET, not a broken suite."
+                echo "    target(s) that ran out of time: $ct_timedout"
+                echo "    'timed out' in a per-target build log means the execution"
+                echo "    budget was too small, not that an assertion broke. With"
+                echo "    ./cross-test.profile.sh in place this means CROSS_TIMEOUT"
+                echo "    was OVERRIDDEN: a --timeout on the command line beats the"
+                echo "    profile. Check CROSS_TEST_ARGS."
+            else
+                echo "  cross-test: FAILED — a real failure: no 'timed out' in any"
+                echo "    per-target build log, so this is an assertion, not a budget."
+            fi
+            echo "    per-target detail:"
+            grep -hE 'Build Summary|error: .*expected|error: .*timed out' \
+                "$ct_rundir"/build-*.log 2>/dev/null |
+                sort -u | head -10 | sed 's/^/      /'
+            echo "    logs: $ct_rundir"
+            fail=1
+        elif [ "$ct_status" -ne 0 ] || [ "$ct_fail" != 0 ]; then
+            echo "  cross-test: FAILED (status=$ct_state, fail=$ct_fail, exit=$ct_status)"
+            tail -30 "$GATE_TMP/cross" | sed 's/^/    /'
+            fail=1
+        elif [ "$ct_state" != pass ] && [ "$ct_state" != partial ] && [ "$ct_state" != build_only ]; then
+            echo "  cross-test: FAILED (unrecognised status=$ct_state)"
+            fail=1
+        else
+            # status=pass, partial or build_only with fail=0. `partial` is this
+            # project's normal clean result, not a degradation to report red.
+            ct_ok=1
+            if [ -n "$ct_required" ]; then
+                # THE ROWS THE PROFILE SAYS HAVE TO HAVE EXECUTED. cross-test's own
+                # classification is the input and none of it is re-derived here: a
+                # required row must show a build that passed, a run that passed, a
+                # final status of pass and an executed-test count above zero. A
+                # build_only row -- no runner on this host -- is compile coverage
+                # and fails here, which is the entire reason a profile declares
+                # the set: without qemu_user every Linux row degrades to
+                # build_only, and reading fail=0 alone would call that a green
+                # run having executed nothing. Targets outside the set keep their
+                # own truthful treatment; x86_64-windows stays compile coverage
+                # and is printed below as the build_only row it is.
+                #
+                # The document read is runs/$ct_run_id/summary.json: this run's
+                # own, immutable, run-scoped summary. Not the atomically replaced
+                # pointer at the prefix root, which any later run may already have
+                # taken over.
+                #
+                # And it is read strictly, because every value below is one this
+                # section would otherwise have to COERCE into a verdict. A
+                # missing or unparsable file, a summary naming a different
+                # run_id, one declaring anything but schema 2, a run that never
+                # finished (status=running, or interrupted), a non-zero or
+                # non-integer exit_code, a bookkeeping_failure that is not
+                # exactly false, targets that is not a list, a row with no
+                # target or no build/run objects, a target named twice, and a
+                # test count that is a bool, a float or a string all fail here:
+                # there is no reading of "the run cannot be shown to have
+                # executed this" that is a pass, and a count that was coerced
+                # into an int is a number this gate did not read from the run.
+                #
+                # The writer's field name is `schema`, not `schema_version`
+                # (bin/cross-test, publish_summary); the check names the field
+                # the writer actually emits, so a renamed field fails loudly
+                # instead of being read as an absent one and skipped.
+                #
+                # python3 and its standard json module are the only requirement
+                # here the harness itself does not have, and only for a profile
+                # that declares a set. cross-test stays Python-free either way.
+                if command -v python3 >/dev/null 2>&1; then
+                    ct_required_report=$(python3 - "$ct_summary" "$ct_run_id" \
+                        "$ct_required" <<'PY'
+import json
+import sys
+
+path, run_id, required = sys.argv[1], sys.argv[2], sys.argv[3].split()
+# The statuses that name a run that FINISHED. `running` is a progress document
+# published twice a phase, `interrupted`, `fail` and `incomplete` are endings
+# the shell above already refuses, and none of the four carries results this
+# check may read as executed tests.
+FINISHED_STATUSES = ("pass", "partial", "build_only")
+
+
+def refuse(reason):
+    print("FAIL " + reason)
+    sys.exit(1)
+
+
+def is_int(value):
+    # bool is a subclass of int, so isinstance() alone reads a JSON true as a
+    # count. Every number checked below counts something that happened, and a
+    # boolean is not a count of anything.
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+try:
+    with open(path, encoding="utf-8") as handle:
+        document = json.load(handle)
+except (OSError, ValueError) as error:
+    refuse("cannot read this run's summary %s (%s)" % (path, error))
+if not isinstance(document, dict):
+    refuse("summary is not a JSON object: %s" % path)
+# cross-test's writer stamps every document it publishes with `"schema":2`
+# (bin/cross-test, publish_summary) and that field is spelled `schema`. A
+# document saying anything else is a document whose field meanings this reader
+# has not verified, so it is refused rather than read optimistically -- and a
+# missing field is not a schema, it is an absence of one.
+schema = document.get("schema")
+if not is_int(schema) or schema != 2:
+    refuse("summary %s declares schema=%r, not the integer 2 it is written in"
+           % (path, schema))
+if document.get("run_id") != run_id:
+    refuse("summary is for run %r, not this gate run %r"
+           % (document.get("run_id"), run_id))
+status = document.get("status")
+if status not in FINISHED_STATUSES:
+    refuse("run %s reports status=%r, not a finished status (%s)"
+           % (run_id, status, " ".join(FINISHED_STATUSES)))
+exit_code = document.get("exit_code")
+if not is_int(exit_code) or exit_code != 0:
+    refuse("run %s reports exit_code=%r, not the integer 0 of a completed run"
+           % (run_id, exit_code))
+if document.get("bookkeeping_failure") is not False:
+    refuse("cross-test reports bookkeeping_failure=%r for run %s; only a "
+           "summary that states false recorded its own bookkeeping"
+           % (document.get("bookkeeping_failure"), run_id))
+targets = document.get("targets")
+if not isinstance(targets, list):
+    refuse("summary targets is %s, not the list of per-target rows it must be"
+           % type(targets).__name__)
+
+rows = {}
+for row in targets:
+    if not isinstance(row, dict) or not isinstance(row.get("target"), str):
+        # Skipping a row that cannot be read would report a required target as
+        # "did not build it at all" while the row carrying it sits unread in the
+        # same document. That is a guess dressed as a fact.
+        refuse("summary %s has a targets entry naming no target: %r" % (path, row))
+    target = row["target"]
+    if target in rows:
+        # Two rows for one target is a document whose result for it is
+        # ambiguous. Taking the first or the last would be choosing, silently,
+        # which of two published claims is the run's.
+        refuse("summary names target %s twice, so this run's result for it is "
+               "ambiguous rather than either of those rows" % target)
+    build = row.get("build")
+    run = row.get("run")
+    if not isinstance(build, dict) or not isinstance(run, dict):
+        refuse("%s carries build=%s run=%s, not the build/run objects a row is "
+               "made of" % (target, type(build).__name__, type(run).__name__))
+    rows[target] = row
+    print("%s %-15s build=%-6s run=%-12s tests=%-6s reason=%-22s status=%s" % (
+        "REQUIRED" if target in required else "        ", target,
+        build.get("status"), run.get("status"), run.get("tests"),
+        row.get("reason"), row.get("status")))
+
+problems = []
+for target in required:
+    row = rows.get(target)
+    if row is None:
+        problems.append("%s: the profile requires it and this run did not build it at all"
+                        % target)
+        continue
+    build = row["build"]
+    run = row["run"]
+    tests = run.get("tests")
+    if build.get("status") != "pass":
+        problems.append("%s did not build: build=%r" % (target, build.get("status")))
+    if run.get("status") != "pass":
+        problems.append("%s did not execute: run=%r reason=%r"
+                        % (target, run.get("status"), row.get("reason")))
+    if row.get("status") != "pass":
+        problems.append("%s is %r, not pass" % (target, row.get("status")))
+    if not is_int(tests) or tests <= 0:
+        problems.append("%s executed %r tests, not a count above zero"
+                        % (target, tests))
+
+if problems:
+    for problem in problems:
+        print("FAIL " + problem)
+    sys.exit(1)
+print("every required target built AND ran: " + " ".join(required))
+PY
+                    )
+                    ct_required_status=$?
+                    printf '%s\n' "$ct_required_report" | sed 's/^/    /'
+                    if [ "$ct_required_status" -ne 0 ]; then
+                        fail=1
+                        ct_ok=0
+                    else
+                        echo "  every target the profile requires to run executed its tests."
+                    fi
+                else
+                    echo "  cross-test: FAILED (python3 is required to read"
+                    echo "    $ct_summary; $ct_profile declares"
+                    echo "    CROSS_REQUIRED_RUN_TARGETS, so the required runs cannot be"
+                    echo "    proven without it)"
+                    fail=1
+                    ct_ok=0
+                fi
+            fi
+            if [ "$ct_ok" -eq 1 ]; then
+                if [ "$ct_state" = partial ] || [ "$ct_state" = build_only ]; then
+                    echo "  cross-test: OK (status=$ct_state, fail=0 — build_only rows are"
+                    echo "    targets with no runner on this host and are compile coverage only;"
+                    if [ -n "$ct_required" ]; then
+                        echo "    the rows the profile requires to run are the REQUIRED ones above)"
+                    else
+                        echo "    this profile declares no rows that must execute)"
+                    fi
+                else
+                    echo "  cross-test: OK"
+                fi
+            fi
+        fi
+    fi
+fi
+
+# 10. zig-cov (opt-in via --cov; advisory — needs build.zig wiring, and the
+#     project's plain build must succeed. Enforce via ZIG_COV_FAIL_UNDER=<pct>.)
+if $use_cov; then
+    step "zig-cov"
+    if [ -z "$ZIG_COV" ]; then
+        echo "  zig-cov: not found (skipped)"
+    else
+        cov_args="--exclude=zig-pkg --exclude=vk.zig"
+        if [ -n "${ZIG_COV_FAIL_UNDER:-}" ]; then
+            cov_args="$cov_args --fail-under=$ZIG_COV_FAIL_UNDER"
+        fi
+        out=$("$ZIG_COV" test $cov_args 2>&1)
+        status=$?
+        if [ "$status" -eq 0 ]; then
+            echo "  coverage: OK"
+            printf '%s\n' "$out" | tail -12
+        elif printf '%s\n' "$out" | grep -q "invalid option: -Dcoverage"; then
+            echo "  coverage: skipped (build.zig not wired for zig-cov — add the"
+            echo "            coverage/coverage-rt options, see zig-cov README)"
+        elif ! zig_build test >/dev/null 2>&1; then
+            echo "  coverage: skipped (plain 'zig build test' fails — coverage unavailable)"
+        else
+            echo "  coverage: FAILED (advisory)"
+            printf '%s\n' "$out" | tail -15
+            if [ -n "${ZIG_COV_FAIL_UNDER:-}" ]; then fail=1; fi
+        fi
+    fi
+fi
+
+if [ "$fail" -ne 0 ]; then
+    echo
+    echo "GATE FAILED — fix the issues above"
+    exit 1
+fi
+echo
+echo "GATE PASSED"

@@ -1,0 +1,1260 @@
+# zwanzig: local commit 19d6a7bfdd752b719b25c90efe4e1c2d158deec9 (local-sync, NOT published upstream)
+#   fix: prevent analyzer crashes and bound analysis workers
+#   applied on top of https://github.com/forketyfork/zwanzig @ 1a0768ccd889d3586ec9482f02ffffe872a99749
+# Source paths only; docs/, CHANGELOG.md, justfile and test/ are excluded.
+# Apply with: git -C <checkout> apply -p1 <this file>
+diff --git a/src/analysis/call_resolver.zig b/src/analysis/call_resolver.zig
+index 47ed1f3..b2a9f1a 100644
+--- a/src/analysis/call_resolver.zig
++++ b/src/analysis/call_resolver.zig
+@@ -297,6 +297,43 @@ const CallableInfo = struct {
+ pub const ProjectTypeResolver = struct {
+     files: []const import_resolver.File,
+     file_index: usize,
++    active_binding: ?*const BindingFrame = null,
++
++    const BindingFrame = struct {
++        file_index: usize,
++        reference_node: usize,
++        name: []const u8,
++        previous: ?*const BindingFrame,
++    };
++
++    fn forFile(self: ProjectTypeResolver, file_index: usize) ProjectTypeResolver {
++        var resolver = self;
++        resolver.file_index = file_index;
++        return resolver;
++    }
++
++    fn enterBinding(
++        self: ProjectTypeResolver,
++        name: []const u8,
++        node: usize,
++        frame: *BindingFrame,
++    ) ?ProjectTypeResolver {
++        var active = self.active_binding;
++        while (active) |entry| : (active = entry.previous) {
++            if (entry.file_index == self.file_index and
++                entry.reference_node == node and
++                std.mem.eql(u8, entry.name, name)) return null;
++        }
++        frame.* = .{
++            .file_index = self.file_index,
++            .reference_node = node,
++            .name = name,
++            .previous = self.active_binding,
++        };
++        var resolver = self;
++        resolver.active_binding = frame;
++        return resolver;
++    }
+ 
+     fn currentFile(self: ProjectTypeResolver) import_resolver.File {
+         return self.files[self.file_index];
+@@ -620,10 +657,7 @@ pub const ProjectTypeResolver = struct {
+                 const field_token = access[1];
+                 if (field_token >= tree.tokens.len or tree.tokenTag(field_token) != .identifier) return null;
+                 const receiver_type = self.resolveExprType(receiver_node) orelse return null;
+-                const target_resolver = ProjectTypeResolver{
+-                    .files = self.files,
+-                    .file_index = receiver_type.file_index,
+-                };
++                const target_resolver = self.forFile(receiver_type.file_index);
+                 const method_name = import_resolver.normalizeIdentifier(tree.tokenSlice(field_token));
+                 const proto_node = target_resolver.findMemberFunctionProto(
+                     receiver_type,
+@@ -641,7 +675,7 @@ pub const ProjectTypeResolver = struct {
+             },
+             .enum_literal => {
+                 const expected = self.resolveExpectedTypeNode(call_node, depth + 1) orelse return null;
+-                const owner_resolver = ProjectTypeResolver{ .files = self.files, .file_index = expected.file_index };
++                const owner_resolver = self.forFile(expected.file_index);
+                 const owner = owner_resolver.resolveTypeNode(expected.node_index) orelse return null;
+                 const name = import_resolver.normalizeIdentifier(tree.tokenSlice(tree.nodeMainToken(@enumFromInt(callee))));
+                 const proto = self.findMemberFunctionProto(owner, name) orelse return null;
+@@ -737,11 +771,14 @@ pub const ProjectTypeResolver = struct {
+         name: []const u8,
+         reference_node: usize,
+     ) BindingResolution {
+-        var binding = self.findNearestBinding(name, reference_node);
++        var frame: BindingFrame = undefined;
++        // Keep "found" on a cycle so callers do not retry through root lookup.
++        const resolver = self.enterBinding(name, reference_node, &frame) orelse return .{ .found = true };
++        var binding = resolver.findNearestBinding(name, reference_node);
+         const declaration_node = binding.declaration_node orelse return binding;
+         const full = self.currentFile().tree.fullVarDecl(@enumFromInt(declaration_node)) orelse return binding;
+-        binding.resolved = self.resolveVarDeclType(full, declaration_node, name);
+-        binding.is_type_namespace = self.varDeclIsTypeNamespace(full);
++        binding.resolved = resolver.resolveVarDeclType(full, declaration_node, name);
++        binding.is_type_namespace = resolver.varDeclIsTypeNamespace(full);
+         return binding;
+     }
+ 
+@@ -1108,8 +1145,10 @@ pub const ProjectTypeResolver = struct {
+         node_index: usize,
+         decl_name: []const u8,
+     ) ?ResolvedType {
++        var frame: BindingFrame = undefined;
++        const resolver = self.enterBinding(decl_name, node_index, &frame) orelse return null;
+         if (full.ast.type_node.unwrap()) |type_node| {
+-            if (self.resolveTypeNode(@intFromEnum(type_node))) |resolved| return resolved;
++            if (resolver.resolveTypeNode(@intFromEnum(type_node))) |resolved| return resolved;
+         }
+ 
+         const init_node = full.ast.init_node.unwrap() orelse return null;
+@@ -1118,13 +1157,13 @@ pub const ProjectTypeResolver = struct {
+         const tags = tree.nodes.items(.tag);
+         if (init_index >= tags.len) return null;
+         if (import_resolver.isBuiltinCallTag(tags[init_index])) {
+-            return self.resolveBuiltinType(@intCast(init_index));
++            return resolver.resolveBuiltinType(@intCast(init_index));
+         }
+         if (isContainerTag(tags[init_index])) {
+             return .{ .file_index = self.file_index, .type_name = decl_name, .container_node = @intCast(init_index) };
+         }
+-        if (isRootDeclNode(tree, node_index) and !self.varDeclIsTypeNamespace(full)) return null;
+-        return self.resolveInitializerType(init_index);
++        if (isRootDeclNode(tree, node_index) and !resolver.varDeclIsTypeNamespace(full)) return null;
++        return resolver.resolveInitializerType(init_index);
+     }
+ 
+     fn resolveInitializerType(self: ProjectTypeResolver, node: usize) ?ResolvedType {
+@@ -1212,10 +1251,7 @@ pub const ProjectTypeResolver = struct {
+ 
+     fn resolveCallType(self: ProjectTypeResolver, node: u32) ?ResolvedType {
+         if (self.resolveCallReturnTypeNode(node)) |return_type| {
+-            const return_resolver = ProjectTypeResolver{
+-                .files = self.files,
+-                .file_index = return_type.file_index,
+-            };
++            const return_resolver = self.forFile(return_type.file_index);
+             if (return_resolver.resolveTypeNode(return_type.node_index)) |resolved| {
+                 return resolved;
+             }
+@@ -1419,10 +1455,7 @@ pub const ProjectTypeResolver = struct {
+         const pair = self.currentFile().tree.nodes.items(.data)[node].node_and_node;
+         const base_node = @intFromEnum(pair[0]);
+         const type_node = self.resolveExprTypeNode(base_node) orelse return null;
+-        const resolver = ProjectTypeResolver{
+-            .files = self.files,
+-            .file_index = type_node.file_index,
+-        };
++        const resolver = self.forFile(type_node.file_index);
+         return resolver.resolveTypeNode(type_node.node_index);
+     }
+ 
+@@ -1456,10 +1489,7 @@ pub const ProjectTypeResolver = struct {
+             .array_access => {
+                 const pair = tree.nodes.items(.data)[node].node_and_node;
+                 const base_type = self.resolveExprTypeNode(@intFromEnum(pair[0])) orelse return null;
+-                const base_resolver = ProjectTypeResolver{
+-                    .files = self.files,
+-                    .file_index = base_type.file_index,
+-                };
++                const base_resolver = self.forFile(base_type.file_index);
+                 var visited: [64]u32 = undefined;
+                 return base_resolver.resolveArrayElementTypeNode(base_type.node_index, &visited, 0);
+             },
+@@ -1652,18 +1682,12 @@ pub const ProjectTypeResolver = struct {
+                 }
+                 const init_node = full.ast.init_node.unwrap() orelse return null;
+                 const init_type = self.resolveInitializerResultTypeNode(@intFromEnum(init_node)) orelse return null;
+-                const init_resolver = ProjectTypeResolver{
+-                    .files = self.files,
+-                    .file_index = init_type.file_index,
+-                };
++                const init_resolver = self.forFile(init_type.file_index);
+                 return init_resolver.resolveArrayElementTypeNode(init_type.node_index, visited, depth + 1);
+             },
+             .field_access => {
+                 const type_ref = self.resolveExprTypeNode(node) orelse return null;
+-                const type_resolver = ProjectTypeResolver{
+-                    .files = self.files,
+-                    .file_index = type_ref.file_index,
+-                };
++                const type_resolver = self.forFile(type_ref.file_index);
+                 return type_resolver.resolveArrayElementTypeNode(type_ref.node_index, visited, depth + 1);
+             },
+             else => return null,
+@@ -1671,10 +1695,7 @@ pub const ProjectTypeResolver = struct {
+     }
+ 
+     pub fn resolveFieldTypeNode(self: ProjectTypeResolver, base_type: ResolvedType, field_name: []const u8) ?ResolvedTypeNode {
+-        const target = ProjectTypeResolver{
+-            .files = self.files,
+-            .file_index = base_type.file_index,
+-        };
++        const target = self.forFile(base_type.file_index);
+         if (base_type.container_node) |container_node| {
+             return target.resolveContainerFieldTypeNode(
+                 base_type.file_index,
+@@ -1688,7 +1709,7 @@ pub const ProjectTypeResolver = struct {
+     fn resolveRootFieldTypeNode(self: ProjectTypeResolver, file_index: usize, field_name: []const u8) ?ResolvedTypeNode {
+         const tree = self.files[file_index].tree;
+         const tags = tree.nodes.items(.tag);
+-        const target = ProjectTypeResolver{ .files = self.files, .file_index = file_index };
++        const target = self.forFile(file_index);
+         for (tree.rootDecls()) |decl_node| {
+             const node = @intFromEnum(decl_node);
+             if (node >= tags.len) continue;
+@@ -1792,10 +1813,7 @@ pub const ProjectTypeResolver = struct {
+     }
+ 
+     fn resolveMemberType(self: ProjectTypeResolver, base_type: ResolvedType, member_name: []const u8) ?ResolvedType {
+-        const member_resolver = ProjectTypeResolver{
+-            .files = self.files,
+-            .file_index = base_type.file_index,
+-        };
++        const member_resolver = self.forFile(base_type.file_index);
+         if (base_type.container_node) |container_node| {
+             return member_resolver.resolveContainerFieldType(
+                 base_type.file_index,
+@@ -1823,19 +1841,12 @@ pub const ProjectTypeResolver = struct {
+             const decl_name = import_resolver.normalizeIdentifier(tree.tokenSlice(name_token));
+             if (!std.mem.eql(u8, decl_name, name)) continue;
+ 
+-            const nested_resolver = ProjectTypeResolver{ .files = self.files, .file_index = file_index };
++            const nested_resolver = self.forFile(file_index);
+             if (nested_resolver.resolveVarDeclType(full, node_index, decl_name)) |resolved| return resolved;
+         }
+         return null;
+     }
+ 
+-    fn resolveFieldType(self: ProjectTypeResolver, base_type: ResolvedType, field_name: []const u8) ?ResolvedType {
+-        if (base_type.container_node) |container_node| {
+-            return self.resolveContainerFieldType(base_type.file_index, container_node, field_name);
+-        }
+-        return self.resolveRootFieldType(base_type.file_index, field_name);
+-    }
+-
+     fn resolveRootFieldType(self: ProjectTypeResolver, file_index: usize, field_name: []const u8) ?ResolvedType {
+         const file = self.files[file_index];
+         const tree = file.tree;
+@@ -1881,7 +1892,7 @@ pub const ProjectTypeResolver = struct {
+             const name = import_resolver.normalizeIdentifier(tree.tokenSlice(name_token));
+             if (!std.mem.eql(u8, name, field_name)) return null;
+ 
+-            const nested_resolver = ProjectTypeResolver{ .files = self.files, .file_index = file_index };
++            const nested_resolver = self.forFile(file_index);
+             return nested_resolver.resolveVarDeclType(full, node, name);
+         }
+ 
+@@ -1892,7 +1903,7 @@ pub const ProjectTypeResolver = struct {
+ 
+         if (!std.mem.eql(u8, import_resolver.normalizeIdentifier(tree.tokenSlice(name_token)), field_name)) return null;
+ 
+-        const nested_resolver = ProjectTypeResolver{ .files = self.files, .file_index = file_index };
++        const nested_resolver = self.forFile(file_index);
+         if (field.ast.type_expr.unwrap()) |type_node| {
+             return nested_resolver.resolveTypeNode(@intFromEnum(type_node));
+         }
+@@ -2145,3 +2156,61 @@ fn findParentNode(tree: *const std.zig.Ast, child: u32) ?u32 {
+     }
+     return null;
+ }
++
++test "ProjectTypeResolver rejects cyclic aliases without hiding valid receivers" {
++    const allocator = std.testing.allocator;
++    const code: [:0]const u8 =
++        \\const A = B;
++        \\const B = A;
++        \\const Good = struct {};
++        \\fn run(x: A, good: Good) void { x.run(); good.run(); }
++    ;
++    var tree = try std.zig.Ast.parse(allocator, code, .zig);
++    defer tree.deinit(allocator);
++    const files = [_]import_resolver.File{.{ .path = "api.zig", .tree = &tree }};
++    const resolver: ProjectTypeResolver = .{ .files = &files, .file_index = 0 };
++    var checked: usize = 0;
++    for (tree.nodes.items(.tag), 0..) |tag, node| {
++        if (tag != .field_access) continue;
++        const receiver = @intFromEnum(tree.nodes.items(.data)[node].node_and_token[0]);
++        const name = import_resolver.identifierName(&tree, receiver) orelse continue;
++        const resolved = resolver.resolveExprType(receiver);
++        if (std.mem.eql(u8, name, "x")) {
++            try std.testing.expectEqual(@as(?ResolvedType, null), resolved);
++        } else {
++            const good = resolved orelse return error.TestUnexpectedResult;
++            try std.testing.expectEqualStrings("Good", good.type_name.?);
++        }
++        checked += 1;
++    }
++    try std.testing.expectEqual(@as(usize, 2), checked);
++}
++
++test "ProjectTypeResolver rejects cross-file member alias cycles" {
++    const allocator = std.testing.allocator;
++    var first = try std.zig.Ast.parse(allocator,
++        \\const b = @import("b.zig");
++        \\pub const A = b.B;
++        \\fn run(x: A) void { x.run(); }
++    , .zig);
++    defer first.deinit(allocator);
++    var second = try std.zig.Ast.parse(allocator,
++        \\const a = @import("a.zig");
++        \\pub const B = a.A;
++    , .zig);
++    defer second.deinit(allocator);
++    const files = [_]import_resolver.File{
++        .{ .path = "a.zig", .tree = &first },
++        .{ .path = "b.zig", .tree = &second },
++    };
++    const resolver: ProjectTypeResolver = .{ .files = &files, .file_index = 0 };
++    for (first.nodes.items(.tag), 0..) |tag, node| {
++        if (tag != .field_access) continue;
++        const receiver = @intFromEnum(first.nodes.items(.data)[node].node_and_token[0]);
++        const name = import_resolver.identifierName(&first, receiver) orelse continue;
++        if (!std.mem.eql(u8, name, "x")) continue;
++        try std.testing.expectEqual(@as(?ResolvedType, null), resolver.resolveExprType(receiver));
++        return;
++    }
++    return error.TestUnexpectedResult;
++}
+diff --git a/src/analysis/import_resolver.zig b/src/analysis/import_resolver.zig
+index 5207b38..de0053e 100644
+--- a/src/analysis/import_resolver.zig
++++ b/src/analysis/import_resolver.zig
+@@ -15,6 +15,20 @@ pub fn findFileIndexByPath(files: []const File, path: []const u8) ?usize {
+ }
+ 
+ pub fn filePubliclyImportsPath(files: []const File, file_index: usize, target_path: []const u8) bool {
++    var visited: [64]usize = undefined;
++    return filePubliclyImportsPathVisited(files, file_index, target_path, &visited, 0);
++}
++
++fn filePubliclyImportsPathVisited(
++    files: []const File,
++    file_index: usize,
++    target_path: []const u8,
++    visited: *[64]usize,
++    depth: usize,
++) bool {
++    if (depth >= visited.len) return false;
++    if (std.mem.indexOfScalar(usize, visited[0..depth], file_index) != null) return false;
++    visited[depth] = file_index;
+     if (file_index >= files.len) return false;
+ 
+     const file = files[file_index];
+@@ -26,7 +40,7 @@ pub fn filePubliclyImportsPath(files: []const File, file_index: usize, target_pa
+         if (!isVarDeclTag(tags[idx])) continue;
+         if (publicVarDeclImportsPath(file.tree, @intCast(idx), file.path, target_path)) return true;
+     }
+-    return publicUsingnamespaceImportsPath(files, file.tree, file.path, target_path);
++    return usingnamespaceImportsPathVisited(files, file.tree, file.path, target_path, true, visited, depth + 1);
+ }
+ 
+ pub fn nodeImportsPath(
+@@ -70,37 +84,28 @@ pub fn fileUsingnamespaceImportsPath(
+     importer_path: []const u8,
+     target_path: []const u8,
+ ) bool {
+-    const token_tags = tree.tokens.items(.tag);
+-
+-    for (token_tags, 0..) |_, token_index| {
+-        if (!std.mem.eql(u8, tree.tokenSlice(@intCast(token_index)), "usingnamespace")) continue;
+-
+-        const import_token = nextNonCommentToken(token_tags, token_index + 1) orelse continue;
+-        if (!std.mem.eql(u8, tree.tokenSlice(@intCast(import_token)), "@import")) continue;
+-
+-        const import_path = importPathFromBuiltinToken(tree, import_token) orelse continue;
+-        if (importMayResolveToPath(importer_path, import_path, target_path)) return true;
+-        if (resolveImportToFileIndex(files, importer_path, import_path)) |file_index| {
+-            if (filePubliclyImportsPath(files, file_index, target_path)) return true;
+-        }
+-    }
+-
+-    return false;
++    var visited: [64]usize = undefined;
++    return usingnamespaceImportsPathVisited(files, tree, importer_path, target_path, false, &visited, 0);
+ }
+ 
+-pub fn publicUsingnamespaceImportsPath(
++fn usingnamespaceImportsPathVisited(
+     files: []const File,
+     tree: *const std.zig.Ast,
+     importer_path: []const u8,
+     target_path: []const u8,
++    public_only: bool,
++    visited: *[64]usize,
++    depth: usize,
+ ) bool {
+     const token_tags = tree.tokens.items(.tag);
+ 
+     for (token_tags, 0..) |_, token_index| {
+         if (!std.mem.eql(u8, tree.tokenSlice(@intCast(token_index)), "usingnamespace")) continue;
+ 
+-        const pub_token = prevNonCommentToken(token_tags, token_index) orelse continue;
+-        if (tree.tokenTag(@intCast(pub_token)) != .keyword_pub) continue;
++        if (public_only) {
++            const pub_token = prevNonCommentToken(token_tags, token_index) orelse continue;
++            if (tree.tokenTag(@intCast(pub_token)) != .keyword_pub) continue;
++        }
+ 
+         const import_token = nextNonCommentToken(token_tags, token_index + 1) orelse continue;
+         if (!std.mem.eql(u8, tree.tokenSlice(@intCast(import_token)), "@import")) continue;
+@@ -108,7 +113,7 @@ pub fn publicUsingnamespaceImportsPath(
+         const import_path = importPathFromBuiltinToken(tree, import_token) orelse continue;
+         if (importMayResolveToPath(importer_path, import_path, target_path)) return true;
+         if (resolveImportToFileIndex(files, importer_path, import_path)) |file_index| {
+-            if (filePubliclyImportsPath(files, file_index, target_path)) return true;
++            if (filePubliclyImportsPathVisited(files, file_index, target_path, visited, depth)) return true;
+         }
+     }
+ 
+@@ -338,20 +343,6 @@ pub fn normalizeIdentifier(ident: []const u8) []const u8 {
+     return ident;
+ }
+ 
+-pub fn fileStem(path: []const u8) []const u8 {
+-    const basename = std.fs.path.basename(path);
+-    if (std.mem.endsWith(u8, basename, ".zig")) return basename[0 .. basename.len - ".zig".len];
+-    return basename;
+-}
+-
+-pub fn nodeStart(tree: *const std.zig.Ast, node: usize) ?usize {
+-    const main_tokens = tree.nodes.items(.main_token);
+-    if (node >= main_tokens.len) return null;
+-    const token = main_tokens[node];
+-    if (token >= tree.tokens.len) return null;
+-    return tree.tokens.items(.start)[token];
+-}
+-
+ pub fn isVarDeclTag(tag: std.zig.Ast.Node.Tag) bool {
+     return switch (tag) {
+         .simple_var_decl,
+@@ -586,3 +577,22 @@ test "conditional namespace aliases do not reexport their condition" {
+     try std.testing.expect(filePubliclyImportsPath(&files, 0, "src/fallback.zig"));
+     try std.testing.expect(!filePubliclyImportsPath(&files, 0, "src/condition.zig"));
+ }
++
++test "cyclic namespace imports still find reachable files" {
++    const allocator = std.testing.allocator;
++    var first = try std.zig.Ast.parse(allocator, "pub usingnamespace @import(\"b.zig\");", .zig);
++    defer first.deinit(allocator);
++    var second = try std.zig.Ast.parse(allocator,
++        \\pub usingnamespace @import("a.zig");
++        \\pub usingnamespace @import("c.zig");
++    , .zig);
++    defer second.deinit(allocator);
++    const files = [_]File{
++        .{ .path = "a.zig", .tree = &first },
++        .{ .path = "b.zig", .tree = &second },
++    };
++    try std.testing.expect(!filePubliclyImportsPath(&files, 0, "missing.zig"));
++    try std.testing.expect(filePubliclyImportsPath(&files, 0, "c.zig"));
++    try std.testing.expect(!fileUsingnamespaceImportsPath(&files, &first, "a.zig", "missing.zig"));
++    try std.testing.expect(fileUsingnamespaceImportsPath(&files, &first, "a.zig", "c.zig"));
++}
+diff --git a/src/cache.zig b/src/cache.zig
+index 9e0a239..755b0f6 100644
+--- a/src/cache.zig
++++ b/src/cache.zig
+@@ -180,9 +180,7 @@ pub const Cache = struct {
+     }
+ 
+     pub fn get(self: *Cache, key: CacheKey) !?[]u8 {
+-        if (self.cache_dir == null) {
+-            return null;
+-        }
++        const cache_dir = self.cache_dir orelse return null;
+ 
+         try compat.lockMutex(&self.mutex, self.io_context);
+         defer compat.unlockMutex(&self.mutex, self.io_context);
+@@ -190,7 +188,7 @@ pub const Cache = struct {
+         var path_buf: [256]u8 = undefined;
+         const cache_path = try Cache.getCachePath(key, &path_buf);
+         var full_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+-        const full_path = try std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ self.cache_dir.?, cache_path });
++        const full_path = try std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ cache_dir, cache_path });
+ 
+         const contents = compat.readFileAlloc(self.io_context, self.allocator, full_path, 10 * 1024 * 1024) catch |err| {
+             return switch (err) {
+@@ -226,9 +224,7 @@ pub const Cache = struct {
+     }
+ 
+     pub fn put(self: *Cache, key: CacheKey, data: []const u8) !void {
+-        if (self.cache_dir == null) {
+-            return;
+-        }
++        const cache_dir = self.cache_dir orelse return;
+ 
+         try compat.lockMutex(&self.mutex, self.io_context);
+         defer compat.unlockMutex(&self.mutex, self.io_context);
+@@ -236,7 +232,7 @@ pub const Cache = struct {
+         var path_buf: [256]u8 = undefined;
+         const cache_path = try Cache.getCachePath(key, &path_buf);
+         var full_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+-        const full_path = try std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ self.cache_dir.?, cache_path });
++        const full_path = try std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ cache_dir, cache_path });
+ 
+         const entry = CacheEntry.init(key, @intCast(data.len), compat.timestamp(self.io_context));
+         const header = entry.encode();
+@@ -248,9 +244,7 @@ pub const Cache = struct {
+     }
+ 
+     pub fn invalidate(self: *Cache, key: CacheKey) !void {
+-        if (self.cache_dir == null) {
+-            return;
+-        }
++        const cache_dir = self.cache_dir orelse return;
+ 
+         try compat.lockMutex(&self.mutex, self.io_context);
+         defer compat.unlockMutex(&self.mutex, self.io_context);
+@@ -259,7 +253,7 @@ pub const Cache = struct {
+         const cache_path = try Cache.getCachePath(key, &path_buf);
+ 
+         var full_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+-        const full_path = try std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ self.cache_dir.?, cache_path });
++        const full_path = try std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ cache_dir, cache_path });
+ 
+         compat.deleteFile(self.io_context, full_path) catch |err| {
+             if (err != error.FileNotFound) {
+@@ -269,9 +263,7 @@ pub const Cache = struct {
+     }
+ 
+     pub fn clear(self: *Cache) !void {
+-        if (self.cache_dir == null) {
+-            return;
+-        }
++        const cache_dir = self.cache_dir orelse return;
+ 
+         try compat.lockMutex(&self.mutex, self.io_context);
+         defer compat.unlockMutex(&self.mutex, self.io_context);
+@@ -284,7 +276,7 @@ pub const Cache = struct {
+             files_to_delete.deinit(self.allocator);
+         }
+ 
+-        var directory = try compat.openDir(self.io_context, self.cache_dir.?, true);
++        var directory = try compat.openDir(self.io_context, cache_dir, true);
+         defer compat.closeDir(self.io_context, &directory);
+ 
+         while (try compat.nextDir(self.io_context, &directory)) |entry| {
+@@ -296,7 +288,7 @@ pub const Cache = struct {
+ 
+         for (files_to_delete.items) |name| {
+             var full_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+-            const full_path = try std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ self.cache_dir.?, name });
++            const full_path = try std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ cache_dir, name });
+             try compat.deleteFile(self.io_context, full_path);
+         }
+     }
+diff --git a/src/checkers/divide_by_zero/evaluator.zig b/src/checkers/divide_by_zero/evaluator.zig
+index 46534e6..d4f776e 100644
+--- a/src/checkers/divide_by_zero/evaluator.zig
++++ b/src/checkers/divide_by_zero/evaluator.zig
+@@ -315,14 +315,14 @@ fn evalRangeBinary(
+                 safeMul(lhs.max, rhs.min),
+                 safeMul(lhs.max, rhs.max),
+             };
+-            var min_val: ?i64 = null;
+-            var max_val: ?i64 = null;
+-            for (products) |item| {
++            var min_val = products[0] orelse break :blk null;
++            var max_val = min_val;
++            for (products[1..]) |item| {
+                 const v = item orelse break :blk null;
+-                min_val = if (min_val) |existing| @min(existing, v) else v;
+-                max_val = if (max_val) |existing| @max(existing, v) else v;
++                min_val = @min(min_val, v);
++                max_val = @max(max_val, v);
+             }
+-            break :blk .{ .int_range = .{ .min = min_val.?, .max = max_val.? } };
++            break :blk .{ .int_range = .{ .min = min_val, .max = max_val } };
+         },
+         .div => blk: {
+             if (rhs.contains(0)) break :blk null;
+diff --git a/src/checkers/optional_unwrap/guards.zig b/src/checkers/optional_unwrap/guards.zig
+index 41fe714..6074632 100644
+--- a/src/checkers/optional_unwrap/guards.zig
++++ b/src/checkers/optional_unwrap/guards.zig
+@@ -5,6 +5,52 @@ const call_resolver = @import("../../analysis/call_resolver.zig");
+ const import_resolver = @import("../../analysis/import_resolver.zig");
+ const ids = @import("../../ids.zig");
+ const TypeContext = @import("../../type_context.zig").TypeContext;
++const assertions = @import("../../assertions.zig");
++
++pub fn isGuardedByAssertion(
++    tree: *const std.zig.Ast,
++    unwrap_node: u32,
++    target: u32,
++    parent_map: []const u32,
++    type_context: ?*TypeContext,
++    scope: *const assertions.AssertionScope,
++) bool {
++    const tags = tree.nodes.items(.tag);
++    const datas = tree.nodes.items(.data);
++    var block = unwrap_node;
++    for (0..64) |_| {
++        if (block >= parent_map.len) return false;
++        block = parent_map[block];
++        if (block == 0 or block >= tags.len) return false;
++        switch (tags[block]) {
++            .block, .block_semicolon, .block_two, .block_two_semicolon => break,
++            else => {},
++        }
++    } else return false;
++    var statements: [ast_walk.max_block_statements]u32 = undefined;
++    const count = ast_walk.getBlockStatements(tree, block, &statements) orelse return false;
++    const before = tree.nodeMainToken(@enumFromInt(unwrap_node));
++    var fact = false;
++    for (statements[0..count]) |statement| {
++        if (tree.firstToken(@enumFromInt(statement)) >= before) break;
++        if (statementMayMutateStorageBefore(tree, statement, target, tags, datas, block, unwrap_node, type_context))
++            fact = false;
++        if (tree.lastToken(@enumFromInt(statement)) >= before) continue;
++        const is_try = tags[statement] == .@"try";
++        const call_node = if (is_try) @intFromEnum(datas[statement].node) else statement;
++        var buffer: [1]std.zig.Ast.Node.Index = undefined;
++        const call = tree.fullCall(&buffer, @enumFromInt(call_node)) orelse continue;
++        if (call.ast.params.len != 1) continue;
++        const name = assertions.resolveDebugAssertionName(tree, call.ast.fn_expr, scope) orelse
++            if (is_try) assertions.resolveAssertionName(tree, call.ast.fn_expr, scope) orelse continue else continue;
++        if (assertions.constraintKindForName(name) != .boolean) continue;
++        const condition = @intFromEnum(call.ast.params[0]);
++        if (conditionImpliesNotNull(tree, condition, target) and
++            !statementMayMutateStorage(tree, condition, target, tags, datas, block, type_context))
++            fact = true;
++    }
++    return fact;
++}
+ 
+ pub fn isGuardedByLazyInit(
+     tree: *const std.zig.Ast,
+@@ -1469,7 +1515,12 @@ fn argumentMayMutateStorage(
+                 if (!storageRootMatches(tree, argument, target)) return false;
+                 return argumentExpressionMayEscape(type_context, argument);
+             },
+-            .address_of, .deref => return storageRootMatches(tree, argument, target),
++            .address_of => {
++                const pointee = @intFromEnum(datas[argument].node);
++                if (storageFieldsAreDisjoint(tree, pointee, target, type_context)) return false;
++                return storageRootMatches(tree, argument, target);
++            },
++            .deref => return storageRootMatches(tree, argument, target),
+             .array_access => {
+                 const base = @intFromEnum(datas[argument].node_and_node[0]);
+                 if (storageRootMatches(tree, base, target)) return true;
+@@ -2002,31 +2053,6 @@ fn firstParameterNode(tree: *const std.zig.Ast, fn_node: u32) ?u32 {
+     return @intFromEnum(proto.ast.params[0]);
+ }
+ 
+-fn getMethodNameFromCall(
+-    tree: *const std.zig.Ast,
+-    call_node: u32,
+-    tags: []const std.zig.Ast.Node.Tag,
+-    datas: []const std.zig.Ast.Node.Data,
+-) ?[]const u8 {
+-    if (call_node >= tags.len) return null;
+-
+-    if (!call_utils.isCallNode(tags[call_node])) {
+-        return null;
+-    }
+-
+-    // Get the callee
+-    var call_buf: [1]std.zig.Ast.Node.Index = undefined;
+-    const full_call = tree.fullCall(&call_buf, @enumFromInt(call_node)) orelse return null;
+-    const callee = @intFromEnum(full_call.ast.fn_expr);
+-
+-    if (callee >= tags.len) return null;
+-    if (tags[callee] != .field_access) return null;
+-
+-    // Get the method name
+-    const field_token = datas[callee].node_and_token[1];
+-    return tree.tokenSlice(field_token);
+-}
+-
+ fn methodAssignsToField(
+     tree: *const std.zig.Ast,
+     call_node: u32,
+diff --git a/src/checkers/optional_unwrap/scan.zig b/src/checkers/optional_unwrap/scan.zig
+index ece51dd..dc33a37 100644
+--- a/src/checkers/optional_unwrap/scan.zig
++++ b/src/checkers/optional_unwrap/scan.zig
+@@ -66,6 +66,8 @@ pub fn scanForUnsafeUnwraps(
+         // Get the variable being unwrapped
+         const unwrapped_node = @intFromEnum(datas[ast_node].node_and_token[0]);
+ 
++        if (guards.isGuardedByAssertion(tree, ast_node, unwrapped_node, parent_map, type_context, &assertion_scope)) continue;
++
+         // Check if the unwrap is guarded by short-circuit evaluation (and/or operators)
+         // or by a ternary if expression. These are AST-level guards that the CFG
+         // doesn't track because short-circuit evaluation is implicit.
+diff --git a/src/checkers/optional_unwrap_engine.zig b/src/checkers/optional_unwrap_engine.zig
+index 9c4f1d3..390ebb3 100644
+--- a/src/checkers/optional_unwrap_engine.zig
++++ b/src/checkers/optional_unwrap_engine.zig
+@@ -111,13 +111,6 @@ pub const OptionalUnwrapEngineChecker = struct {
+     }
+ };
+ 
+-// Tests
+-test "OptionalUnwrapEngineChecker initialization" {
+-    const testing = std.testing;
+-    try testing.expectEqualStrings("optional-unwrap", OptionalUnwrapEngineChecker.checker.name);
+-    try testing.expectEqual(checker_mod.Severity.warning, OptionalUnwrapEngineChecker.checker.default_severity);
+-}
+-
+ fn expectOptionalUnwrapDiagnosticLines(
+     code: [:0]const u8,
+     expected_lines: []const usize,
+@@ -927,3 +920,52 @@ test "labeled flag killed by intervening write still diagnoses" {
+     ;
+     try expectOptionalUnwrapDiagnosticLines(code, &.{10});
+ }
++
++test "optional field assertions survive disjoint writes but not mutation" {
++    const code: [:0]const u8 =
++        \\const std = @import("std");
++        \\const State = struct { value: ?u32, other: u32 };
++        \\fn bump(value: *u32) void { value.* += 1; }
++        \\fn guarded(state: *State) !u32 {
++        \\    try std.testing.expect(state.value != null);
++        \\    bump(&state.other);
++        \\    return state.value.?;
++        \\}
++        \\fn invalidated(state: *State) !u32 {
++        \\    try std.testing.expect(state.value != null);
++        \\    state.value = null;
++        \\    return state.value.?;
++        \\}
++        \\fn ignored(state: *State) u32 {
++        \\    std.testing.expect(state.value != null) catch {};
++        \\    return state.value.?;
++        \\}
++        \\fn earlyExit(state: *State) ?u32 {
++        \\    if (state.value == null) return null;
++        \\    bump(&state.other);
++        \\    return state.value.?;
++        \\}
++    ;
++    try expectOptionalUnwrapDiagnosticLines(code, &.{ 12, 16 });
++}
++
++test "lazy initialization preserves explicit standard container types" {
++    const code: [:0]const u8 =
++        \\const std = @import("std");
++        \\const State = struct { value: ?std.zig.Ast = null };
++        \\fn read(state: *State, parsed: std.zig.Ast) std.zig.Ast {
++        \\    if (state.value == null) state.value = parsed;
++        \\    return state.value.?;
++        \\}
++    ;
++    try expectOptionalUnwrapDiagnosticLines(code, &.{});
++    const shadowed: [:0]const u8 =
++        \\const std = struct { const zig = struct { const Ast = ?u32; }; };
++        \\const State = struct { value: std.zig.Ast = null };
++        \\fn read(state: *State, parsed: std.zig.Ast) u32 {
++        \\    if (state.value == null) state.value = parsed;
++        \\    return state.value.?;
++        \\}
++    ;
++    try expectOptionalUnwrapDiagnosticLines(shadowed, &.{5});
++}
+diff --git a/src/compat/zig_0_15/io.zig b/src/compat/zig_0_15/io.zig
+index bc08901..66b22e8 100644
+--- a/src/compat/zig_0_15/io.zig
++++ b/src/compat/zig_0_15/io.zig
+@@ -117,7 +117,8 @@ pub fn closeDir(_: *Context, directory: *Directory) void {
+ 
+ pub fn nextDir(_: *Context, directory: *Directory) !?DirectoryEntry {
+     if (directory.iterator == null) {
+-        directory.iterator = directory.dir.iterate();
++        const iterator: std.fs.Dir.Iterator = directory.dir.iterate();
++        directory.iterator = iterator;
+     }
+     const entry = try directory.iterator.?.next() orelse return null;
+     return .{
+diff --git a/src/compat/zig_0_16/io.zig b/src/compat/zig_0_16/io.zig
+index 19c97db..d9d5640 100644
+--- a/src/compat/zig_0_16/io.zig
++++ b/src/compat/zig_0_16/io.zig
+@@ -1,23 +1,25 @@
+ const std = @import("std");
+ 
+ pub const Context = struct {
+-    threaded: ?std.Io.Threaded,
++    threaded: std.Io.Threaded,
+ 
+     pub fn init(allocator: std.mem.Allocator, thread_count: usize) !Context {
++        std.debug.assert(thread_count > 0);
+         return .{
+             .threaded = .init(allocator, .{
+-                .async_limit = .limited(thread_count),
++                // Io.async also runs work eagerly on the calling thread.
++                .async_limit = .limited(thread_count - 1),
+                 .concurrent_limit = .limited(thread_count),
+             }),
+         };
+     }
+ 
+     pub fn deinit(self: *Context) void {
+-        if (self.threaded) |*threaded| threaded.deinit();
++        self.threaded.deinit();
+     }
+ 
+     pub fn io(self: *Context) std.Io {
+-        return self.threaded.?.io();
++        return self.threaded.io();
+     }
+ };
+ 
+@@ -66,6 +68,33 @@ pub const Executor = struct {
+     }
+ };
+ 
++test "Executor respects a single analysis worker" {
++    const Probe = struct {
++        io_context: *Context,
++        active: std.atomic.Value(usize) = .init(0),
++        peak: std.atomic.Value(usize) = .init(0),
++        completed: std.atomic.Value(usize) = .init(0),
++
++        fn task(_: usize, opaque_context: *anyopaque) void {
++            const self: *@This() = @ptrCast(@alignCast(opaque_context));
++            const active = self.active.fetchAdd(1, .seq_cst) + 1;
++            _ = self.peak.fetchMax(active, .seq_cst);
++            std.Io.sleep(self.io_context.io(), .fromMilliseconds(10), .awake) catch unreachable;
++            _ = self.active.fetchSub(1, .seq_cst);
++            _ = self.completed.fetchAdd(1, .seq_cst);
++        }
++    };
++    var context = try Context.init(std.testing.allocator, 1);
++    defer context.deinit();
++    var executor = try Executor.init(&context, std.testing.allocator, 1);
++    defer executor.deinit();
++    var probe: Probe = .{ .io_context = &context };
++    for (0..8) |index| try executor.spawn(Probe.task, index, &probe);
++    try executor.wait();
++    try std.testing.expectEqual(@as(usize, 8), probe.completed.load(.seq_cst));
++    try std.testing.expectEqual(@as(usize, 1), probe.peak.load(.seq_cst));
++}
++
+ pub const Mutex = std.Io.Mutex;
+ 
+ pub fn initMutex() Mutex {
+@@ -112,7 +141,8 @@ pub fn closeDir(context: *Context, directory: *Directory) void {
+ 
+ pub fn nextDir(context: *Context, directory: *Directory) !?DirectoryEntry {
+     if (directory.iterator == null) {
+-        directory.iterator = directory.dir.iterate();
++        const iterator: std.Io.Dir.Iterator = directory.dir.iterate();
++        directory.iterator = iterator;
+     }
+     const entry = try directory.iterator.?.next(context.io()) orelse return null;
+     return .{
+@@ -143,7 +173,10 @@ pub fn readFileAlloc(
+             // The reader exposes the underlying failure through `reader.err`.
+             // zwanzig-disable-next-line: swallowed-error
+         ) catch |err| switch (err) {
+-            error.ReadFailed => reader.err.?,
++            error.ReadFailed => blk: {
++                std.debug.assert(reader.err != null);
++                break :blk reader.err.?;
++            },
+             error.OutOfMemory, error.StreamTooLong => |e| e,
+         };
+     }
+diff --git a/src/engine.zig b/src/engine.zig
+index 89df8b9..7e394a9 100644
+--- a/src/engine.zig
++++ b/src/engine.zig
+@@ -33,3 +33,7 @@ pub const ExplodedNode = graph.ExplodedNode;
+ pub const ExplodedGraph = graph.ExplodedGraph;
+ 
+ pub const AnalysisEngine = analysis.AnalysisEngine;
++
++test {
++    _ = graph;
++}
+diff --git a/src/engine/analysis/engine.zig b/src/engine/analysis/engine.zig
+index 66ed040..dc3ac47 100644
+--- a/src/engine/analysis/engine.zig
++++ b/src/engine/analysis/engine.zig
+@@ -8,7 +8,6 @@ const EdgeKind = cfg_mod.EdgeKind;
+ const CfgBuilder = cfg_mod.CfgBuilder;
+ const cached_artifacts_mod = @import("../../cached_artifacts.zig");
+ const ast_walk = @import("../../ast_walk.zig");
+-const call_utils = @import("../../analysis/call_utils.zig");
+ const Source = @import("../../source.zig").Source;
+ const BuildMetadata = @import("../../build_metadata.zig").BuildMetadata;
+ const assertions = @import("../../assertions.zig");
+diff --git a/src/engine/graph.zig b/src/engine/graph.zig
+index 32cf906..17713c0 100644
+--- a/src/engine/graph.zig
++++ b/src/engine/graph.zig
+@@ -232,9 +232,7 @@ pub const ExplodedGraph = struct {
+ 
+         if (new_key != old_key) {
+             _ = self.node_map.remove(old_key);
+-            self.node_map.put(new_key, cap_index) catch |err| switch (err) {
+-                error.OutOfMemory => return EngineError.OutOfMemory,
+-            };
++            self.node_map.putAssumeCapacity(new_key, cap_index);
+         }
+ 
+         self.widened_nodes += 1;
+@@ -265,6 +263,7 @@ pub const ExplodedGraph = struct {
+     ) EngineError!GetOrCreateResult {
+         var current_state = state;
+         var widened_state: ?ProgramState = null;
++        errdefer if (widened_state) |*ws| ws.deinit();
+         var widening_applied = false;
+         var converged = false;
+ 
+@@ -274,16 +273,12 @@ pub const ExplodedGraph = struct {
+                 const visit_count = self.widening_visits.get(widening_key) orelse 0;
+ 
+                 if (visit_count == 0) {
+-                    // First visit: store a clone of the state for future widening
+-                    const state_clone = state.clone(self.allocator) catch |err| switch (err) {
+-                        error.OutOfMemory => return EngineError.OutOfMemory,
+-                    };
+-                    self.widening_states.put(widening_key, state_clone) catch |err| switch (err) {
+-                        error.OutOfMemory => return EngineError.OutOfMemory,
+-                    };
+-                    self.widening_visits.put(widening_key, 1) catch |err| switch (err) {
+-                        error.OutOfMemory => return EngineError.OutOfMemory,
+-                    };
++                    // Reserve both maps before either takes ownership.
++                    try self.widening_states.ensureUnusedCapacity(1);
++                    try self.widening_visits.ensureUnusedCapacity(1);
++                    const state_clone = try state.clone(self.allocator);
++                    self.widening_states.putAssumeCapacity(widening_key, state_clone);
++                    self.widening_visits.putAssumeCapacity(widening_key, 1);
+                 } else {
+                     // Subsequent visits: widen incoming state with stored state
+                     if (self.widening_states.getPtr(widening_key)) |stored_state| {
+@@ -298,27 +293,14 @@ pub const ExplodedGraph = struct {
+                             converged = true;
+                             self.widening_converged += 1;
+                         } else {
+-                            // Update stored state with widened result for next iteration
+-                            // Clone first, then replace to avoid leaving invalid state on OOM
+-                            var new_clone = ws.clone(self.allocator) catch |err| switch (err) {
+-                                error.OutOfMemory => return EngineError.OutOfMemory,
+-                            };
+-                            errdefer new_clone.deinit();
+-                            // Save old state before put() overwrites it
+-                            var old_state = stored_state.*;
+-                            // put() for existing key replaces value without allocation failure
+-                            // (capacity already exists), but we handle it defensively
+-                            self.widening_states.put(widening_key, new_clone) catch |err| switch (err) {
+-                                error.OutOfMemory => return EngineError.OutOfMemory,
+-                            };
+-                            // Deinit old state after successful replacement
+-                            old_state.deinit();
++                            // Clone first so allocation failure preserves the stored state.
++                            const new_clone = try ws.clone(self.allocator);
++                            stored_state.deinit();
++                            stored_state.* = new_clone;
+                         }
+ 
+                         // Increment visit count
+-                        self.widening_visits.put(widening_key, visit_count + 1) catch |err| switch (err) {
+-                            error.OutOfMemory => return EngineError.OutOfMemory,
+-                        };
++                        self.widening_visits.putAssumeCapacity(widening_key, visit_count + 1);
+                     }
+ 
+                     // Use widened state for deduplication
+@@ -329,12 +311,6 @@ pub const ExplodedGraph = struct {
+             }
+         }
+ 
+-        errdefer {
+-            if (widened_state) |*ws| {
+-                ws.deinit();
+-            }
+-        }
+-
+         // Step 2: Deduplicate by (point, state) hash
+         const key = ExplodedNode.computeKey(point, current_state);
+         if (self.node_map.get(key)) |existing_index| {
+@@ -389,27 +365,19 @@ pub const ExplodedGraph = struct {
+ 
+         const index: u32 = @intCast(self.nodes.items.len);
+ 
+-        // Use widened state if available, otherwise use original state
+-        const node_state = if (widened_state) |ws| ws else state.*;
+-        const node = ExplodedNode.init(point, node_state, index);
++        // Finish all fallible allocations before transferring state ownership.
++        try self.nodes.ensureUnusedCapacity(self.allocator, 1);
++        try self.node_map.ensureUnusedCapacity(1);
++        try self.point_state_counts.ensureUnusedCapacity(1);
++        const point_list = try self.ensurePointNodes(point_key);
++        try point_list.ensureUnusedCapacity(self.allocator, 1);
+ 
+-        self.nodes.append(self.allocator, node) catch |err| switch (err) {
+-            error.OutOfMemory => {
+-                if (widened_state) |*ws| {
+-                    ws.deinit();
+-                }
+-                return EngineError.OutOfMemory;
+-            },
+-        };
+-        self.node_map.put(key, index) catch |err| switch (err) {
+-            error.OutOfMemory => return EngineError.OutOfMemory,
+-        };
+-        self.point_state_counts.put(point_key, current_count + 1) catch |err| switch (err) {
+-            error.OutOfMemory => return EngineError.OutOfMemory,
+-        };
+-
+-        var point_list = try self.ensurePointNodes(point_key);
+-        try point_list.append(self.allocator, index);
++        const node_state = if (widened_state) |ws| ws else state.*;
++        self.nodes.appendAssumeCapacity(ExplodedNode.init(point, node_state, index));
++        self.node_map.putAssumeCapacity(key, index);
++        self.point_state_counts.putAssumeCapacity(point_key, current_count + 1);
++        point_list.appendAssumeCapacity(index);
++        widened_state = null;
+ 
+         if (widening_applied) {
+             self.widened_nodes += 1;
+@@ -892,3 +860,31 @@ test "ExplodedGraph without widening options works as before" {
+     try testing.expect(!result.converged);
+     try testing.expectEqual(@as(u32, 0), graph.getWidenedNodeCount());
+ }
++
++test "ExplodedGraph insertion preserves ownership on allocation failure" {
++    try std.testing.checkAllAllocationFailures(std.testing.allocator, testInsertionAllocationFailure, .{});
++}
++
++fn testInsertionAllocationFailure(allocator: std.mem.Allocator) !void {
++    var cfg = Cfg.init(std.testing.allocator);
++    defer cfg.deinit();
++    const node = try cfg.addNode(IrNode.init(.loop_header));
++    var graph = ExplodedGraph.init(allocator, &cfg);
++    defer graph.deinit();
++    const point = ProgramPoint.initPre(node, &cfg);
++
++    for (0..3) |value| {
++        var state = ProgramState.init(std.testing.allocator);
++        var owns_state = true;
++        defer if (owns_state) state.deinit();
++        try state.setVar(ids.varId(1), .{ .concrete_int = @intCast(value) });
++        const result = try graph.getOrCreateNodeWithWidening(point, &state, .{
++            .apply_widening = true,
++            .widening_key = WideningKey.init(point, &state),
++        });
++        owns_state = result.caller_should_deinit;
++        const stored = graph.getNode(result.index) orelse return error.TestUnexpectedResult;
++        const observed = stored.state.getVar(ids.varId(1)) orelse return error.TestUnexpectedResult;
++        try std.testing.expect(observed.subsumes(.{ .concrete_int = @intCast(value) }));
++    }
++}
+diff --git a/src/main.zig b/src/main.zig
+index 64714a3..4ee0372 100644
+--- a/src/main.zig
++++ b/src/main.zig
+@@ -47,6 +47,8 @@ test {
+     _ = @import("cli/config_merge.zig");
+     _ = @import("cli/registry.zig");
+     _ = @import("cli/run.zig");
++    _ = @import("analysis/call_resolver.zig");
++    _ = @import("analysis/import_resolver.zig");
+ }
+ 
+ pub fn main() !void {
+diff --git a/src/main_0_16.zig b/src/main_0_16.zig
+index b8dd4ee..1da5c3b 100644
+--- a/src/main_0_16.zig
++++ b/src/main_0_16.zig
+@@ -26,6 +26,8 @@ pub fn main(init: std.process.Init) !void {
+ }
+ 
+ test {
++    _ = @import("analysis/call_resolver.zig");
++    _ = @import("analysis/import_resolver.zig");
+     _ = @import("ir.zig");
+     _ = @import("cfg.zig");
+     _ = @import("checker.zig");
+diff --git a/src/rules/unused_decl.zig b/src/rules/unused_decl.zig
+index 645a9c3..de74047 100644
+--- a/src/rules/unused_decl.zig
++++ b/src/rules/unused_decl.zig
+@@ -1,6 +1,5 @@
+ const std = @import("std");
+ const TypeContext = @import("../type_context.zig").TypeContext;
+-const call_utils = @import("../analysis/call_utils.zig");
+ const import_resolver = @import("../analysis/import_resolver.zig");
+ const call_resolver = @import("../analysis/call_resolver.zig");
+ const Rule = @import("../rule.zig").Rule;
+@@ -646,20 +645,6 @@ pub const UnusedDeclRule = struct {
+             return false;
+         }
+ 
+-        fn typeNameMatchesOwner(type_name: []const u8, owner_name: []const u8) bool {
+-            var name = type_name;
+-            while (name.len > 0 and (name[0] == '?' or name[0] == '*')) {
+-                name = name[1..];
+-            }
+-            while (std.mem.startsWith(u8, name, "const ")) {
+-                name = name["const ".len..];
+-            }
+-            while (std.mem.startsWith(u8, name, "volatile ")) {
+-                name = name["volatile ".len..];
+-            }
+-            return std.mem.eql(u8, normalizeIdentifier(name), normalizeIdentifier(owner_name));
+-        }
+-
+         fn scanChildren(self: *UsageScanner, node: u32) RuleError!bool {
+             const ChildScanner = struct {
+                 scanner: *UsageScanner,
+diff --git a/src/source.zig b/src/source.zig
+index be3b0d7..3120fcf 100644
+--- a/src/source.zig
++++ b/src/source.zig
+@@ -81,7 +81,7 @@ pub const Source = struct {
+     pub fn ast(self: *Source) !*const std.zig.Ast {
+         if (self.borrowed_ast) |parsed_ast| return parsed_ast;
+         if (self.cached_ast == null) {
+-            const parsed = try std.zig.Ast.parse(self.allocator, self.content, .zig);
++            const parsed: std.zig.Ast = try std.zig.Ast.parse(self.allocator, self.content, .zig);
+             self.cached_ast = parsed;
+         }
+         return &self.cached_ast.?;
+diff --git a/src/type_context.zig b/src/type_context.zig
+index 300b67b..5619182 100644
+--- a/src/type_context.zig
++++ b/src/type_context.zig
+@@ -961,12 +961,6 @@ pub const TypeContext = struct {
+         return source[start..end];
+     }
+ 
+-    fn isErrorTypeName(name: []const u8) bool {
+-        return std.mem.eql(u8, name, "anyerror") or
+-            std.mem.indexOf(u8, name, "Error") != null or
+-            std.mem.indexOf(u8, name, "error") != null;
+-    }
+-
+     pub fn getTypeFromAstNode(self: *TypeContext, ast_node: u32) ?TypeInfo {
+         const tree = self.source.ast() catch return null;
+         return self.getTypeFromTree(tree, ast_node, 0);
+diff --git a/src/zir/bridge.zig b/src/zir/bridge.zig
+index 77e8d21..d0034da 100644
+--- a/src/zir/bridge.zig
++++ b/src/zir/bridge.zig
+@@ -398,6 +398,11 @@ pub const ZirBridge = struct {
+                         const src_node: Ast.Node.Offset = @enumFromInt(@as(i32, @bitCast(extended.operand)));
+                         if (src_node == target_offset) return @intFromEnum(inst);
+                     },
++                    .struct_decl, .union_decl, .enum_decl => {
++                        if (builtin.zig_version.minor == 16) {
++                            return findZirInstForNodeInContainer(allocator, zir, target_offset, inst, defers);
++                        }
++                    },
+                     else => {},
+                 }
+ 
+@@ -543,6 +548,63 @@ pub const ZirBridge = struct {
+         }
+     }
+ 
++    fn findZirInstForNodeInContainer(
++        allocator: std.mem.Allocator,
++        zir: Zir,
++        target_offset: Ast.Node.Offset,
++        inst: Zir.Inst.Index,
++        defers: *std.AutoHashMapUnmanaged(u32, void),
++    ) ?u32 {
++        // Zig 0.16 changed container payload layouts. Use its field iterators
++        // rather than interpreting body lengths as the older packed metadata.
++        switch (zir.instructions.items(.data)[@intFromEnum(inst)].extended.opcode) {
++            .struct_decl => {
++                const decl = zir.getStructDecl(inst);
++                if (decl.backing_int_type_body) |body| {
++                    if (findZirInstForNodeInBody(allocator, zir, target_offset, body, defers)) |found| return found;
++                }
++                var fields = decl.iterateFields();
++                while (fields.next()) |field| {
++                    if (findZirInstForNodeInBody(allocator, zir, target_offset, field.type_body, defers)) |found| return found;
++                    if (field.align_body) |body| {
++                        if (findZirInstForNodeInBody(allocator, zir, target_offset, body, defers)) |found| return found;
++                    }
++                    if (field.default_body) |body| {
++                        if (findZirInstForNodeInBody(allocator, zir, target_offset, body, defers)) |found| return found;
++                    }
++                }
++            },
++            .union_decl => {
++                const decl = zir.getUnionDecl(inst);
++                if (decl.arg_type_body) |body| {
++                    if (findZirInstForNodeInBody(allocator, zir, target_offset, body, defers)) |found| return found;
++                }
++                var fields = decl.iterateFields();
++                while (fields.next()) |field| {
++                    for ([_]?[]const Zir.Inst.Index{ field.type_body, field.align_body, field.value_body }) |optional_body| {
++                        if (optional_body) |body| {
++                            if (findZirInstForNodeInBody(allocator, zir, target_offset, body, defers)) |found| return found;
++                        }
++                    }
++                }
++            },
++            .enum_decl => {
++                const decl = zir.getEnumDecl(inst);
++                if (decl.tag_type_body) |body| {
++                    if (findZirInstForNodeInBody(allocator, zir, target_offset, body, defers)) |found| return found;
++                }
++                var fields = decl.iterateFields();
++                while (fields.next()) |field| {
++                    if (field.value_body) |body| {
++                        if (findZirInstForNodeInBody(allocator, zir, target_offset, body, defers)) |found| return found;
++                    }
++                }
++            },
++            else => unreachable,
++        }
++        return null;
++    }
++
+     fn findZirInstForNodeInExtended(
+         allocator: std.mem.Allocator,
+         zir: Zir,
+@@ -991,7 +1053,11 @@ pub const ZirBridge = struct {
+                 if (std.mem.eql(u8, type_name, "std.posix.fd_t")) {
+                     return .{ .kind = .int, .type_str = type_name };
+                 }
+-                if (std.mem.eql(u8, type_name, "std.mem.Allocator")) {
++                if (std.mem.eql(u8, type_name, "std.mem.Allocator") or
++                    std.mem.eql(u8, type_name, "std.zig.Ast") or
++                    std.mem.eql(u8, type_name, "std.fs.Dir.Iterator") or
++                    std.mem.eql(u8, type_name, "std.Io.Dir.Iterator"))
++                {
+                     return .{ .kind = .@"struct", .type_str = type_name };
+                 }
+                 return .{ .kind = .unknown, .type_str = type_name };
+@@ -1330,3 +1396,22 @@ test "TypeInfo hasSentinel returns true for error union sentinel slice" {
+         try std.testing.expect(d.type_info.hasSentinel());
+     }
+ }
++
++test "ZirBridge resolves declarations after generic struct parameter types" {
++    const allocator = std.testing.allocator;
++    const code: [:0]const u8 =
++        \\fn Container(comptime T: type, comptime options: struct { value: T }) type {
++        \\    return struct { const item = options.value; };
++        \\}
++        \\const answer: u32 = 42;
++    ;
++    var source = Source.init(allocator, "test.zig", code);
++    defer source.deinit();
++    var bridge = ZirBridge.init(allocator);
++    defer bridge.deinit();
++
++    try bridge.loadFromSource(&source);
++    const answer = bridge.findDeclByName("answer") orelse return error.TestExpectedEqual;
++    try std.testing.expectEqual(TypeInfo.TypeKind.uint, answer.type_info.kind);
++    try std.testing.expectEqual(@as(u16, 32), answer.type_info.size_bits);
++}
+diff --git a/src/zir_bridge.zig b/src/zir_bridge.zig
+index 6b3fa5c..38aa67a 100644
+--- a/src/zir_bridge.zig
++++ b/src/zir_bridge.zig
+@@ -14,3 +14,7 @@ pub const FnInfo = bridge.FnInfo;
+ pub const CallExprTypeInfo = bridge.CallExprTypeInfo;
+ pub const ZirBridgeError = bridge.ZirBridgeError;
+ pub const ZirBridge = bridge.ZirBridge;
++
++test {
++    _ = bridge;
++}
