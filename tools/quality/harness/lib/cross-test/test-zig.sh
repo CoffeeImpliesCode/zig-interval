@@ -18,12 +18,20 @@ native=$(cross_tz_normalize_host_arch "$CROSS_HOST_ARCH")-linux
 # Same state base cross-test itself would pick, for the reason given in test.sh.
 if [[ -n ${TMPDIR:-} ]] && quality_scratch_make "$TMPDIR"; then
     BASE=$TMPDIR
-elif BASE=$(quality_scratch_pick "${HOST_SCRATCH_ROOT:+$HOST_SCRATCH_ROOT/tmp}" \
-    "/home/tmp2/$(id -un)/tmp" "/home/tmp/$(id -un)/tmp" /tmp); then
-    :
 else
-    printf 'FAIL: no usable scratch directory for the regression suite\n' >&2
-    exit 1
+    SCRATCH_CANDIDATES=()
+    if [[ -n ${HOST_SCRATCH_ROOT:-} ]]; then SCRATCH_CANDIDATES+=("$HOST_SCRATCH_ROOT/tmp"); fi
+    if quality_scratch_managed; then
+        SCRATCH_USER=$(id -un)
+        for SCRATCH_ROOT in $QUALITY_MANAGED_ROOTS; do
+            SCRATCH_CANDIDATES+=("$SCRATCH_ROOT/$SCRATCH_USER/tmp")
+        done
+    fi
+    SCRATCH_CANDIDATES+=(/tmp)
+    if ! BASE=$(quality_scratch_pick "${SCRATCH_CANDIDATES[@]}"); then
+        printf 'FAIL: no usable scratch directory for the regression suite\n' >&2
+        exit 1
+    fi
 fi
 ROOT=$(mktemp -d "$BASE/cross-test-zig-regressions.XXXXXXXX")
 trap 'rm -rf -- "$ROOT"' EXIT

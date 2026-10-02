@@ -316,14 +316,14 @@ CONTRACT="$QUALITY_ROOT/harness/lib/cross-test/scratch-contract.sh"
 [[ -r $CONTRACT ]] || die "missing scratch contract $CONTRACT"
 # shellcheck source=../tools/quality/harness/lib/cross-test/scratch-contract.sh
 . "$CONTRACT" || die "cannot load the scratch contract $CONTRACT"
-quality_scratch_load_policy || die "cannot establish a scratch policy on this host"
+quality_scratch_load_policy || die "cannot establish a scratch policy"
 
 for tool in git realpath sha256sum install mktemp df stat find awk sed grep tr \
     cut sort wc cp rm mkdir ln; do
     command -v "$tool" >/dev/null 2>&1 || die "required command not found: $tool"
 done
 if ! command -v mountpoint >/dev/null 2>&1 && quality_scratch_managed; then
-    die "mountpoint is required on a managed cluster host and was not found"
+    die "mountpoint is required on a managed host and was not found"
 fi
 ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4))) ||
     die "bash 4.4 or newer is required, found ${BASH_VERSION}"
@@ -333,9 +333,9 @@ ZIG_VERSION=$("$ZIG" version 2>/dev/null) || die "cannot run --zig: $ZIG"
     die "--zig reports $ZIG_VERSION; this harness is pinned to 0.16.0 (got $ZIG)"
 
 # --prefix and --work-root are held to the SAME contract the harness uses. On a
-# managed cluster host that means the approved physical volumes, and it is
-# checked here rather than in a second implementation. Elsewhere it means a
-# local directory this user can write, which is what lets a CI runner use /tmp.
+# managed host that means the approved physical volumes, and it is checked here
+# rather than in a second implementation. Elsewhere it means a local directory
+# this user can write, which is what lets a CI runner use /tmp.
 #
 # --verify-only is exempt, and the exemption is the point rather than a
 # loophole: that mode writes nothing anywhere, so where the prefix WOULD have

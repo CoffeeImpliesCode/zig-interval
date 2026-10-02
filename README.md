@@ -1328,216 +1328,8 @@ run into a capture file lost rows with no error anywhere. That was found by
 doing the capture, not by reading the code, so the rule recorded here is the
 honest one — **capture by redirecting, then read the file back**, rather than
 assuming a printed table equals a written one. The clock behind the numbers is
-unchanged (`std.Io.Clock.real`, wall time), and no figure in either document was
-produced by anything other than the recipe above.
-
-**The `ns/op` figures in
-[docs/performance-handover.md](docs/performance-handover.md) are the 2026-09-30
-capture and stay dated as that.** The current measured capture is separately
-dated 2026-10-02, is linked below, and replaces nothing there; neither document
-compares the two allocators against each other as a result.
-
-**One capture of all three has actually been done, dated 2026-10-02.** On
-`buildhost` with Zig 0.16.0 each benchmark was compiled as its own `ReleaseFast`
-executable — root `bench/bench.zig`, `bench/bench_vec.zig` or `bench/bench_lp.zig`,
-with `-Minterval` pointing at `src/root.zig` — then run on its own, in turn,
-stderr redirected into its own regular file and read back afterwards. The counts
-below were counted in those files, which is the check the positional writer could
-not pass.
-
-| Benchmark | Wall | Captured | Timed rows | Checksum lines | Final fold |
-| --- | --- | --- | --- | --- | --- |
-| scalar | 4.517 s | 134 lines | 60 | 62 | `c164c6b626ff0b52` |
-| vector | 620.824 s | 831 lines | 276 | 277 | `290f6cab53aace7f` |
-| Fourier-Motzkin | 52.010 s | 144 lines | 26 — 13 `dbg`, 13 `smp` | 28 | `4b4f94d960b30e8e` |
-
-The workload did not move to produce them: the thirteen LP bodies keep their
-names, iteration counts, elimination orders, bodies and seeds, the budget is
-still 20,000 rows, and `reps` and `warmup` are still 7 and 1. **The wall times
-are not `ns/op`**. This is one program run per benchmark, not a three-run
-baseline. **No speedup is claimed**; the three-run capture that followed it on
-the same date is below.
-
-### The current measured capture — 2026-10-02
-
-**All 362 timed rows live in
-[docs/performance-baseline-2026-10-02.tsv](docs/performance-baseline-2026-10-02.tsv)**,
-each with its three `ns/op` values and its median, minimum and maximum: 60
-scalar rows, 276 vector rows and 26 LP rows (13 `dbg` + 13 `smp`). Read a row
-out of that file rather than out of prose.
-
-How it was taken: tree `7b472aee` on `buildhost` with Zig 0.16.0, each program
-its own standalone executable with root and `-Minterval` on `src/root.zig`, both
-modules `ReleaseFast`, built under a private build cache and private global
-cache, three **complete sequential program runs** per program in the order
-scalar → vector → LP, repeated for three rounds, all nine exiting 0, stdout and
-stderr on ordinary files read back afterwards. Each reported figure is the
-**minimum over 7 internal repetitions** after **1 warmup**; warmup, repetitions,
-every iteration count, every seed and the 20,000-row budget are unchanged.
-**The host was shared, neither pinned nor isolated.** Run 1 was strictly highest
-on 211/362 rows: 54/60 scalar, 136/276 vector and 21/26 LP. This is a dated capture,
-**not** a speedup and not a before/after pair with the 2026-09-30 tables.
-
-What was checked, rather than assumed: the nine logs were read back with the
-earlier originals as a reference and compared **keyed by row**, which found
-**60 / 276 / 26** timed rows in every scalar, vector and LP run and matched
-**row identity, iteration counts, every per-body checksum sequence and the
-final folds** against those originals on all nine runs. For LP, all **13
-accounting rows** and the geometry report are identical across both heap
-sections of all three LP program runs, with **494,632** allocs and frees and
-**306,958,852** allocated and freed bytes **on each of `allocator=dbg` and
-`allocator=smp`**.
-
-Current LP medians, `ns/op`, `dbg` against `smp` — the run-to-run spans, and the
-other 336 rows, are in the TSV:
-
-| LP case | iters | `allocator=dbg` | `allocator=smp` |
-| --- | --- | --- | --- |
-| `add 64 rows x 8 vars` | 2,000 | 115,956 | 8,912 |
-| `add 8 rows x 4 vars` | 20,000 | 36,746 | 733 |
-| `bounds k=0, mixed 14x2` | 500 | 92,332 | 11,676 |
-| `bounds k=1, straddling 11x2` | 100 | 106,401 | 35,225 |
-| `box, mixed 14x2` | 200 | 140,873 | 23,030 |
-| `box, straddling 11x2` | 50 | 169,051 | 69,915 |
-| `build 6 rows x 4 vars (control)` | 20,000 | 34,587 | 585 |
-| `eliminate k=0, 6 rows x 4 vars` | 20,000 | 51,891 | 2,940 |
-| `eliminateAll ascending, heuristic 4v` | 100 | 35,358 | 2,412 |
-| `eliminateAll chosen, heuristic 4v` | 2,000 | 34,881 | 455 |
-| `eliminateAll chosen, mixed 14x2` | 200 | 176,702 | 71,710 |
-| `eliminateInOrderOfChoice, mixed 14x2` | 500 | 172,232 | 68,276 |
-| `eliminationOrder, mixed 14x2` | 500 | 170,675 | 69,053 |
-
-The heap choice changes these timings, not the input geometry or allocation
-accounting. This compares allocators on the same solver, not a solver before/after.
-
-Seven scalar rows, same date and convention, with the 2026-09-30 figure beside
-them so the difference is not read as a result:
-
-| Operation | 2026-10-02 median (min–max) | 2026-09-30 |
-| --- | --- | --- |
-| `interval.scale` | 58.137 (55.062–73.402) | 47.795 |
-| `interval.div` | 20.532 (19.405–28.128) | 15.465 |
-| `interval.mul` | 10.275 (9.749–16.204) | 9.639 |
-| `interval.sub` | 5.521 (5.230–7.939) | 5.108 |
-| `interval.sqr` | 5.639 (5.155–7.221) | 4.807 |
-| `interval.add` | 5.692 (5.438–7.957) | 5.027 |
-| `interval.abs` | 5.058 (4.831–7.315) | 4.138 |
-
-Cheap rows are not precise to the digit on this host: the measured noise floor
-is wide enough that a change under about 10 ns/op cannot be claimed from one
-pair of runs. The profile taken the same day and what it measured are in
-[docs/performance-handover.md](docs/performance-handover.md). The single
-candidate it selected was **trialled on 2026-10-02 and rejected**; the next
-section says what that measured.
-
-### The Wave 3 solver trial — 2026-10-02: rejected, no claim
-
-**What was tried, and that it is gone.** The one candidate the LP profile
-selected — an RHS-first short-circuit in the private
-`System.checkRowForContradiction`, rejecting a row by `rhs.hi < 0` before
-scanning its coefficients, ahead of the `isAllZero` test — was implemented as
-exactly **two guard lines** in `src/lp.zig`, measured against a frozen baseline,
-and then **removed again**. `src/lp.zig` is byte-identical to the pre-trial file,
-no source or comment from the trial is in the tree, and **no solver optimization
-is accepted, landed or queued**. Nothing travelled with the two lines: the
-arithmetic, the other guards, the tie handling, the elimination order, the
-20,000-row budget and the validation are the originals.
-
-**The primary row and the three criteria were fixed before the paired trial
-captures**: `eliminateAll chosen, mixed 14x2`, 200 iterations, heap
-`allocator=smp`. Three paired rounds, `ns/op` = minimum over the unchanged 7
-internal repetitions after 1 warmup. The serial AB / BA / AB sequence alternated
-order to reduce, not eliminate, order bias:
-
-| Pair | Order | baseline `ns/op` | candidate `ns/op` | Paired gain |
-| --- | --- | --- | --- | --- |
-| 1 | baseline → candidate | 141,681.945 | 495,945.510 | **−250.04 %**, a regression |
-| 2 | candidate → baseline | 190,976.300 | 138,570.120 | +27.44 % |
-| 3 | baseline → candidate | 123,919.585 | 115,391.035 | +6.88 % |
-
-Baseline median 141,681.945, range 123,919.585–190,976.300. Candidate median
-138,570.120, range 115,391.035–495,945.510. **All three criteria fail:**
-
-| Predeclared criterion | Observed | Verdict |
-| --- | --- | --- |
-| median at least 5 % better | the candidate median is **2.19634548 % lower** | **FAIL** |
-| every paired round improves | 2 of 3; pair 1 is a **250.04 % regression** | **FAIL** |
-| the two three-run ranges do not overlap | the baseline range lies inside the candidate range | **FAIL** |
-
-**So: REJECTED, NO CLAIM.** The 2.19634548 % median difference is **not a
-speedup**. It is smaller than this row's own run-to-run spread on a shared host,
-it rests on three samples, and the first pair's candidate takes 3.50× its
-baseline time. The median difference describes those noisy rounds,
-nothing else, and it is not to be quoted as a gain. No second candidate is
-queued, and this says nothing about whether some other part of the solver is
-worth measuring — that would need its own profile and its own predeclared
-criteria.
-
-**No behavior differences were observed in the exercised paths.**
-Strict readers over both three-run captures, baseline and candidate, exit 0 and
-match the earlier reference on row identity, iteration counts, all 13 body
-checksums, the final fold `4b4f94d960b30e8e`, the geometry report and the 13
-accounting rows on **both** heaps, with **494,632** allocs against **494,632**
-frees and **306,958,852** allocated bytes against **306,958,852** freed bytes
-per heap. On top of that, 414 state cases (400 random plus 14 controlled) over
-1,341 adds and 442 eliminations with no gaps, 23 boundary cases over 81
-operations, 104 snapshots and 10,566 explicitly serialized words compared word
-for word, and 150 allocation-failure runs all balanced — **0 mismatches, 0
-unbalanced teardowns**, every comparison at the bit level. The probes were
-thrown away afterwards; no permanent test or API was added for them. Candidate
-scalar and vector contract-only smokes also matched all 60 and 276 reference rows.
-
-**How it was measured.** Host `buildhost`, compiler 0.16.0, root and `interval`
-both `ReleaseFast`: six complete LP program runs, all six exiting 0, on a shared
-and unpinned host with no concurrent project build, profile, test or benchmark.
-The workload did not move — same cases, iteration counts and seeds, 7
-repetitions, 1 warmup, 20,000-row budget, stdout and stderr on ordinary files.
-The baseline came from a frozen 7-file source manifest whose `src/lp.zig`
-sha256 `40868f63…` was verified against the revision; the candidate was the live
-tree at `606fa7f1…`. The original "before" command line is preserved as it ran,
-and the certified replay control pins both modules to the frozen copies.
-
-**Full data:**
-[docs/performance-trial-2026-10-02.tsv](docs/performance-trial-2026-10-02.tsv) —
-**52 timed rows: 13 cases × 2 heaps × 2 variants**, with three `ns/op`
-values each, plus their median, minimum and maximum. The file contains the
-complete data; the table above shows the predeclared primary and the
-reason it failed. The method, the correctness proofs and the acceptance criteria
-are in full in
-[docs/performance-handover.md](docs/performance-handover.md).
-
-#### Final verification — 2026-10-02
-
-All checks below ran after the delegated implementation and documentation
-writers stopped, against the restored solver, using explicit private caches
-and an empty `HOME`.
-
-| Native command | Result | Wall time |
-| --- | --- | --- |
-| `zig build test -Doptimize=Debug -j1 --summary all` | 348/348 passed | 67.246 s |
-| `zig build test -Doptimize=ReleaseSafe -j1 --summary all` | 348/348 passed | 360.370 s |
-| `zig build test -Doptimize=ReleaseFast -j1 --summary all` | 348/348 passed | 355.919 s |
-| `zig build test -Doptimize=ReleaseSmall -j1 --summary all` | 348/348 passed | 69.695 s |
-
-The explicit ReleaseSafe MPFR corpus run checked **1,886 rows, 0 failures,
-427 exactly representable**. The real external consumer and its **31 README
-checks** passed. All three complete benchmark smokes exited 0 and their strict
-readers matched the original row identities, iterations, checksums and folds.
-`zig build docs` passed. LSP reported no issues in all seven production files,
-four benchmark files and the corpus test.
-
-The installed expanded gate passed in **381.962 s**: formatting, build, tests,
-AST checks, `ziglint`, `zlint`, `zbc`, `zwanzig` and the cross profile. `zbc`
-reported **0 errors and 3 standing advisory warnings**; all 32 files were
-analyzed, with 0 failed files and 12 unresolved-import lookups.
-Optional `zig-cov` coverage was not requested or run.
-
-Immutable cross run **`gate-20261002-093350-65131-6914`**, schema 2: each of
-`x86_64-linux`, `aarch64-linux`, `riscv64-linux` and `s390x-linux` built and ran
-**348 tests** (1,392 runtime tests total). Windows built, but its runtime was
-unavailable: **build-only**, not a test pass. Overall `partial`, `fail=0`.
-The actual CI matrix reader passed locally on that immutable summary; GitHub
-Actions and the `vf` engine were not run. The empty `HOME` remained empty.
+unchanged (`std.Io.Clock.real`, wall time), and the recipe above is the only
+thing that produces a figure in this repository.
 
 ## Development
 
@@ -1545,7 +1337,7 @@ The required acceptance gate is the installed `zig-gate`, run from the prefix it
 was installed into rather than from `PATH`:
 
 ```sh
-QUALITY_TOOLS_PREFIX=/home/tmp2/$USER/zig-interval/quality-tools
+QUALITY_TOOLS_PREFIX=<scratch>/zig-interval/quality-tools
 "$QUALITY_TOOLS_PREFIX/bin/zig-gate"
 ```
 
@@ -1561,9 +1353,9 @@ developer's home directory. It is installed from this repository, from pinned
 sources, into a prefix you choose:
 
 ```sh
-QUALITY_TOOLS_PREFIX=/home/tmp2/$USER/zig-interval/quality-tools
-QUALITY_TOOLS_WORK_ROOT=/home/tmp2/$USER/zig-interval/quality-build
-ZIG=/home/tmp2/$USER/zigbin/zig     # a real 0.16.0; a PATH `zig` shim will not do
+QUALITY_TOOLS_PREFIX=<scratch>/zig-interval/quality-tools
+QUALITY_TOOLS_WORK_ROOT=<scratch>/zig-interval/quality-build
+ZIG=<scratch>/zigbin/zig                  # a real 0.16.0; a PATH `zig` shim will not do
 
 bash scripts/install-quality-tools.sh \
   --prefix "$QUALITY_TOOLS_PREFIX" \
@@ -1672,81 +1464,7 @@ be re-verified byte for byte without re-running the installer:
 That is what the `analyze` job in CI runs, after `--verify-only`; neither one
 stands in for the other.
 
-That interface has a receipt now, dated **2026-10-02**, and the first of them is
-the cold one: fresh prefix, fresh work root, empty `HOME`, nothing reused. On
-host `buildhost`, with a real Zig 0.16.0, the same command as above run against a
-prefix and work root that did not exist beforehand and a `HOME` set to an empty
-throwaway directory that was still empty when the run ended: exit 0 in
-**285.8 s**. `zbc` 0.1.3 was
-built by `zig build cli -Doptimize=ReleaseFast`; `ziglint` 0.5.3, `zlint` 0.10.0
-and `zwanzig` 0.15.1 each by `zig build -Doptimize=ReleaseFast`, from their
-pinned revisions with 4, 1, 0 and 7 patches — **12** in all, each sha256-checked
-before it was applied. `install-manifest.tsv` carries **31** payload hashes and
-the re-hash above printed `OK` 31 times, exit 0; `tools/quality/SHA256SUMS`
-seals the **26** files of the checked-in distribution. `install-manifest.tsv`
-is the one payload file it cannot hash, and every patch row names **both**
-notices its file travels under: the tool's upstream `licenses/<tool>.LICENSE`
-and this repository's own `harness.LICENSE`, because a patched tree is neither
-purely upstream nor purely local.
-
-A second install ran the same day, and it is the one the current gate ran out of:
-a **fresh** prefix that did not exist beforehand and an empty throwaway `HOME`
-still empty when it returned — but a **reused** work root, so it is *not* a second
-cold install and its **276.2 s** is not comparable with the 285.8 s above. Exit 0.
-`install-manifest.tsv` carried **32** payload hashes, the re-hash above printed
-`OK` 32 times, exit 0, and `tools/quality/SHA256SUMS` seals the **27** files of the
-checked-in distribution. It applied **13** patches where the cold run applied 12 —
-one more, a `zbc` source patch, and not a rule, a severity or a whitelist.
-
-**The first gate run out of a prefix of this kind failed, and it stays in the
-record as the red one.** 322.3 s, exit 1. It resolved its analysers inside the
-prefix with `policy=builtin` and no `$HOME` or `PATH` lookup — the wiring claim,
-observed rather than asserted.
-`zig fmt --check`, `zig build`, `zig build test` and `zig ast-check` were green
-and `zlint` and `zwanzig` found nothing; then `ziglint` reported **4** style
-findings in `bench/bench_lp.zig` and `zbc` reported **4** `use-undefined`
-**errors** in `bench/bench_vec.zig`, which fail acceptance under the severity
-split described under [What the gate enforces](#what-the-gate-enforces),
-alongside the **3** advisory float-to-integer warnings this project has always
-carried. Nothing was whitelisted, no rule disabled and no severity lowered. The
-four errors are attributed to the pinned analyzer's `for`-range CFG lowering
-rather than to the source: the four `ziglint` findings were corrected in
-`bench/bench_lp.zig`, and the analyzer half travelled as the extra `zbc` patch
-above. The full receipt of that red run — timings, the per-finding table and its
-cross summary — is in
-[docs/performance-handover.md](docs/performance-handover.md), with the current one
-in the section after it.
-
-**The gate out of that prefix is green.** `$QUALITY_TOOLS_PREFIX/bin/zig-gate` —
-the whole gate, formatting through the cross-target section — exit **0** in
-**1061.0 s** on the same host and the same compiler. Its cross section reports
-`status=partial` with `pass 4, fail 0, build_only 1` and exits 0 itself, read
-from the immutable run directory of its own run id rather than from a rolling
-summary: `x86_64-linux` natively plus `aarch64-linux`, `riscv64-linux` and
-`s390x-linux` under QEMU each built and ran the whole test step at **348** tests,
-**1392 executed tests** in all, while `x86_64-windows` built and did not run —
-`build_only`, `runtime_unavailable`, compile coverage and never a tested target.
-`zbc` reported **0** errors over `selected=32 analyzed=32` and the **3** standing
-advisory float-to-integer warnings, and nothing else.
-
-**Wave 3 is closed: the trial was run, and the candidate was rejected.** The Wave
-2 current baseline is done — three complete program runs per benchmark, checked
-row by row against the earlier originals, and published as
-[docs/performance-baseline-2026-10-02.tsv](docs/performance-baseline-2026-10-02.tsv);
-**no speedup is claimed for it.** The profile taken the same day selected one
-candidate, an RHS-first short-circuit in the private
-`System.checkRowForContradiction` ahead of its `isAllZero` test. It was
-implemented as two guard lines, measured against a frozen baseline in three
-counterbalanced paired rounds on a predeclared primary row, and **rejected**:
-all three predeclared acceptance criteria failed, so the lines were removed and
-`src/lp.zig` is the original file again. **No solver optimization is accepted,
-landed or queued, and the median difference that was observed is not a
-speedup.** The 52-row trial data is in
-[docs/performance-trial-2026-10-02.tsv](docs/performance-trial-2026-10-02.tsv)
-and the method, criteria and correctness proofs are in the Wave 3 section of
-[docs/performance-handover.md](docs/performance-handover.md). Remote GitHub
-Actions and the `vf` engine have not been executed. The installed local gate
-above is verified green for the run it describes.
+What an install puts in the prefix:
 
 | Under `$QUALITY_TOOLS_PREFIX` | Contents |
 | --- | --- |
@@ -1797,21 +1515,21 @@ prints `v0.0.0` for `--version`. That is upstream's own default for a build made
 from source, not a version marker this install could have got wrong, and the pin
 in the manifest is what the revision rests on.
 
-There is no `~/.local` tool to install first and no `~/.local` policy file to
-fetch: `$QUALITY_TOOLS_PREFIX/bin` and `$QUALITY_TOOLS_PREFIX/lib` are the whole
-runtime dependency. What lands in the prefix is source-equivalent to the pinned
-revisions plus the checked-in patches, and nothing else.
+There is no system toolchain to install first and no host policy file to
+fetch: `$QUALITY_TOOLS_PREFIX/bin` and `$QUALITY_TOOLS_PREFIX/lib` are the
+whole runtime dependency. What lands in the prefix is source-equivalent to the
+pinned revisions plus the checked-in patches, and nothing else.
 
 ### Running it
 
 ```sh
-QUALITY_TOOLS_PREFIX=/home/tmp2/$USER/zig-interval/quality-tools
+QUALITY_TOOLS_PREFIX=<scratch>/zig-interval/quality-tools
 "$QUALITY_TOOLS_PREFIX/bin/zig-gate"
 ```
 
 The installed gate resolves its required tools — `ziglint`, `zlint`, `zbc`,
 `zwanzig` and `cross-test` — as `$QUALITY_TOOLS_PREFIX/bin/<name>` and nothing
-else: no `$HOME/.local/bin` lookup and no `PATH` fallback.
+else: no lookup outside the prefix and no `PATH` fallback.
 `ZIG_GATE_PREFIX` names the prefix explicitly, and an installed
 `$QUALITY_TOOLS_PREFIX/bin/zig-gate` infers it from its own location without
 one. A missing analyser is exit 2, before any project check runs, naming every
@@ -1829,9 +1547,9 @@ The installed harness carries its own scratch contract,
 `$QUALITY_TOOLS_PREFIX/lib/cross-test/scratch-contract.sh`, and **no
 machine-wide policy file is a prerequisite**: `zig-gate` and `cross-test`
 enforce the rules themselves, so a cold install with an isolated `HOME` is
-governed exactly like one on this host. Where `~/.local/lib/host-scratch.sh`
-happens to be readable it is still sourced first and its exports still win, and
-nothing in any host's global configuration was modified to make this work.
+governed exactly like any other. Where such a policy file happens to be
+readable it is still sourced first and its exports still win, and nothing in
+any host's global configuration has to be modified to make this work.
 
 `scripts/scratch.sh` — the resolver `scripts/build_mpfr.sh` uses — asks that
 **same file**, at `tools/quality/harness/lib/cross-test/scratch-contract.sh`,
@@ -1839,20 +1557,22 @@ rather than carrying its own copy of the volume list. There is one
 implementation of the rule and three callers of it: `zig-gate`, `cross-test`,
 and this repository's own scripts.
 
-On a managed cluster host — `hostname -s` beginning `buildhost`, the same probe the
-machine policy itself uses — a scratch or cache root must sit under
-`/home/tmp2` or `/home/tmp`: a real mountpoint with at least 100 GiB free,
-symlinks resolved, NFS refused, and `/tmp`, `/var/tmp` and `/dev/shm` refused
-outright. This repository is on NFS, and an NFS mount rejects `renameat2()`, so
-a Zig cache placed there fails with an error naming the syscall rather than the
-volume — which is why `/vol/tmp` and `/vol/tmp2`, sanctioned for scratch but
-NFS, are refused here rather than accepted and left to fail later.
+The contract has two modes, chosen by the host and not by the caller. On a
+**managed** host it accepts only the volumes that host's own policy sanctions
+for scratch: a real mountpoint with that policy's own free-space floor,
+symlinks resolved, **NFS refused outright**, and the small system temp volumes
+(`/tmp`, `/var/tmp`, `/dev/shm`) refused for anything the harness writes.
+**The NFS refusal is the load-bearing part of the rule, and the reason is
+`renameat2()`:** an NFS mount rejects it, so a Zig cache placed there dies
+inside `zig build` with an error naming the syscall rather than the volume. A
+network-backed volume that is sanctioned for scratch elsewhere is therefore
+refused here rather than accepted and left to fail later.
 
-On every other host — a CI runner, a laptop — there is no cluster volume list to
-honour, so the test is explicit ownership: an absolute path that is a real,
-non-symlink directory this user owns and can write, with at least 1 GiB free and
-not on NFS. `/tmp` is ordinary in that mode, because on a runner it is the only
-sane scratch. Name the roots:
+On **every other** host — a CI runner, a laptop — there is no cluster volume
+list to honour, so the test is explicit ownership: an absolute path that is a
+real, non-symlink directory the caller owns and can write, with at least 1 GiB
+free and not on NFS. `/tmp` is ordinary in that mode, because on a runner it is
+the only sane scratch. Name the roots:
 
 | Variable | What it is |
 | --- | --- |
@@ -1862,9 +1582,10 @@ sane scratch. Name the roots:
 | `GATE_CROSS_OUTPUT` | the `cross-test --output` directory |
 
 A root named explicitly on a refused volume stops the run; an ambient `TMPDIR`
-on one is corrected with a notice instead. Existing CI may use runner-local
-temporary storage; this cluster's own private root is
-`/tmp/zig-interval`. The installer's own `--prefix` and
+on one is corrected with a notice instead. An inherited temporary directory, an
+inherited cache variable and an explicit flag are all validated the same way,
+and nothing is created until a candidate has passed. Existing CI may use
+runner-local temporary storage. The installer's own `--prefix` and
 `--work-root` are checked by the same helper, so the rule is one implementation
 rather than two, and neither is ever defaulted.
 
@@ -1934,8 +1655,9 @@ Three variables carry the rest:
 
 All three must be absolute paths, and the prefix and work root must also be
 local, writable and owned by the caller, for the reasons the scratch section
-gives: on a managed cluster host that means under `/home/tmp{,2}`, and on a
-runner it means any owned, writable, local path — `/tmp` included.
+gives: on a managed host that means one of the volumes its own policy sanctions
+for scratch, and in every other mode it means any owned, writable, local
+path, the system temp volumes included.
 `suite-timeout` is 3600 s because the cross section builds and runs the whole
 test step for the four required Linux targets, and `enforce: true` turns a
 non-zero exit into a red gate rather than a report.
@@ -1970,8 +1692,8 @@ coverage, and demanding a runtime pass there would be demanding the impossible.
 A profile that declares nothing keeps the previous, looser reporting.
 
 ```sh
-ZIG=/home/tmp2/$USER/zigbin/zig \
-  "$QUALITY_TOOLS_PREFIX/bin/cross-test" --output /home/tmp2/$USER/cross-out
+ZIG=<scratch>/zigbin/zig \
+  "$QUALITY_TOOLS_PREFIX/bin/cross-test" --output <scratch>/cross-out
 ```
 
 `cross-test` manages its own cache and rejects `--cache-dir`, `--prefix`,
@@ -1982,7 +1704,7 @@ network mount.
 per-target logs and `cross-test-summary.json` off the network mount. Read
 `<output>/cross-test-summary.json` and `<output>/runs/RUN_ID/build-TARGET.log`.
 
-`x86_64-windows` has no runner on this host, so `cross-test` records it as
+`x86_64-windows` has no runner, so `cross-test` records it as
 `build_only` / `runtime_unavailable` and never counts it as a pass. A clean run
 therefore reports `status=partial`, not `pass`, with `fail=0` and five target
 rows, and still exits 0. "Builds" is the whole of that row's claim: it is
@@ -2017,11 +1739,11 @@ published target list. The default sweep ignores an inherited `TARGETS` subset;
 an explicit `--targets` option still permits a diagnostic subset.
 
 ```sh
-ZIG=/home/tmp2/$USER/zigbin/zig \
+ZIG=<scratch>/zigbin/zig \
   "$QUALITY_TOOLS_PREFIX/bin/cross-test" \
   --profile ./cross-compile.profile.sh \
   --jobs 4 --build-jobs 1 --build-timeout 900 \
-  --output /home/tmp2/$USER/zig-interval/compile-out
+  --output <scratch>/compile-out
 ```
 
 Each target runs `zig build test-compile`: the same **11 test binaries** that
@@ -2031,20 +1753,18 @@ public operations; a library archive alone would not establish that because
 Zig analyzes declarations lazily. No tests, benchmarks or host consumer execute.
 Benchmark executables and foreign consumer fixtures are not part of this sweep.
 
-**Verified on 2026-10-02:** all **53 targets compiled in Debug**, with
-**583 test binaries, 53 NaN probes and 53 libraries**. Immutable run
-`20261002-134004-50177-12744`, exit 0:
+Because every runner is `skip`, a clean sweep reports no pass and no fail, with
+every target counted in the `build_only` column:
 
 ```text
 status=build_only pass=0 fail=0 build_only=53 partial=0
 ```
 
-This includes 32-bit and 64-bit targets, both byte orders, Linux, FreeBSD,
+The sweep covers 32-bit and 64-bit targets, both byte orders, Linux, FreeBSD,
 NetBSD, OpenBSD, Windows, macOS, Mac Catalyst and WASI. It is compilation
 coverage, not 53 runtime passes or a target-by-optimize-mode matrix.
 The normal gate retains its four required Linux runtime passes and Windows
 compile-only row.
-
 
 ## License
 

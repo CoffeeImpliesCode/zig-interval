@@ -38,10 +38,10 @@
 //! second reading of its rule, and a trip is an exit status rather than a
 //! machine-level incident. It allocates nothing and builds no derived row.
 //! It has to be one: with these generators the row count grows by roughly the
-//! row count every round, two `bench-lp` processes on this host reached
-//! 169 GB and 160 GB of resident memory, and a search of 78 configurations
-//! at three or more variables found not one that completed under this
-//! budget.
+//! row count every round, two `bench-lp` processes reached 169 GB and 160 GB
+//! of resident memory in one shared-machine run, and a search of 78
+//! configurations at three or more variables found not one that completed
+//! under this budget.
 //!
 //! Where this file drives the elimination itself - `eliminateOne`, and every
 //! round of `eliminateNaive` - the check is on the round about to happen. The

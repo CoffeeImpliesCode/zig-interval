@@ -6,7 +6,7 @@ Item **O1** in `docs/next-work-plan.md` §4 asks for the prerequisite rather tha
 for the optimisation. A direct formulation of `scale` would need one outward
 step per endpoint instead of the six it spends today, and the plan's verdict on
 that is *NO, not without a proof*, for the reason `scale`'s own doc comment
-gives at `src/interval.zig:451-459`:
+gives at `src/interval.zig:466-467`:
 
 > a bound has to bound the whole chain, and the error of a chain is not the
 > error of its last step
@@ -18,19 +18,19 @@ form returns a bound that excludes the true image. That converts *nobody has
 checked* into *checked, and here is where it fails*, which is what §4 asks for
 when it says the item is blocked on an argument rather than on work.
 
-The prize is real and is not being given up: `interval.scale` is **47.795
-ns/op** against **80.551** at the start of round 2, a **−41 %** move that the
-handover marks **CLAIMED** (`docs/performance-handover.md:656`, `:372`,
-captured 2026-09-30, `bench-scalar`, ReleaseFast, idle machine, three runs,
-minima), and it is still 3.1× `div`, 5.0× `mul` and 9.5× `add` at that capture
-(`docs/next-work-plan.md:672-673`). §8 below says what a *sound* fusion would
-have to cost, and why it is not the same thing as the one-step form.
+The prize is real and is not being given up: a sound fusion of the six
+roundings into one would be cheaper than the six outward steps the composition
+spends, and the size of the prize is measured — `interval.scale` is **47.795
+ns/op** against **80.551** at the start of round 2, a **−41 %** move, still
+3.1× `div`, 5.0× `mul` and 9.5× `add` (see the benchmark captures this
+repository keeps). §8 below says what a *sound* fusion would have to cost, and
+why it is not the same thing as the one-step form.
 
 ---
 
 ## 1. What is being fused
 
-The contract is already written down in `src/interval.zig:449-450` and, in the
+The contract is already written down in `src/interval.zig:463-467` and, in the
 five-term form the soundness oracle judges by, in the doc comment above
 `ScaleBound` (`tests/soundness_shared.zig:822-823`). For a bounded box
 `[A, B]` and `G = |factor|` the true image is
@@ -42,7 +42,7 @@ H = (A + B - G*A + G*B) / 2 = M + W
 ```
 
 taken as reals. Neither `M` nor `W` is an `f64` in general and neither is `L`
-or `H`, which is why §1 of `tests-and-architecture-plan.md:238-261` exists:
+or `H`, which is why §2.2 of `docs/tests-and-architecture-plan.md:286-295` exists:
 the division by two makes each extremum a sixth term that no rounded `f128`
 supplies, so the oracle holds the five terms as an expansion and compares
 signs. Everything below is judged against exactly that reference.
@@ -62,20 +62,20 @@ hi' = roundUp(fl(m + w))               // the same six, on the other arm
 Six roundings and **one** outward step per endpoint, against the six outward
 steps per endpoint the present composition spends. That is the whole of the
 proposal, and it is stated this way on purpose: it keeps the midpoint /
-half-width structure `scale`'s doc comment insists on (§`src/interval.zig:501-505`),
+half-width structure `scale`'s doc comment insists on (§`src/interval.zig:491-498`),
 puts both terms of each arm on the protective side, and gives the fused form
 the best rounding any `f64` implementation can have. Anything that fails below
 fails for a reason the structure does not repair.
 
 Three of those six roundings are *exactly* exact and cost nothing: the two
 divisions by two, because halving a normal is exact
-(`src/interval.zig:418-420`), and `fl(m - w)`, which is exact by **Sterbenz**
+(`src/interval.zig:432-433`), and `fl(m - w)`, which is exact by **Sterbenz**
 whenever `w/2 <= m <= 2w` — which is precisely the regime the failure lives
 in. That leaves **three** roundings carrying error in the worst case: the
 sum, the difference and the product.
 
 The shorter algebra `lo + (hi - lo)(1 - g)/2` is not considered again here. Its
-doc comment at `src/interval.zig:486-517` already rejects it, with two
+doc comment at `src/interval.zig:500-519` already rejects it, with two
 measurements attached, for the independent reason that each of its arms is
 protective in one direction only.
 
@@ -131,7 +131,7 @@ rather than of the answer:
 | # | rounding | own bound | exact? |
 | - | -------- | --------- | ------ |
 | 1 | `fl(lo + hi)` | `<= ulp(M) / 2`, once the exact halving has moved it onto `M` | no |
-| 2 | `fl(s / 2)` | `0` | **yes**, normal range (`src/interval.zig:418-420`) |
+| 2 | `fl(s / 2)` | `0` | **yes**, normal range (`src/interval.zig:432-433`) |
 | 3 | `fl(hi - lo)` | its error is scaled by `G` on the way into `w`, so `<= ulp(W)` for `G` within a factor of two of 1 | no |
 | 4 | `fl(d * g)` | `<= ulp(W) / 2` | no |
 | 5 | `fl(p / 2)` | `0` | **yes**, normal range |
@@ -289,18 +289,18 @@ Four things to read out of that table.
 
 **The present form is sound on all 2.9 million cases.** That is the
 self-check on the harness: a model of `scale` that were even slightly wrong
-would show unsoundness here, and it shows none. It also corroborates the
-handover's step count. Tracing the rounding steps on the finite path of
-`scale([-1, 3], 2)` gives fourteen `roundDown`/`roundUp` calls, seven of each,
-of which exactly **six** lie on the path to the returned lower endpoint:
+would show unsoundness here, and it shows none. Tracing the rounding steps
+on the finite path of `scale([-1, 3], 2)` gives fourteen `roundDown`/`roundUp`
+calls, seven of each, of which exactly **six** lie on the path to the
+returned lower endpoint:
 
 ```
 fl(lo+hi) -> fl(/2) -> [ fl(hi-lo) -> fl(*g) -> fl(/2) ] -> fl(m - w)
     1          2                 3         4         5            6
 ```
 
-which is the "6 outward-widening steps per endpoint on the finite path" of
-`docs/performance-handover.md:499`.
+which is exactly the six outward-widening steps per endpoint that the finite
+path spends.
 
 **The fused form fails at 27 % and 14 % of everything.** §3 predicts a failure
 rate that tracks how often the endpoint cancels; it does.
@@ -312,10 +312,10 @@ subnormal range: 588 of 588 and 871 of 871, none normal. The mechanism is the
 one the rest of the file already knows: a correctly-rounded final add whose
 exact value is below `min_subnormal` lands on a signed zero, and
 `roundUp`/`roundDown`
-**deliberately do not step at a zero** (`src/rounding.zig:180-182`,
-`:204-206`) because a zero is already its own bound. Repairs for exactly this
+**deliberately do not step at a zero** (`src/rounding.zig:204-205`,
+`:231-233`) because a zero is already its own bound. Repairs for exactly this
 live in `halve` (`src/interval.zig:437-444`), `Corners.loBound`/`hiBound`
-(`:200-216`) and `sqr` (`:964-983`), and a fused form would have to carry one
+(`:209-226`) and `sqr` (`:964-983`), and a fused form would have to carry one
 too. At every normal magnitude the lemma holds and the exact-`M`-and-`W` form
 is sound on every case tested — which is the empirical confirmation that §2's
 budget is not a guess but the exact threshold.
@@ -324,9 +324,9 @@ budget is not a guess but the exact threshold.
 structured sweep inverts.** `scale([-floatMax, 1e300], 0.0)` comes back
 `[floatMax, -floatMax]`: the true image is the single point
 `-8.988465624311579e+307`, and the answer excludes it while also breaking the
-`lo <= hi` invariant that `src/interval.zig:542-549` warns about and that
+`lo <= hi` invariant that `src/interval.zig:256-275` warns about and that
 `Interval.init` traps on in a checked build. That is the `src/interval.zig:
-486-517` rejection reproducing itself under a one-step widening, which is why
+500-519` rejection reproducing itself under a one-step widening, which is why
 the shorter algebra is not the fallback here either.
 
 ---
@@ -358,7 +358,7 @@ fused form, and it is larger because it is *not* one number's worth of
 rounding: it is two enclosures wide, each of which was built by an operation
 whose own outwardness was sized against its own chain.
 
-**That is the theorem `src/interval.zig:451-459` states, and §4 gives it a
+**That is the theorem `src/interval.zig:466-467` states, and §4 gives it a
 number.** In the composition each step's outwardness is the error budget the
 next step spends, so the cancellation at the end is paid for by the width that
 the composition carried into it. In the fused form there is one step and one
@@ -370,7 +370,7 @@ The same argument kills the fixed-count variant. With `N` steps the budget is
 `N >= ulp(M) / ulp(L) + 1` steps, and `ulp(M)/ulp(L)` is unbounded on this
 family. No constant repairs it, which is why the existing doc comment's line —
 *"A fixed count is a guess at what the chain accumulated, it is only ever a
-guess"* (`src/interval.zig:456-459`) — is not a stylistic preference but the
+guess"* (`src/interval.zig:470-471`) — is not a stylistic preference but the
 correct statement about this particular computation.
 
 ---
@@ -391,14 +391,15 @@ a rough **30 operations per endpoint**, against the composition's seven
 interval operations on the finite path — `add`, `halve`, `sub`, `mul`, `halve`,
 `sub`, `add` — and the terms overlap between the two endpoints, so the pair
 shares the products. This is an **operation count, not a measurement** —
-nothing here was timed, and `docs/performance-handover.md` is the file that
-holds the timings. A count of that shape against a 47.795 ns/op
-baseline is not a promise of a win; it is a reason to think the win O1 is
-after is not in this direction.
+nothing in this section was timed; measured figures are cited where they
+belong, and the full timings live in the benchmark captures this
+repository keeps, not in this section. A count of that shape is not a promise
+of a win; it is a reason to think the win O1 is after is not in this
+direction.
 
 It would also be a different function, not a faster one: it would lose the
 `lo <= hi` check by composition that
-`src/interval.zig:542-549` calls the one place in the file where an assertion
+`src/interval.zig:556-563` calls the one place in the file where an assertion
 still has something to catch, and it would have to re-derive the unbounded
 branch, the `|factor|` convention and the subnormal repair for itself.
 

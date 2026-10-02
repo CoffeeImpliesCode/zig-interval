@@ -36,7 +36,7 @@
 #      failure. That is the only thing in a `status=fail` worth debugging
 #      before reading the log.
 #   3. `status=partial pass=4 fail=0 build_only=1` is this project's NORMAL
-#      clean result: x86_64-windows has no runner on this host, so it is
+#      clean result: x86_64-windows has no runner here, so it is
 #      reported build_only/runtime_unavailable and never counted as a pass. A
 #      green default run says `partial`, not `pass`, and exit status is 0.
 #      `--require-runners` would turn that into a failure and is NOT usable
@@ -55,22 +55,20 @@
 # ---------------------------------------------------------------------------
 # HOW TO RUN IT ON THIS CHECKOUT
 # ---------------------------------------------------------------------------
-#   export QUALITY_TOOLS_PREFIX=/home/tmp2/$USER/quality      # where you installed
-#   export PATH=/home/tmp2/$USER/zigbin:$PATH   # real 0.16.0; PATH `zig` is an anyzig shim
-#   ZIG=/home/tmp2/$USER/zigbin/zig \
-#     "$QUALITY_TOOLS_PREFIX/bin/cross-test" --output /home/tmp2/$USER/cross-out
+#   export QUALITY_TOOLS_PREFIX=$HOME/quality        # where you installed
+#   export PATH=$HOME/zigbin:$PATH                   # the real 0.16.0 zig
+#   ZIG=$HOME/zigbin/zig \
+#     "$QUALITY_TOOLS_PREFIX/bin/cross-test" --output $HOME/cross-out
 #
 # CI's `cross` job sets the same three things (QUALITY_TOOLS_PREFIX, ZIG, an
-# absolute --output on the runner's local volume) and adds only its own run id.
+# absolute --output on the runner's local disk) and adds only its own run id.
 #
-# All three paths are on a large LOCAL volume, never /tmp. Rechnerbetriebsgruppe
-# (2026-10-01) asked that processes stop filling local /tmp and /var/tmp; on
-# buildhost /tmp is a 10 G local ext4 volume. `scripts/scratch.sh` resolves a
-# sanctioned location if you would rather not write it out - see the storage
-# note in docs/performance-handover.md for why /vol/tmp is deliberately not
-# used even though it exists on every buildhost.
+# Put all three on a large LOCAL volume rather than on the system temporary
+# directory: /tmp is normally a small RAM filesystem, and one run writes build
+# output, artifacts and logs. `scripts/scratch.sh` resolves a suitable
+# location for you if you would rather not write the paths out.
 #
-# `--output` is not optional here: /nfs rejects `renameat2` with
+# `--output` is not optional here: a network filesystem rejects
 # EINVAL, so a Zig build cannot keep a cache on the network mount. cross-test
 # puts ITS cache under ZIG_GLOBAL_CACHE_DIR when that is set and under the state
 # base it picks from TMPDIR when it is not, and holds either to the same rule
@@ -143,8 +141,8 @@ CROSS_BUILD_JOBS=1
 #                   duplicate of the first: RISC-V has no NEON-class baseline,
 #                   so its codegen and libcall paths differ from both the host
 #                   and AArch64.
-#   s390x-linux     BIG-ENDIAN, and the only byte-order coverage this project
-#                   has. Every other target in the table, including the host,
+#   s390x-linux     BIG-ENDIAN, and the byte-order coverage in this gate table.
+#                   Every other target in the table, including the host,
 #                   is little-endian. The code a byte-order mistake would break
 #                   is the oracle's own: src/rounding.zig:164-199 steps f64
 #                   neighbours by u64 bit pattern and the NaN contract trap
@@ -153,10 +151,11 @@ CROSS_BUILD_JOBS=1
 #                   cross job runs this same profile with qemu-user present and
 #                   asserts the runtime rows, so this row is the project's
 #                   byte-order coverage in CI as well as here. Drop this row and
-#                   the project has no byte-order coverage whatsoever.
-#                   (`aarch64_be-linux` is big-endian too and has a runner on
-#                   this host, but s390x-linux is the row this project has
-#                   actually run 348/348 on.)
+#                   the gate table has no byte-order coverage whatsoever.
+#                   (`aarch64_be-linux` is big-endian too and has a runner
+#                   wherever qemu-user is installed — the full 20-target sweep
+#                   runs it 348/348 alongside s390x — but s390x-linux is the row
+#                   the gate profile asserts on.)
 #   x86_64-windows  build-only here, and that is why it is in the set: it is
 #                   compile coverage of the Windows ABI and std paths - non-ELF
 #                   object output, .exe naming, the win32 side of std - and
@@ -200,33 +199,33 @@ CROSS_REQUIRED_RUN_TARGETS='x86_64-linux aarch64-linux riscv64-linux s390x-linux
 #
 #   cross-test --targets 'x86_64-linux aarch64-linux riscv64-linux s390x-linux \
 #                       aarch64_be-linux powerpc64-linux mips64-linux ...' \
-#               --output /home/tmp2/$USER/cross-out
+#               --output $HOME/cross-out
 #
 # For compilation-only coverage of all 53, use the separate profile instead:
 #   cross-test --profile ./cross-compile.profile.sh \
-#               --output /home/tmp2/$USER/compile-out
+#               --output $HOME/compile-out
 # That builds the library, all 11 test binaries and the NaN probe through
 # `test-compile`, executes none of them and reports build_only=53.
 #
 # `cross-test --no-profile --list` prints every platform in the table with the
-# runner detected for it on this host, and is where those names come from. Note
-# what `--no-profile` costs: it drops this file, so the 900 s budget, the pinned
-# concurrency and the required-run set all go with it - pass `--timeout 900`,
-# `--jobs 2 --build-jobs 1` too, and note that the gate cannot read a
-# declaration out of a profile it is not given.
+# runner detected for it on the current machine, and is where those names come
+# from. Note what `--no-profile` costs: it drops this file, so the 900 s budget,
+# the pinned concurrency and the required-run set all go with it - pass
+# `--timeout 900`, `--jobs 2 --build-jobs 1` too, and note that the gate cannot
+# read a declaration out of a profile it is not given.
 
 # ---------------------------------------------------------------------------
 # Nested-build compiler: make the fixture's `zig` the same binary as ours.
 # ---------------------------------------------------------------------------
-# build.zig:270-279 runs a SECOND `zig build run` for the external consumer
-# fixture, and it resolves a BARE `zig` from PATH. So the fixture's compiler is
-# picked by a PATH search while cross-test picked one by probing `zig env`, and
-# the two can differ: the PATH `zig` on this host is an anyzig shim that
-# chooses a version from whatever `.minimum_zig_version` it finds in the
-# working directory, and this child runs in fixture/ - a different project. It
-# agrees with the outer build today only because fixture/build.zig.zon pins the
-# same 0.16.0, which is a coincidence between two files rather than a property
-# of the build.
+# The `consumer` step in build.zig runs a SECOND `zig build run` for the
+# external consumer fixture, and it resolves a BARE `zig` from PATH. So the
+# fixture's compiler is picked by a PATH search while cross-test picked one by
+# probing `zig env`, and the two can differ: a PATH `zig` is often a shim that
+# chooses a compiler version from whatever `.minimum_zig_version` it finds in
+# the working directory, and this child runs in fixture/ - a different project.
+# It agrees with the outer build today only because fixture/build.zig.zon pins
+# the same 0.16.0, which is a coincidence between two files rather than a
+# property of the build.
 #
 # This IS fixable from a profile, and is fixed here. By the time a phase worker
 # runs, cross-test has resolved the compiler it is about to execute and exports
