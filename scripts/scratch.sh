@@ -135,6 +135,13 @@ If this host genuinely has no large local volume, name one yourself:
     export ZIG_INTERVAL_SCRATCH=/path/on/local/disk
 
 It is validated, not trusted: an unusable path is refused with its reason.
+
+To offer managed volumes, name the ones this host approves:
+
+    export QUALITY_MANAGED_ROOTS='/path/one /path/two'
+
+QUALITY_MANAGED_HOST_PATTERN='hostname-glob' is optional; set it to scope
+that one list to hosts whose short name matches the glob.
 EOF
     return 1
 }

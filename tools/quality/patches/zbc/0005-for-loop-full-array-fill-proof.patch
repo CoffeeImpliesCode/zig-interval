@@ -39,11 +39,9 @@
 # COVERAGE. 20 tests in src/flow/worklist.zig, named in that file: 4 expect no findings (1D
 # fill, nested 2D fill, nested 3D with unequal dimensions, an `else` reading a filled buffer),
 # 16 expect the rule SET to be exactly {use-undefined} and assert no count. Plus 2 helpers.
-# EVIDENCE. Two runs of `zig test --test-filter "use_undefined:"`, 29 selected each, all 20 of
-# these tests among them. The first, taken before the review correction was folded in here,
-# passed; the second, over the bytes this
-# file now carries, so with the payload bound, the moved query and the carried length present,
-# passed as well.
+# EVIDENCE. Two runs of zig test --test-filter use_undefined:, 29 selected each, all 20 of
+# these tests among them; the first, taken before the review correction, passed, and the
+# second, over the bytes this file now carries, passed as well.
 # BUILT AND GATED. The tree 0001-0005 produces was built with `zig build cli`, installed into a
 # fresh prefix under an empty HOME with a REUSED work cache (276.1623 s, so not a cold install),
 # and the full gate from that prefix exited 0 in 1061.0422 s: zbc selected=32 analyzed=32
