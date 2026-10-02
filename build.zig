@@ -248,6 +248,26 @@ pub fn build(b: *std.Build) void {
     const run_soundness_reproducers_tests = b.addRunArtifact(soundness_reproducers_tests);
     test_step.dependOn(&run_soundness_reproducers_tests.step);
 
+    // Compile the same test artifacts without run steps or the host consumer.
+    // The installed library is the cross-test artifact; the test dependencies
+    // force analysis and code generation of the exercised public operations.
+    const compile_step = b.step("test-compile", "Compile the library and complete test suite without running");
+    compile_step.dependOn(b.getInstallStep());
+    for ([_]*std.Build.Step.Compile{
+        tests,
+        rounding_tests,
+        ext_tests,
+        vector_tests,
+        lp_tests,
+        corpus_tests,
+        lp_exact_tests,
+        soundness_reference_tests,
+        soundness_fuzz_tests,
+        soundness_frontier_tests,
+        soundness_reproducers_tests,
+        nan_probe,
+    }) |artifact| compile_step.dependOn(&artifact.step);
+
     // The fixture is a real external package: it declares this one as a
     // dependency and resolves `interval` through the module graph, which the
     // internal test above cannot exercise because it is handed the module
