@@ -1398,19 +1398,47 @@ path where the row set has genuinely changed. Second, mutation: flipping the
 single-row predicate must make the lp suite report an unsatisfiable system as
 satisfiable — that is the test that proves the check is load-bearing.
 
-**One trial candidate sits against this predicate and does not reopen it.** The
-2026-10-02 profile of the whole SMP profiling consumer puts the post-elimination
-rescan at **4.276 %** of sampled cycle periods and **7.537 %** within `eliminate`,
-against a **0.595 %** upper bound for the `chooseNext` heuristic's two callers —
-enough to be worth a trial, not enough to be an accepted optimisation.
-The candidate is to test `row.rhs.hi < 0` before `isAllZero` inside
-`checkRowForContradiction`: a reordering of two pure tests, with the exact-zero
-predicate, the `rhs.hi < 0` predicate, the `unsat` latch, the `pushRow`-versus-
-`rescanForContradiction` split above, the elimination order and the row budget all
-unchanged. It is unimplemented, it has no measured speedup, and its acceptance is
-bit-level differential equality against frozen revision `7b472aee` and unchanged
-benchmark signals, plus a repeatable three-round timing comparison, with
-**reject** as a real outcome. O5 in `docs/next-work-plan.md` holds the entry. **A5 stays DONE either way.**
+**One trial candidate sat against this predicate, was refused, and changed
+nothing.** The 2026-10-02 profile of the whole SMP profiling consumer puts the
+post-elimination rescan at **4.276 %** of sampled cycle periods and **7.537 %**
+within `eliminate`, against a **0.595 %** upper bound for the `chooseNext`
+heuristic's two callers. Those are the dated figures the selection rested on and
+they remain **sample attribution, not a speedup** — the trial that followed did
+not convert them into one. The candidate was to test `row.rhs.hi < 0` before
+`isAllZero` inside `checkRowForContradiction`: a reordering of two pure tests.
+
+**It was tried on 2026-10-02 and REJECTED — NO CLAIM.** Its predeclared primary
+row, `eliminateAll chosen, mixed 14x2` at 200 iterations under `allocator=smp`,
+came out at a median **2.196 %** lower over three counterbalanced pairs, short of
+the 5 % bar, with the first pair a **250.04 %** regression and the two ranges
+overlapping. All three timing conditions failed, so nothing landed and the
+unchanged solver was restored. The full paired capture — **52** rows, the same 26
+LP rows as baseline and as candidate — is
+`docs/performance-trial-2026-10-02.tsv`.
+
+**What it did not touch.** The split above is exactly as it was: `pushRow` still
+checks only the row it just appended, `rescanForContradiction` still scans every
+row on the `eliminate` path, and neither the strict `rhs.hi < 0` predicate nor
+the exact `isAllZero` predicate was weakened. No API, allocation, validation,
+elimination order, tie-break or row budget changed, no comment was added for the
+rejected order, and `src/lp.zig` is byte for byte the pre-trial file.
+
+**What the differential side did establish.** Bit-level equality against frozen
+revision `7b472aee` **held**: both three-run captures passed the strict LP
+readers against the Wave 1 reference with identical row identities, iteration
+counts, all 13 body checksums and fold, the geometry report and the untimed
+accounting, and identical per-heap totals of 494,632 allocations and
+306,958,852 bytes with `allocs == frees`. A behaviour probe matched on **414**
+state cases — 1,341 additions, 442 eliminations, **0** gaps — comparing bit
+patterns, errors, `null` answers, elimination order and liveness; on **23**
+precise cases over 104 snapshots, as 10,566 serialized words; and over **150**
+allocation-failure runs, with no unbalanced COUNT or BYTE teardown. Three private
+wrong-predicate mutants — `rhs.hi <= 0`, `rhs.lo < 0`, approximate zero — each
+exited 1 against that harness while the certified control and candidate exited 0,
+so the predicate this entry would have reordered sits under a probe that bites.
+The probes were throwaway: no permanent test and no new API came out of it. O5 in
+`docs/next-work-plan.md` holds the entry with the figures, the tables and the
+source pins. **A5 stays DONE.**
 
 ### A6 — DONE: `System.count()` is renamed `rowCount()`
 
@@ -1870,6 +1898,16 @@ nothing to do with the code, and then invites a later session to treat the
 discrepancy as a regression. **If a change has no measurement attached, it has no
 claim attached either** — the convention is to record such a row as **NO CLAIM**
 rather than as a small win, and it is the right one.
+
+**The paired record for the one trial that was run is a separate file.**
+`docs/performance-trial-2026-10-02.tsv` carries all **52** rows — the same 26 LP
+rows as baseline and as candidate, each with its three `ns/op` values beside
+median, minimum and maximum — under a header naming the host, the compiler,
+`baseline_code=7b472aee`, both `src/lp.zig` hashes and `outcome=REJECTED
+NO_CLAIM`. It is a paired before/after capture where the 362-row file is a
+single-revision baseline. Quote a figure from one only as that file's, and never
+quote the trial's median difference as a speedup: the entry it belongs to failed
+two of its three predeclared timing conditions.
 
 **The consequences, stated once.** A change to any operation under about
 10 ns/op **cannot** be claimed from a single pair of runs here: take the

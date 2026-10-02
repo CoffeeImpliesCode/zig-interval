@@ -305,9 +305,11 @@ before anything in section 3, and it was not a wider version of D17: D17 was one
 function widening by one step too few, and P8 was a question about what an
 infinity *means*. The documentation items that followed it are closed too: D10
 and the remainder of D11 are under P6 and P7 below, and both rows in section 1's
-table read FIXED. What remains open in this project is not here — it is section
-3's features and section 4's optimisations, and of those, one is answered, two
-have landed and one is refused.
+table read FIXED. **Section 3's features are all done and section 4's
+optimisations are all resolved** — one answered in the negative, two landed, two
+refused — so no entry in this document is a task. Final verification passed:
+all four native modes, the MPFR corpus, external consumers, all benchmarks,
+docs, LSP diagnostics and the installed expanded gate; see the handover's final receipt.
 
 ### P1 — DONE: `div` at infinite endpoints (D1)
 
@@ -740,8 +742,10 @@ Drawn from the step-4 ranking in `docs/performance-handover.md`, with the
 verdicts that ranking already reached and the figures it ended on. **O1 through O4
 are resolved** — O2 and O3 landed, O1 is answered in the negative by a proof that
 was written afterwards, and O4 is refused and closed — so none of those four is a
-task. **O5 is the one open entry, and it is a TRIAL rather than an accepted
-optimisation**: nothing in it is implemented, and no speedup has been measured.
+**O5 was the one open entry, and it has been tried and is now REFUSED**: it was
+carried as a trial rather than as an accepted optimisation, it failed all three
+of the conditions fixed before the run, nothing from it is in the tree, and no
+speedup is claimed. **This section has no open entry left.**
 **Cheap-row noise is capture-specific.** The contended 2026-09-30 capture moved
 by up to 44% between two runs of the same binary. The current three-run capture
 is wider: max/min spread is 66.2% on `interval.mul` and 287.6% on `dyn3.contains`.
@@ -852,8 +856,8 @@ computed, and the widening step count is unchanged. **Claimed: `mul` 11.062 →
 9.639 ns/op, −13 %**, which clears the noise band. The corner tests and the
 underflow reproducers in the oracle are unchanged. This was a tidy-up that
 turned out to be measurable. O3 and O2 are the two items of this section that
-have landed; O1 is answered in the negative and O4 is refused, so none of the
-four is pending.
+have landed; O1 is answered in the negative, O4 is refused and O5 was tried and
+refused, so none of the five is pending.
 
 **O4 — REFUSED and closed: `powf` at 272.5 ns/op, seven interval operations
 composed.** `powerCorner` (`src/interval_ext.zig`) and the identity above it.
@@ -867,11 +871,12 @@ as 1.01005016788679320 against a true 1.0100501679193823. The handover reached
 the same verdict at rank 5: "do not change ... deliberately traded for
 soundness. Quantified, as asked; not a defect." Do not reopen it.
 
-**O5 — TRIAL ONLY, not an accepted optimisation: test `row.rhs.hi < 0` before
-`isAllZero` in `System.checkRowForContradiction`.** Nothing in this entry is in
-the tree and no speedup has been measured. It is selected because it is where a
-profile put the time, and it is ranked against an alternative that the same
-profile priced out.
+**O5 — REFUSED and closed: test `row.rhs.hi < 0` before `isAllZero` in
+`System.checkRowForContradiction`.** It was the one open entry and it was carried
+as a trial, not as an accepted optimisation. It was implemented, measured against
+conditions fixed before the run, and **rejected**: all three timing conditions
+failed. Nothing from it is in the tree, no comment was added with it, and the
+entry records **NO CLAIM**.
 
 **What the profile said, 2026-10-02, same revision, same host.**
 The profile covers 20 calls to the public `bench_lp.run` path in a separate SMP
@@ -881,7 +886,7 @@ region alone — with **36,754** samples and **0 lost**, and every original sign
 post-elimination rescan on the `eliminate` path — raw leaf periods mapped
 through the disassembly onto two address ranges — is **7.537 %** of `eliminate`
 and **4.276 %** of the whole profile, from **1,581** samples.
-The heuristic is the thing this entry does NOT propose to touch: `chooseNext` has
+The heuristic is the thing this entry did NOT propose to touch: `chooseNext` has
 exactly two callers, `eliminationOrder` and `eliminateInOrderOfChoice` (LSP, not
 inspection), the tally is inlined into it, and their combined **self** time is
 **0.595 %** of the whole profile. That figure is an **upper bound** and not its
@@ -906,7 +911,7 @@ is two tests: return unless every coefficient of the row is exactly zero, and
 latch `unsat` when the right-hand side's upper bound is below zero. Asking the
 second question first skips the whole-row coefficient scan on any row that
 already cannot contradict. How many rows that is on the elimination path is
-**not** measured and is part of what the trial has to establish — the 4.276 % is
+**not** measured, and the trial did not measure it either — the 4.276 % is
 the scan's cost, not the number of skips the reordering would buy.
 
 **Everything that must not move, stated as conditions rather than as intent.**
@@ -921,10 +926,10 @@ every row on the `eliminate` path — A5's split is untouched and does not reope
 `unsat` stays latched, and every system that latches and every system that does
 not must latch identically. Elimination order, tie-breaking between equal
 candidates, the row budget, the workloads, the seeds, the iteration counts and
-the arithmetic are all untouched: this reorders a conjunction of two pure tests
-and computes nothing.
+the arithmetic are all untouched: the change reordered a conjunction of two pure
+tests and computed nothing, and every one of those conditions held in the end.
 
-**Accept or reject, decided two ways, both required.**
+**Accept or reject, decided two ways, both required — declared before the run.**
 1. **Differential equality.** The candidate's captures must reproduce the
    2026-10-02 baseline exactly — every row identity, iteration count, streamed
    per-row checksum and fold, on all three programs; the LP geometry report and
@@ -935,15 +940,100 @@ and computes nothing.
    seven internal repetitions; compare the three-run medians and ranges.
    Require at least 5% lower median on `eliminateAll chosen, mixed 14x2` under
    `allocator=smp`, improvement in all three pairs, and non-overlapping ranges.
-   Its current range is 71,232.010–73,492.960 ns/op (3.17% max/min spread).
    Otherwise reject. Use that row's fresh paired variance, not historical scalar noise.
 
-If either fails the entry closes as refused and nothing lands — not even a
-comment change. Nothing else is queued with it: no API change, no
-validation, retry or cache, no allocator, layout or heuristic redesign, no
-second candidate. If the trial is rejected, record NO CLAIM and restore the
-unchanged solver. These measurements bound the two scan hypotheses; they do not
-establish that no other bottleneck exists.
+**What the trial ran.** Same host, compiler and mode as the baseline: `buildhost`,
+compiler 0.16.0, root and `interval` both `ReleaseFast`, the complete unchanged
+LP program with its iterations and seeds untouched, minimum of seven internal
+repetitions, warmup 1, LP row budget 20,000, ordinary-file stdout and stderr,
+the shared unpinned host with no concurrent project build, profile, test or
+benchmark. Three counterbalanced sequential pairs, AB / BA / AB, giving six
+program runs, all exit 0. The predeclared primary row is the only row the
+decision rests on: `eliminateAll chosen, mixed 14x2`, 200 iterations,
+`allocator=smp`. Paired gain is `(baseline - candidate) / baseline`, so a
+negative figure is a regression.
+
+| run | baseline ns/op | candidate ns/op | paired gain |
+| --- | --- | --- | --- |
+| 1 | 141681.945 | 495945.510 | **-250.04 %**, a regression |
+| 2 | 190976.300 | 138570.120 | +27.44 % |
+| 3 | 123919.585 | 115391.035 | +6.88 % |
+| **median** | **141681.945** | **138570.120** | **+2.196 %** |
+
+**Every predeclared condition, and what happened to it.**
+
+| condition | result |
+| --- | --- |
+| median at least 5 % lower | **FAILED** — 2.196 %, well under the bar |
+| improvement in all three pairs | **FAILED** — the first pair is a 250.04 % regression, the candidate running 3.5x its own baseline |
+| non-overlapping ranges | **FAILED** — baseline 123919.585-190976.300 against candidate 115391.035-495945.510 |
+| differential equality | **MET**, and it does not rescue the other three |
+
+**The 2.196 % is not a speedup and must never be quoted as one.** It is the
+difference of two medians on a shared, unpinned host, and it is smaller than the
+spread inside either capture's own three runs. The other two conditions exist
+precisely so that a figure like it cannot be accepted on its own. The entry
+closes as refused here, and no arithmetic is done with that median.
+
+**Differential equality held, and it is not in dispute.** Strict LP readers on
+both three-run captures exited 0: row identities, iteration counts, the streamed
+per-row checksums and the fold, the geometry report and the untimed accounting
+of all 13 bodies are identical to the 2026-10-02 Wave 1 reference on both heaps,
+with per-heap totals still **494,632** allocations and **306,958,852** bytes,
+`allocs == frees` and `alloc B == freed B` on every body. Beyond the benchmark's
+own signals, a behaviour probe compared before and candidate on **414** state
+cases — 400 random systems of 0 to 2 variables and at most 6 rows, plus 14
+controlled shapes — which produced 1,341 additions and 442 eliminations with
+**0** gaps, comparing exact bit patterns, the latched `unsat` state, errors,
+`null` answers, elimination order and liveness; on **23** precise cases over 81
+operations and 104 snapshots, compared as 10,566 explicitly serialized words; and
+over **150** allocation-failure runs, 10 scripts by 15 failing indices, with no
+mismatches and no unbalanced COUNT or BYTE teardown. Zero mismatches in all
+three. Both RF consumers pass on the before tree and on the candidate, and the
+certified Debug boundary control is green frozen-against-frozen and
+frozen-against-candidate.
+
+**The mutation evidence, and why the predicates were not why this failed.** The
+boundary probe needed a fix of its own before its exit codes mean anything: it
+originally reported a mismatch without failing the process, and now returns
+`error.DifferentialMismatch` and checks both the allocation counts and the byte
+totals. With that in place, three private wrong-predicate mutants — `rhs.hi <= 0`,
+`rhs.lo < 0`, and an approximate-zero test — each built and each **exited 1**,
+while the certified control and candidate exited 0. The differential harness
+detects exactly the class of change this entry proposed to make.
+
+**The pins.** The unmodified baseline tree is revision `f1c9e7c5`, code-equivalent
+to the `7b472aee` the current baseline TSV was taken at, with `src/lp.zig` at
+sha256 `40868f63…` read back from that revision and from the frozen seven-file
+manifest; the candidate's `src/lp.zig` hashed `606fa7f1…`. The original
+before-build argv was left exactly as it ran, against the live pre-trial source,
+and a certified replay control pins two distinct nominal modules to frozen
+copies. The probes were throwaway and are gone: **no permanent test, no new API
+and no second candidate** came out of this entry.
+
+**What was restored, and what never moved.** `src/lp.zig` is the original file
+again — sha256 `40868f63…`, byte for byte the revision the baseline came from,
+with only the two guard lines the trial added removed and nothing else touched.
+No API, no allocation, no validation, no elimination order, no tie-break between
+equal candidates, no row budget and no arithmetic changed, and neither the strict
+`rhs.hi < 0` predicate nor the exact `isAllZero` predicate was weakened. A5's
+`pushRow`-checks-one-row / full-rescan-on-`eliminate` split stands and does not
+reopen. No comment was added for the rejected order, because the entry was
+refused.
+
+**The full record.** All **52** rows of the paired capture — the 26 LP rows of
+the benchmark catalog, run as baseline and as candidate, each with its three
+`ns/op` values beside median, minimum and maximum — are in
+`docs/performance-trial-2026-10-02.tsv`. Its header carries the date, the host,
+the compiler, `baseline_code=7b472aee`, both `src/lp.zig` hashes and
+`outcome=REJECTED NO_CLAIM`, so the file is readable without this entry. The
+362-row `docs/performance-baseline-2026-10-02.tsv` is untouched by the trial and
+remains the current baseline.
+
+**What is left here.** Nothing. These measurements bound the two scan
+hypotheses; they do not establish that no other bottleneck exists. No second
+candidate is queued behind this one and none is promised. Final verification is
+complete; the handover records the native suites and immutable cross run.
 
 ---
 

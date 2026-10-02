@@ -31,12 +31,14 @@ governs every table in them. Later material is **added under its own heading and
 its own date rather than folded into those sections**: the cross-target
 verification at **2026-10-01**, which re-ran the test step rather than a
 benchmark, and on **2026-10-02** the gate receipts, the three benchmark smokes,
-the three-run baseline and the LP profile. None of them restates a 2026-09-30
-figure and none is a delta against one — the smokes and the gate runs executed
-beside other work, and the baseline below is a fresh capture on an unpinned
-host, not a re-measurement of the state 2026-09-30 was taken in. The growth
-figures come from throwaway programs that read the sign buckets directly, and
-section 3 step 1 gives the routine to rebuild them. Nothing here is a guess.
+the three-run baseline, the LP profile and the Wave 3 solver trial that
+**rejected** the one candidate that profile selected. None of them restates a
+2026-09-30 figure and none is a delta against one — the smokes and the gate runs
+executed beside other work, and the baseline below is a fresh capture on an
+unpinned host, not a re-measurement of the state 2026-09-30 was taken in. The
+growth figures come from throwaway programs that read the sign buckets directly,
+and section 3 step 1 gives the routine to rebuild them. Nothing here is a
+guess.
 
 **The gate wiring in section 2 is stated as interface rather than as a run, with
 dated exceptions named below.** How the tools are installed, where the gate
@@ -53,10 +55,17 @@ install into a fresh prefix with an empty `HOME` and a **reused** work root — 
 a second cold install — followed by the full gate run out of it: **exit 0 in
 1061.0 s**, the four required Linux targets executing **348** tests each and
 `x86_64-windows` `build_only`. **That is the current status of the prefix-only
-gate.** Wave 2's three-run measurements are now recorded, under their own date,
-in the sections below and in
-[`docs/performance-baseline-2026-10-02.tsv`](performance-baseline-2026-10-02.tsv);
-**Wave 3's measured solver optimization remains.** Remote GitHub Actions and the
+gate.** Wave 2's three-run measurements are recorded, under their own date, in
+the sections below and in
+[`docs/performance-baseline-2026-10-02.tsv`](performance-baseline-2026-10-02.tsv),
+and Wave 3 is **closed with the trial REJECTED and NO CLAIM**: the profile's one
+candidate was implemented, measured against a frozen baseline in three
+counterbalanced pairs, failed all three predeclared acceptance criteria, and was
+**removed again**, so `src/lp.zig` is byte-identical to the pre-trial file and
+**no solver optimization is accepted, landed or pending**. Its own section
+carries the three paired rows, the medians and ranges, the reasons every
+criterion failed, the correctness work that *did* pass, and the
+[trial TSV](performance-trial-2026-10-02.tsv). Remote GitHub Actions and the
 `vf` engine have not been executed; neither is evidence for the verified local
 gate.
 
@@ -967,17 +976,28 @@ current baseline**, the **selected solver optimisation**, a **remote GitHub
 Actions run** and **`vf` engine execution**. No `ns/op` figure in this document
 was refreshed by it — every `ns/op` table in this file stays the 2026-09-30
 capture — and the three benchmark smokes below are one run each, not a baseline.
-The remaining work is Wave 2's measurement and Wave 3's measured optimisation;
-nothing in the installed gate is waiting on either. The install, re-hash, gate
-and cross logs live under a session scratch root that will not survive it, which
-is why the reproducible form is section 6's commands, not those paths.
+**At the date of this receipt** the remaining work was Wave 2's measurement and
+Wave 3's measured optimisation — **both closed since, see the two supersession
+notes below**; nothing in the installed gate was waiting on either. The install,
+re-hash, gate and cross logs live under a session scratch root that will not
+survive it, which is why the reproducible form is section 6's commands, not
+those paths.
 
 **Superseded on the same date, after this run, by the two headings below.** Wave
 2's three-run measurement is now taken, checked and published in
 [`performance-baseline-2026-10-02.tsv`](performance-baseline-2026-10-02.tsv).
 That is a later, separately dated capture; it does not rewrite this receipt's
-`not_proved` list, the gate run refreshed no figure, and **Wave 3's measured
-solver optimisation is still open.**
+`not_proved` list, and the gate run refreshed no figure.
+
+**And Wave 3 is closed too, by the Wave 3 section below.** The solver
+optimisation named
+above was trialled on the same date and **rejected**: three counterbalanced
+paired measurements of the profile's predeclared primary row, all three
+predeclared acceptance criteria failed, and the two-line guard was removed again
+so the tree carries the original solver. `src/lp.zig` is back at the same
+sha256 the baseline was pinned to, nothing landed from the trial, and **no
+solver optimization is accepted, in flight or queued**. The `not_proved` entry
+above stays as the receipt wrote it; this is the separate Wave 3 section.
 
 ### Benchmark smoke verification — 2026-10-02
 
@@ -999,7 +1019,8 @@ capture the three-run baseline and solver optimisation were unmeasured — they
 were the next wave's work — and these three runs are the smokes of the same
 2026-10-02 verification as the green gate above. **The three-run baseline taken
 afterwards on the same date is the section below**; it does not convert these
-three runs into a baseline, and it is a different capture. What
+three runs into a baseline, and it is a different capture. The Wave 3 trial
+taken after that one is **rejected**, in its own section below. What
 the capture does establish is that every row survives the redirect, where the old
 positional writer reset its offset to 0 and dropped rows with no error, and that
 the LP accounting held on both heaps: every body swept **twice** with drift or
@@ -1163,14 +1184,220 @@ row, all-rows, unsat transition, tie, elimination order, row budget and every
 piece of arithmetic stay as they are, and no API, validation, retry, allocator,
 cache or layout change travels with it.
 
-**It is not implemented and no speedup has been measured.** The candidate is
-selected, not proved. Wave 3 has to show it with a **differential proof** that
-every solver result, checksum, geometry report and accounting total is
-unchanged, plus **repeatable baseline-and-candidate timing** that clears the
-noise floor. If either fails, the candidate is **rejected** and recorded that
-way — the selection is a hypothesis, and nothing in this section is a claim that
-it will pay. Remote GitHub Actions and the `vf` engine remain unexercised and
+**At the date of this section it was not implemented and no speedup had been
+measured.** The candidate was selected, not proved, and the rule written down
+then still stands: Wave 3 had to show it with a **differential proof** that every
+solver result, checksum, geometry report and accounting total is unchanged,
+plus **repeatable baseline-and-candidate timing** that clears the noise floor,
+and a failure of either had to be recorded as a **rejection** rather than
+explained away. **Superseded the same day, by the Wave 3 section below: the
+trial ran, the correctness half passed, all three predeclared timing criteria
+failed, and the candidate was REJECTED with NO CLAIM and the original solver
+restored.** Nothing in this section was ever a claim that it would pay, and the
+two profile percentages above remain dated sample attribution rather than
+speedups. Remote GitHub Actions and the `vf` engine remain unexercised and
 are not a Wave 2 or Wave 3 promise.
+
+### Wave 3 — the RHS-first trial, 2026-10-02: REJECTED, NO CLAIM
+
+**What was trialled, and that it is now gone.** The one candidate the profile
+selected — the RHS-first short-circuit in the private
+`System.checkRowForContradiction`, ahead of the `isAllZero` test — was
+implemented as exactly **two guard lines** in `src/lp.zig`, measured against a
+frozen baseline, and then **removed again**. `src/lp.zig` is byte-identical to
+the pre-trial file: sha256 `40868f63…`, the same pin the baseline side was
+built from. **No source change, no comment and no API from this trial remains
+in the tree, and no solver optimization is accepted, landed or queued.** The
+predicate was exactly `rhs.hi < 0` while it was in, and nothing travelled with
+it: the arithmetic, the other guards, the all-zero / all-rows / unsat-transition
+rules, the tie handling, the elimination order, the 20,000-row budget and the
+validation are the originals.
+
+**The primary row and the three criteria were fixed before the paired trial
+captures.** One row, named in advance: **`eliminateAll chosen, mixed 14x2`**, **200
+iterations**, heap **`allocator=smp`**, whose earlier three-run max/min spread
+was 3.17%. The whole-process profile did not separate costs by benchmark case.
+All three predeclared timing criteria had to hold:
+
+| # | Predeclared criterion | Required |
+| --- | --- | --- |
+| 1 | median improvement | ≥ 5 % |
+| 2 | every paired round improves | 3 of 3 |
+| 3 | the two three-run ranges | disjoint |
+
+**The three paired rows as measured.** `ns/op` is the minimum over the
+unchanged 7 internal repetitions after 1 warmup, at 200 iterations, on
+`allocator=smp`. The pairs ran **serially** and counterbalanced, so ordering bias
+does not land on one variant:
+
+| Pair | Order | baseline `ns/op` | candidate `ns/op` | Paired gain |
+| --- | --- | --- | --- | --- |
+| 1 | baseline → candidate | 141,681.945 | 495,945.510 | **−250.04 %**, a regression |
+| 2 | candidate → baseline | 190,976.300 | 138,570.120 | +27.44 % |
+| 3 | baseline → candidate | 123,919.585 | 115,391.035 | +6.88 % |
+
+Baseline **median 141,681.945**, min 123,919.585, max 190,976.300.
+Candidate **median 138,570.120**, min 115,391.035, max 495,945.510.
+
+**All three criteria fail.**
+
+| Criterion | Observed | Verdict |
+| --- | --- | --- |
+| median ≥ 5 % better | the candidate median is **2.19634548 % lower** | **FAIL** — below target |
+| every paired round improves | **2 of 3**; pair 1 is a **250.04 % regression** | **FAIL** |
+| ranges disjoint | 123,919.585–190,976.300 lies inside 115,391.035–495,945.510 | **FAIL** |
+
+**So: REJECTED, NO CLAIM.** The 2.19634548 % median difference is **not a
+speedup** and is not written down as one. It is smaller than this row's own
+run-to-run spread on an unpinned shared host and rests on three samples. In the
+first pair, the candidate takes 3.50× its baseline time. Under the rule fixed
+before those captures, one failing criterion was enough;
+all three failed. **The two guard lines are not to be carried back in.** No
+second candidate is queued, and this trial says nothing about whether some other
+part of the solver is worth measuring — that would need its own profile and its
+own predeclared criteria, and neither exists.
+
+**The method, in the terms a later session has to trust it.** Host `buildhost`,
+compiler 0.16.0, both builds root and `interval` `ReleaseFast`, private build and
+global caches, private scratch root. Six **complete LP program runs** in three
+serial counterbalanced pairs **AB / BA / AB**, **all six exiting 0**, with no
+concurrent project build, profile, test or benchmark on the machine, on a shared
+and unpinned host. The workload did not move to make this comparison: the actual
+complete LP programs, unchanged, with the same cases, iteration counts, seeds,
+7 repetitions, 1 warmup and 20,000-row budget, stdout and stderr on ordinary
+files read back afterwards. The baseline was built from a **frozen copy** of the
+sources — a 7-file manifest over `lp.zig`, `vector.zig`, `interval.zig`,
+`interval_ext.zig`, `rounding.zig`, `lp_exact.zig` and `root.zig` — with the
+before `lp.zig` sha256 `40868f63e901c04204234e9f28eb5d832f44a5817ecb2ad484213835cfa5fb23`
+verified against the revision rather than against a working copy; the candidate
+was the live tree, `lp.zig` sha256 `606fa7f15a55ccf0410beffefc23aeea9757459f7191e87167f498f3a5f0551a`.
+The original "before" argv is preserved exactly as it ran; the certified replay
+control later pins both nominal modules to the frozen copies. The baseline code
+revision is `7b472aee`, unchanged by this trial.
+
+**Both captures still compute the same thing.** The strict readers for the
+baseline three-run capture and for the candidate three-run capture each **exit
+0**. Against the Wave 1 reference they match **row identity, iteration counts,
+the 13 body checksum sequences and the final fold `4b4f94d960b30e8e`**, and the
+geometry report and the **13 accounting rows** are identical across both heap
+sections of all three program runs of each side: **494,632** allocs against
+**494,632** frees and **306,958,852** allocated bytes against **306,958,852**
+freed bytes, **on `allocator=dbg` and on `allocator=smp` alike**. The candidate
+changed nothing a reader can see. That is the correctness half passing; it is
+not the timing half, and passing it does not convert the trial into an
+acceptance.
+
+**The behaviour and boundary proofs, and their exact scope.**
+
+- **State machine.** **414** state cases — **400** random cases with 0–2
+  variables and at most 6 rows, plus **14** controlled cases — over **1,341
+  adds** and **442 eliminations**, with **0 gaps** in the enumerated transitions.
+  Compared exactly rather than approximately: state, errors and null answers,
+  row order and liveness, and the serialized state **at the bit level**.
+- **Boundaries.** **23** precise cases, **81** operations, **104** snapshots and
+  **10,566** explicitly serialized words compared word for word, plus **150**
+  allocation-failure runs (**10** scripts × **15** indices) in which every
+  allocation count and every byte total comes back balanced.
+- **Both consumers** passed against the before tree and against the candidate:
+  the state-machine and boundary differentials each built and each ran **exit
+  0** on both sides.
+- **Result: 0 mismatches and 0 unbalanced `COUNT` or `BYTE` teardowns.**
+
+**The proofs were checked against mutants, so they are not vacuous.** The
+certified Debug boundary control exits **0** frozen-against-frozen and **0**
+frozen-against-candidate, while three deliberately wrong private predicates —
+`rhs.hi <= 0`, `rhs.lo < 0`, and an approximate-zero test — each build **exit
+0** and each **exit 1** when run. One methodological fix is part of that receipt
+and is not a change to the tree: the boundary probe originally *reported*
+mismatches without failing the process, so it was corrected to return
+`error.DifferentialMismatch` and to compare allocation counts as well as byte
+totals. Every exit code quoted above is from after that fix; before it, the
+mutants would have run green. The mutants are private throwaway copies under
+the wave's scratch root, not tree files; no permanent test, no new API and no
+probe was added for them, and the probes were removed at closure.
+
+**Two independent native reviews passed** — one on semantics, one on
+standards — after the material findings they raised were corrected and
+re-verified: the probe that did not fail on a mismatch, and the source pin that
+had to be established from the revision rather than from the working copy. No
+comment explaining the accepted row ordering was added to the tree, because the
+candidate was rejected: a comment describing a guard that is not there would be
+a false description of the current source.
+
+**The historical profile figures stay exactly what they were.** **4.276 %** of
+whole-process period (**7.537 %** of `eliminate`) for the post-elimination
+rescan, and **0.594916210 %** as the combined caller-`SELF` upper bound for the
+inlined `chooseNext` plus `pairCountTally`, are **dated sample attribution on an
+unpinned shared host, not speedups** — and the trial above is what a prediction
+drawn from them turned out to be worth.
+
+**The full data** is
+[`docs/performance-trial-2026-10-02.tsv`](performance-trial-2026-10-02.tsv):
+**52 rows**, both variants, every LP case on both heaps, three `ns/op` values
+each with median, min and max. Its header line records the date, host, compiler,
+the baseline code revision `7b472aee`, both `lp.zig` sha256s and the outcome —
+`REJECTED NO_CLAIM`, three counterbalanced sequential pairs `AB/BA/AB`, each row
+the minimum of 7 after warmup 1, on a shared unpinned host, with the original
+solver restored. Read a row out of that file, not out of this section: the
+primary row was predeclared. The other 25 timed rows per variant provide complete
+capture data, not alternate acceptance targets or claimed performance results.
+
+### Final Wave 3 verification — 2026-10-02
+
+The rejected trial is closed and all seven production source hashes match the
+frozen baseline again; `src/lp.zig` is
+`40868f63e901c04204234e9f28eb5d832f44a5817ecb2ad484213835cfa5fb23`.
+The final runs below used the restored solver, after all delegated implementation
+and documentation writers stopped, with explicit private caches and an empty `HOME`.
+
+| Check | Observed result | Wall time |
+| --- | --- | --- |
+| `zig build test -Doptimize=Debug -j1 --summary all` | 348/348 tests passed | 67.246 s |
+| `zig build test -Doptimize=ReleaseSafe -j1 --summary all` | 348/348 tests passed | 360.370 s |
+| `zig build test -Doptimize=ReleaseFast -j1 --summary all` | 348/348 tests passed | 355.919 s |
+| `zig build test -Doptimize=ReleaseSmall -j1 --summary all` | 348/348 tests passed | 69.695 s |
+| explicit ReleaseSafe MPFR corpus | 1,886 rows, 0 failures, 427 exactly representable | 30.914 s |
+| external package consumer and README executable | 31 README checks passed; both consumers exited 0 | 0.518 s |
+| complete scalar benchmark smoke | exited 0 | 3.608 s |
+| complete vector benchmark smoke | exited 0 | 431.160 s |
+| complete LP benchmark smoke | exited 0 | 45.143 s |
+| `zig build docs` | passed | 0.598 s |
+| installed expanded gate | all required sections passed | 381.962 s |
+
+Optional `zig-cov` coverage was not requested or run.
+
+Strict readers verified the final benchmark contracts: all 60 scalar, 276 vector
+and 26 LP rows match the original identities, iterations, checksum streams and
+folds. These are single final smoke runs, not three new timing captures. LP
+geometry and all 13 accounting rows per heap also match, including balanced
+494,632 allocations and 306,958,852 bytes per heap.
+
+The exact rejected candidate snapshot also completed scalar and vector
+contract-only smokes: all 60 and 276 rows matched. Together with the three
+candidate LP captures, every benchmark program met the differential criterion;
+these additional smokes did not reopen the rejected timing decision.
+
+LSP reported no issues in seven production files, four benchmark files and the
+corpus test. The gate passed formatting, build, tests, AST checks, `ziglint`,
+`zlint`, `zbc`, `zwanzig` and cross-target execution. `zbc` analyzed all 32
+selected files with 0 failed files, 0 errors and the 3 standing advisory
+`intfromfloat-without-clamp` warnings; 12 unresolved-import lookups remain.
+
+Immutable cross run **`gate-20261002-093350-65131-6914`**, schema 2:
+
+| Target | Build | Runtime | Executed tests |
+| --- | --- | --- | --- |
+| `x86_64-linux` | pass | pass | 348 |
+| `aarch64-linux` | pass | pass | 348 |
+| `riscv64-linux` | pass | pass | 348 |
+| `s390x-linux` | pass | pass | 348 |
+| `x86_64-windows` | pass | unavailable, build-only | none |
+
+Four required runtime passes, 1,392 runtime tests total, overall `partial`,
+`fail=0`; Windows is compile coverage only. The CI workflow's actual Python
+reader passed locally on that immutable summary. This is not a remote GitHub
+Actions run or a `vf` engine run. The empty `HOME` remained empty.
+
 
 ### Cross-target verification — 2026-10-01, and the 300-second timeout that reads like a defect
 
@@ -2246,7 +2473,11 @@ The current measured figures are not in this file's tables. They are in
 [`docs/performance-baseline-2026-10-02.tsv`](performance-baseline-2026-10-02.tsv)
 — all 362 rows, three `ns/op` values each — and the two Wave 2 sections in
 section 2 that introduce it say what was measured, what was checked, and what
-the file does not establish.
+the file does not establish. The one trial figure set is in
+[`docs/performance-trial-2026-10-02.tsv`](performance-trial-2026-10-02.tsv) —
+all 52 rows, baseline and candidate — and its outcome is **REJECTED**; read the
+Wave 3 section in section 2 for the three paired rows and the three criteria
+that failed, not this file's prose for a speedup.
 
 ## 8. What not to do
 
@@ -2268,12 +2499,15 @@ the file does not establish.
   the two dates are not a before/after pair, and a perf percentage is sample
   attribution rather than time.
 - Do not carry the RHS-first `checkRowForContradiction` guard into the tree
-  because a profile named it. It is **selected, not proved and not
-  implemented**; it lands only with a differential proof that every result,
-  checksum, geometry report and accounting total is unchanged, plus repeatable
-  baseline-and-candidate timing that clears the noise floor — and it is
-  **rejected** if either does not arrive. An API, validation, retry, allocator,
-  cache or layout change does not travel with it.
+  because a profile named it, or because this file still describes the
+  selection. **It was trialled and REJECTED on 2026-10-02** — it was measured,
+  it failed all three predeclared criteria, and it was removed again, so
+  `src/lp.zig` is the original file. The rule it was selected under still
+  governs any next candidate: a differential proof that every result, checksum,
+  geometry report and accounting total is unchanged, plus repeatable
+  baseline-and-candidate timing that clears a predeclared bar, and a rejection
+  recorded as a rejection rather than explained away. An API, validation,
+  retry, allocator, cache or layout change does not travel with one.
 - Do not re-export or re-register modules; the "one file, one module" rule
   will fail the build and the reason is not obvious from the error.
 - Do not remove the consumer step's private cache directories — not because
@@ -2303,6 +2537,7 @@ is recorded so it does not have to be re-derived too.
 
 | Item | Why it is not being done |
 | --- | --- |
+| the RHS-first `checkRowForContradiction` guard | **Tried as Wave 3, measured, and REJECTED with NO CLAIM.** Two guard lines ahead of the `isAllZero` test, the predicate exactly `rhs.hi < 0`, against a frozen baseline in three counterbalanced paired rounds on the predeclared primary row `eliminateAll chosen, mixed 14x2` at 200 iterations on `allocator=smp`. All **three** predeclared criteria failed: the median moved 2.19634548 % — below the 5 % bar, and not a speedup — only 2 of 3 pairs improved and the first was a 250.04 % regression, and the two three-run ranges overlap almost completely. The correctness half passed — bit-level state and boundary equality over 414 state cases and 23 boundary cases, 10,566 serialized words, 150 allocation-failure runs, both real consumers green on both sides, and three wrong-predicate mutants caught — which is why the rejection is about timing and nothing else. The lines were removed again, `src/lp.zig` is the original file at sha256 `40868f63…`, and no second candidate is queued. This says nothing about whether some other part of the solver is worth measuring; it says this one was not, and the profile percentages that suggested it are sample attribution, not time |
 | `scale`'s algebraic reformulation | **Tried, and measured unsound.** Over the reals, `M - W = lo + (hi - lo)(1 - g) / 2` and `M + W = hi - (hi - lo)(1 - g) / 2`, so the sum that forms the midpoint and the midpoint itself can both be dropped and the composition loses two operations. Each arm is protective in ONE direction only, because the term's sign follows the sign of `1 - g`, which is a property of the caller's factor. A half-width enclosed too WIDE is subtracted on one arm and added on the other, and on the arm where it is subtracted it drags the bound inside the image. Two counterexamples, both measured: `[0, 2^-1074]` at factor zero has the exact image `{2^-1075}` and the short form answers `[0, -2^-1074]`, inverted; `[-floatMax, floatMax]` at factor zero has the exact image `{0}` and the short form answers `[-8.988e307, -floatMax]`, which excludes 0 outright. The reasoning and both counterexamples are in `src/interval.zig` beside `scale`. **Do not re-attempt it** |
 | `div` at 15.465 ns/op against 15.754 | **Inside the noise band, so it is not a result.** 0.289 ns on a row this host moves by up to 44 % with nothing changed. Round 2 did not move `div` and did not prove that it did not. The same applies to `add`, `sub`, `sqr` and `abs`; all five are NO CLAIM in the round-2 table |
 | the straddling duplication in `eliminate` | **It is the guarantee.** A coefficient that straddles zero bounds its variable from below for its negative realisations and from above for its positive ones, and no single pairing is right for both. Dropping one of the two duplicates would discard a real constraint and cut the feasible set. Both facts are true: it is also the reason the row count explodes. Only one of them may ever be optimised away, and it is not this one. See hard constraint 6 |

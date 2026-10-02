@@ -1,0 +1,55 @@
+# date=2026-10-02 host=buildhost compiler=0.16.0 baseline_code=7b472aee baseline_lp_sha256=40868f63e901c04204234e9f28eb5d832f44a5817ecb2ad484213835cfa5fb23 candidate_lp_sha256=606fa7f15a55ccf0410beffefc23aeea9757459f7191e87167f498f3a5f0551a
+# outcome=REJECTED NO_CLAIM; three counterbalanced sequential pairs AB/BA/AB; each row minof7, warmup1; shared unpinned host; original solver restored.
+variant	program	group	operation	iters	run1_ns	run2_ns	run3_ns	median_ns	min_ns	max_ns
+baseline	lp	lp:allocator=dbg	add 64 rows x 8 vars	2000	355439.329	192869.737	197011.137	197011.137	192869.737	355439.329
+baseline	lp	lp:allocator=dbg	add 8 rows x 4 vars	20000	59159.096	58759.230	50218.317	58759.230	50218.317	59159.096
+baseline	lp	lp:allocator=dbg	bounds k=0, mixed 14x2	500	187099.314	145204.040	164497.860	164497.860	145204.040	187099.314
+baseline	lp	lp:allocator=dbg	bounds k=1, straddling 11x2	100	314560.590	182563.230	163511.770	182563.230	163511.770	314560.590
+baseline	lp	lp:allocator=dbg	box, mixed 14x2	200	222765.110	225873.745	240092.495	225873.745	222765.110	240092.495
+baseline	lp	lp:allocator=dbg	box, straddling 11x2	50	281795.780	297280.720	260852.060	281795.780	260852.060	297280.720
+baseline	lp	lp:allocator=dbg	build 6 rows x 4 vars (control)	20000	58253.692	52480.940	47759.452	52480.940	47759.452	58253.692
+baseline	lp	lp:allocator=dbg	eliminate k=0, 6 rows x 4 vars	20000	82190.768	101188.142	81943.078	82190.768	81943.078	101188.142
+baseline	lp	lp:allocator=dbg	eliminateAll ascending, heuristic 4v	100	54186.090	54685.590	57336.850	54685.590	54186.090	57336.850
+baseline	lp	lp:allocator=dbg	eliminateAll chosen, heuristic 4v	2000	52920.435	54396.017	50844.274	52920.435	50844.274	54396.017
+baseline	lp	lp:allocator=dbg	eliminateAll chosen, mixed 14x2	200	428874.695	291642.430	277561.155	291642.430	277561.155	428874.695
+baseline	lp	lp:allocator=dbg	eliminateInOrderOfChoice, mixed 14x2	500	796936.314	279561.620	228431.692	279561.620	228431.692	796936.314
+baseline	lp	lp:allocator=dbg	eliminationOrder, mixed 14x2	500	1517835.510	277697.404	188268.242	277697.404	188268.242	1517835.510
+baseline	lp	lp:allocator=smp	add 64 rows x 8 vars	2000	14504.313	13362.573	14435.598	14435.598	13362.573	14504.313
+baseline	lp	lp:allocator=smp	add 8 rows x 4 vars	20000	1217.839	1233.063	1083.183	1217.839	1083.183	1233.063
+baseline	lp	lp:allocator=smp	bounds k=0, mixed 14x2	500	40564.606	21157.254	18829.650	21157.254	18829.650	40564.606
+baseline	lp	lp:allocator=smp	bounds k=1, straddling 11x2	100	76363.920	76194.870	61030.950	76194.870	61030.950	76363.920
+baseline	lp	lp:allocator=smp	box, mixed 14x2	200	41160.875	42690.475	37475.385	41160.875	37475.385	42690.475
+baseline	lp	lp:allocator=smp	box, straddling 11x2	50	121333.760	158892.440	121185.700	121333.760	121185.700	158892.440
+baseline	lp	lp:allocator=smp	build 6 rows x 4 vars (control)	20000	1097.447	978.315	882.204	978.315	882.204	1097.447
+baseline	lp	lp:allocator=smp	eliminate k=0, 6 rows x 4 vars	20000	5262.386	6970.748	4605.703	5262.386	4605.703	6970.748
+baseline	lp	lp:allocator=smp	eliminateAll ascending, heuristic 4v	100	3677.570	3761.180	3884.980	3761.180	3677.570	3884.980
+baseline	lp	lp:allocator=smp	eliminateAll chosen, heuristic 4v	2000	1031.222	1137.838	912.058	1031.222	912.058	1137.838
+baseline	lp	lp:allocator=smp	eliminateAll chosen, mixed 14x2	200	141681.945	190976.300	123919.585	141681.945	123919.585	190976.300
+baseline	lp	lp:allocator=smp	eliminateInOrderOfChoice, mixed 14x2	500	113906.326	131883.222	118072.360	118072.360	113906.326	131883.222
+baseline	lp	lp:allocator=smp	eliminationOrder, mixed 14x2	500	116492.696	131892.164	119129.378	119129.378	116492.696	131892.164
+candidate	lp	lp:allocator=dbg	add 64 rows x 8 vars	2000	201969.951	180435.994	186721.981	186721.981	180435.994	201969.951
+candidate	lp	lp:allocator=dbg	add 8 rows x 4 vars	20000	180090.463	62677.236	55308.778	62677.236	55308.778	180090.463
+candidate	lp	lp:allocator=dbg	bounds k=0, mixed 14x2	500	143527.178	150357.302	135750.164	143527.178	135750.164	150357.302
+candidate	lp	lp:allocator=dbg	bounds k=1, straddling 11x2	100	178938.230	195510.100	173177.390	178938.230	173177.390	195510.100
+candidate	lp	lp:allocator=dbg	box, mixed 14x2	200	219715.625	242905.710	211588.320	219715.625	211588.320	242905.710
+candidate	lp	lp:allocator=dbg	box, straddling 11x2	50	283656.180	284771.360	270775.140	283656.180	270775.140	284771.360
+candidate	lp	lp:allocator=dbg	build 6 rows x 4 vars (control)	20000	53187.136	54728.814	60484.731	54728.814	53187.136	60484.731
+candidate	lp	lp:allocator=dbg	eliminate k=0, 6 rows x 4 vars	20000	76227.899	96544.747	83139.862	83139.862	76227.899	96544.747
+candidate	lp	lp:allocator=dbg	eliminateAll ascending, heuristic 4v	100	55228.920	59598.940	54554.480	55228.920	54554.480	59598.940
+candidate	lp	lp:allocator=dbg	eliminateAll chosen, heuristic 4v	2000	53695.760	55899.160	53638.971	53695.760	53638.971	55899.160
+candidate	lp	lp:allocator=dbg	eliminateAll chosen, mixed 14x2	200	281928.395	201139.300	268663.945	268663.945	201139.300	281928.395
+candidate	lp	lp:allocator=dbg	eliminateInOrderOfChoice, mixed 14x2	500	277087.546	294480.940	295362.902	294480.940	277087.546	295362.902
+candidate	lp	lp:allocator=dbg	eliminationOrder, mixed 14x2	500	266177.704	292028.850	271983.364	271983.364	266177.704	292028.850
+candidate	lp	lp:allocator=smp	add 64 rows x 8 vars	2000	11663.891	12528.197	11732.622	11732.622	11663.891	12528.197
+candidate	lp	lp:allocator=smp	add 8 rows x 4 vars	20000	1045.792	1013.548	1016.130	1016.130	1013.548	1045.792
+candidate	lp	lp:allocator=smp	bounds k=0, mixed 14x2	500	16915.642	20084.338	18399.150	18399.150	16915.642	20084.338
+candidate	lp	lp:allocator=smp	bounds k=1, straddling 11x2	100	147387.680	71970.060	58025.190	71970.060	58025.190	147387.680
+candidate	lp	lp:allocator=smp	box, mixed 14x2	200	125835.155	40277.540	34245.325	40277.540	34245.325	125835.155
+candidate	lp	lp:allocator=smp	box, straddling 11x2	50	374201.420	129419.420	122237.040	129419.420	122237.040	374201.420
+candidate	lp	lp:allocator=smp	build 6 rows x 4 vars (control)	20000	843.390	856.420	808.475	843.390	808.475	856.420
+candidate	lp	lp:allocator=smp	eliminate k=0, 6 rows x 4 vars	20000	4196.619	4237.667	4213.437	4213.437	4196.619	4237.667
+candidate	lp	lp:allocator=smp	eliminateAll ascending, heuristic 4v	100	3645.500	4727.040	3680.940	3680.940	3645.500	4727.040
+candidate	lp	lp:allocator=smp	eliminateAll chosen, heuristic 4v	2000	2443.479	971.519	866.915	971.519	866.915	2443.479
+candidate	lp	lp:allocator=smp	eliminateAll chosen, mixed 14x2	200	495945.510	138570.120	115391.035	138570.120	115391.035	495945.510
+candidate	lp	lp:allocator=smp	eliminateInOrderOfChoice, mixed 14x2	500	197268.120	126257.862	109931.942	126257.862	109931.942	197268.120
+candidate	lp	lp:allocator=smp	eliminationOrder, mixed 14x2	500	108668.370	192153.772	111691.232	111691.232	108668.370	192153.772

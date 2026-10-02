@@ -1424,10 +1424,119 @@ them so the difference is not read as a result:
 
 Cheap rows are not precise to the digit on this host: the measured noise floor
 is wide enough that a change under about 10 ns/op cannot be claimed from one
-pair of runs. The profile taken the same day, what it measured, and the single
-candidate it selected for the next wave are in
-[docs/performance-handover.md](docs/performance-handover.md) — **selected, not
-implemented, and no speedup measured for it.**
+pair of runs. The profile taken the same day and what it measured are in
+[docs/performance-handover.md](docs/performance-handover.md). The single
+candidate it selected was **trialled on 2026-10-02 and rejected**; the next
+section says what that measured.
+
+### The Wave 3 solver trial — 2026-10-02: rejected, no claim
+
+**What was tried, and that it is gone.** The one candidate the LP profile
+selected — an RHS-first short-circuit in the private
+`System.checkRowForContradiction`, rejecting a row by `rhs.hi < 0` before
+scanning its coefficients, ahead of the `isAllZero` test — was implemented as
+exactly **two guard lines** in `src/lp.zig`, measured against a frozen baseline,
+and then **removed again**. `src/lp.zig` is byte-identical to the pre-trial file,
+no source or comment from the trial is in the tree, and **no solver optimization
+is accepted, landed or queued**. Nothing travelled with the two lines: the
+arithmetic, the other guards, the tie handling, the elimination order, the
+20,000-row budget and the validation are the originals.
+
+**The primary row and the three criteria were fixed before the paired trial
+captures**: `eliminateAll chosen, mixed 14x2`, 200 iterations, heap
+`allocator=smp`. Three paired rounds, `ns/op` = minimum over the unchanged 7
+internal repetitions after 1 warmup. The serial AB / BA / AB sequence alternated
+order to reduce, not eliminate, order bias:
+
+| Pair | Order | baseline `ns/op` | candidate `ns/op` | Paired gain |
+| --- | --- | --- | --- | --- |
+| 1 | baseline → candidate | 141,681.945 | 495,945.510 | **−250.04 %**, a regression |
+| 2 | candidate → baseline | 190,976.300 | 138,570.120 | +27.44 % |
+| 3 | baseline → candidate | 123,919.585 | 115,391.035 | +6.88 % |
+
+Baseline median 141,681.945, range 123,919.585–190,976.300. Candidate median
+138,570.120, range 115,391.035–495,945.510. **All three criteria fail:**
+
+| Predeclared criterion | Observed | Verdict |
+| --- | --- | --- |
+| median at least 5 % better | the candidate median is **2.19634548 % lower** | **FAIL** |
+| every paired round improves | 2 of 3; pair 1 is a **250.04 % regression** | **FAIL** |
+| the two three-run ranges do not overlap | the baseline range lies inside the candidate range | **FAIL** |
+
+**So: REJECTED, NO CLAIM.** The 2.19634548 % median difference is **not a
+speedup**. It is smaller than this row's own run-to-run spread on a shared host,
+it rests on three samples, and the first pair's candidate takes 3.50× its
+baseline time. The median difference describes those noisy rounds,
+nothing else, and it is not to be quoted as a gain. No second candidate is
+queued, and this says nothing about whether some other part of the solver is
+worth measuring — that would need its own profile and its own predeclared
+criteria.
+
+**No behavior differences were observed in the exercised paths.**
+Strict readers over both three-run captures, baseline and candidate, exit 0 and
+match the earlier reference on row identity, iteration counts, all 13 body
+checksums, the final fold `4b4f94d960b30e8e`, the geometry report and the 13
+accounting rows on **both** heaps, with **494,632** allocs against **494,632**
+frees and **306,958,852** allocated bytes against **306,958,852** freed bytes
+per heap. On top of that, 414 state cases (400 random plus 14 controlled) over
+1,341 adds and 442 eliminations with no gaps, 23 boundary cases over 81
+operations, 104 snapshots and 10,566 explicitly serialized words compared word
+for word, and 150 allocation-failure runs all balanced — **0 mismatches, 0
+unbalanced teardowns**, every comparison at the bit level. The probes were
+thrown away afterwards; no permanent test or API was added for them. Candidate
+scalar and vector contract-only smokes also matched all 60 and 276 reference rows.
+
+**How it was measured.** Host `buildhost`, compiler 0.16.0, root and `interval`
+both `ReleaseFast`: six complete LP program runs, all six exiting 0, on a shared
+and unpinned host with no concurrent project build, profile, test or benchmark.
+The workload did not move — same cases, iteration counts and seeds, 7
+repetitions, 1 warmup, 20,000-row budget, stdout and stderr on ordinary files.
+The baseline came from a frozen 7-file source manifest whose `src/lp.zig`
+sha256 `40868f63…` was verified against the revision; the candidate was the live
+tree at `606fa7f1…`. The original "before" command line is preserved as it ran,
+and the certified replay control pins both modules to the frozen copies.
+
+**Full data:**
+[docs/performance-trial-2026-10-02.tsv](docs/performance-trial-2026-10-02.tsv) —
+**52 timed rows: 13 cases × 2 heaps × 2 variants**, with three `ns/op`
+values each, plus their median, minimum and maximum. The file contains the
+complete data; the table above shows the predeclared primary and the
+reason it failed. The method, the correctness proofs and the acceptance criteria
+are in full in
+[docs/performance-handover.md](docs/performance-handover.md).
+
+#### Final verification — 2026-10-02
+
+All checks below ran after the delegated implementation and documentation
+writers stopped, against the restored solver, using explicit private caches
+and an empty `HOME`.
+
+| Native command | Result | Wall time |
+| --- | --- | --- |
+| `zig build test -Doptimize=Debug -j1 --summary all` | 348/348 passed | 67.246 s |
+| `zig build test -Doptimize=ReleaseSafe -j1 --summary all` | 348/348 passed | 360.370 s |
+| `zig build test -Doptimize=ReleaseFast -j1 --summary all` | 348/348 passed | 355.919 s |
+| `zig build test -Doptimize=ReleaseSmall -j1 --summary all` | 348/348 passed | 69.695 s |
+
+The explicit ReleaseSafe MPFR corpus run checked **1,886 rows, 0 failures,
+427 exactly representable**. The real external consumer and its **31 README
+checks** passed. All three complete benchmark smokes exited 0 and their strict
+readers matched the original row identities, iterations, checksums and folds.
+`zig build docs` passed. LSP reported no issues in all seven production files,
+four benchmark files and the corpus test.
+
+The installed expanded gate passed in **381.962 s**: formatting, build, tests,
+AST checks, `ziglint`, `zlint`, `zbc`, `zwanzig` and the cross profile. `zbc`
+reported **0 errors and 3 standing advisory warnings**; all 32 files were
+analyzed, with 0 failed files and 12 unresolved-import lookups.
+Optional `zig-cov` coverage was not requested or run.
+
+Immutable cross run **`gate-20261002-093350-65131-6914`**, schema 2: each of
+`x86_64-linux`, `aarch64-linux`, `riscv64-linux` and `s390x-linux` built and ran
+**348 tests** (1,392 runtime tests total). Windows built, but its runtime was
+unavailable: **build-only**, not a test pass. Overall `partial`, `fail=0`.
+The actual CI matrix reader passed locally on that immutable summary; GitHub
+Actions and the `vf` engine were not run. The empty `HOME` remained empty.
 
 ## Development
 
@@ -1619,18 +1728,24 @@ summary: `x86_64-linux` natively plus `aarch64-linux`, `riscv64-linux` and
 `zbc` reported **0** errors over `selected=32 analyzed=32` and the **3** standing
 advisory float-to-integer warnings, and nothing else.
 
-**Remaining work:** Wave 3's measured solver optimization. The Wave 2 current
-baseline is done — three complete program runs per benchmark, checked row by row
-against the earlier originals, and published as
+**Wave 3 is closed: the trial was run, and the candidate was rejected.** The Wave
+2 current baseline is done — three complete program runs per benchmark, checked
+row by row against the earlier originals, and published as
 [docs/performance-baseline-2026-10-02.tsv](docs/performance-baseline-2026-10-02.tsv);
 **no speedup is claimed for it.** The profile taken the same day selected one
 candidate, an RHS-first short-circuit in the private
-`System.checkRowForContradiction` ahead of its `isAllZero` test, and that
-candidate is **not implemented and has no measured speedup**: it lands only with
-a differential proof that every result, checksum, geometry report and accounting
-total is unchanged plus repeatable baseline-and-candidate timing, and is
-rejected otherwise. Remote GitHub Actions and the `vf` engine have not been
-executed. The installed local gate above is verified green.
+`System.checkRowForContradiction` ahead of its `isAllZero` test. It was
+implemented as two guard lines, measured against a frozen baseline in three
+counterbalanced paired rounds on a predeclared primary row, and **rejected**:
+all three predeclared acceptance criteria failed, so the lines were removed and
+`src/lp.zig` is the original file again. **No solver optimization is accepted,
+landed or queued, and the median difference that was observed is not a
+speedup.** The 52-row trial data is in
+[docs/performance-trial-2026-10-02.tsv](docs/performance-trial-2026-10-02.tsv)
+and the method, criteria and correctness proofs are in the Wave 3 section of
+[docs/performance-handover.md](docs/performance-handover.md). Remote GitHub
+Actions and the `vf` engine have not been executed. The installed local gate
+above is verified green for the run it describes.
 
 | Under `$QUALITY_TOOLS_PREFIX` | Contents |
 | --- | --- |
