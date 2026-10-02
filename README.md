@@ -1330,11 +1330,11 @@ assuming a printed table equals a written one. The clock behind the numbers is
 unchanged (`std.Io.Clock.real`, wall time), and no figure in either document was
 produced by anything other than the recipe above.
 
-**Every `ns/op` figure recorded so far predates the second allocator section and
-stays historical until a new dated capture replaces it.** The numbers in
+**The `ns/op` figures in
 [docs/performance-handover.md](docs/performance-handover.md) are the 2026-09-30
-capture, nothing since has refreshed them, and this document does not compare
-the two allocators against each other.
+capture and stay dated as that.** The current measured capture is separately
+dated 2026-10-02, is linked below, and replaces nothing there; neither document
+compares the two allocators against each other as a result.
 
 **One capture of all three has actually been done, dated 2026-10-02.** On
 `buildhost` with Zig 0.16.0 each benchmark was compiled as its own `ReleaseFast`
@@ -1353,8 +1353,81 @@ not pass.
 The workload did not move to produce them: the thirteen LP bodies keep their
 names, iteration counts, elimination orders, bodies and seeds, the budget is
 still 20,000 rows, and `reps` and `warmup` are still 7 and 1. **The wall times
-are not `ns/op`**. This is one program run per benchmark, not a three-run baseline.
-**No speedup is claimed**; the three-run baseline is still unmeasured.
+are not `ns/op`**. This is one program run per benchmark, not a three-run
+baseline. **No speedup is claimed**; the three-run capture that followed it on
+the same date is below.
+
+### The current measured capture — 2026-10-02
+
+**All 362 timed rows live in
+[docs/performance-baseline-2026-10-02.tsv](docs/performance-baseline-2026-10-02.tsv)**,
+each with its three `ns/op` values and its median, minimum and maximum: 60
+scalar rows, 276 vector rows and 26 LP rows (13 `dbg` + 13 `smp`). Read a row
+out of that file rather than out of prose.
+
+How it was taken: tree `7b472aee` on `buildhost` with Zig 0.16.0, each program
+its own standalone executable with root and `-Minterval` on `src/root.zig`, both
+modules `ReleaseFast`, built under a private build cache and private global
+cache, three **complete sequential program runs** per program in the order
+scalar → vector → LP, repeated for three rounds, all nine exiting 0, stdout and
+stderr on ordinary files read back afterwards. Each reported figure is the
+**minimum over 7 internal repetitions** after **1 warmup**; warmup, repetitions,
+every iteration count, every seed and the 20,000-row budget are unchanged.
+**The host was shared, neither pinned nor isolated.** Run 1 was strictly highest
+on 211/362 rows: 54/60 scalar, 136/276 vector and 21/26 LP. This is a dated capture,
+**not** a speedup and not a before/after pair with the 2026-09-30 tables.
+
+What was checked, rather than assumed: the nine logs were read back with the
+earlier originals as a reference and compared **keyed by row**, which found
+**60 / 276 / 26** timed rows in every scalar, vector and LP run and matched
+**row identity, iteration counts, every per-body checksum sequence and the
+final folds** against those originals on all nine runs. For LP, all **13
+accounting rows** and the geometry report are identical across both heap
+sections of all three LP program runs, with **494,632** allocs and frees and
+**306,958,852** allocated and freed bytes **on each of `allocator=dbg` and
+`allocator=smp`**.
+
+Current LP medians, `ns/op`, `dbg` against `smp` — the run-to-run spans, and the
+other 336 rows, are in the TSV:
+
+| LP case | iters | `allocator=dbg` | `allocator=smp` |
+| --- | --- | --- | --- |
+| `add 64 rows x 8 vars` | 2,000 | 115,956 | 8,912 |
+| `add 8 rows x 4 vars` | 20,000 | 36,746 | 733 |
+| `bounds k=0, mixed 14x2` | 500 | 92,332 | 11,676 |
+| `bounds k=1, straddling 11x2` | 100 | 106,401 | 35,225 |
+| `box, mixed 14x2` | 200 | 140,873 | 23,030 |
+| `box, straddling 11x2` | 50 | 169,051 | 69,915 |
+| `build 6 rows x 4 vars (control)` | 20,000 | 34,587 | 585 |
+| `eliminate k=0, 6 rows x 4 vars` | 20,000 | 51,891 | 2,940 |
+| `eliminateAll ascending, heuristic 4v` | 100 | 35,358 | 2,412 |
+| `eliminateAll chosen, heuristic 4v` | 2,000 | 34,881 | 455 |
+| `eliminateAll chosen, mixed 14x2` | 200 | 176,702 | 71,710 |
+| `eliminateInOrderOfChoice, mixed 14x2` | 500 | 172,232 | 68,276 |
+| `eliminationOrder, mixed 14x2` | 500 | 170,675 | 69,053 |
+
+The heap choice changes these timings, not the input geometry or allocation
+accounting. This compares allocators on the same solver, not a solver before/after.
+
+Seven scalar rows, same date and convention, with the 2026-09-30 figure beside
+them so the difference is not read as a result:
+
+| Operation | 2026-10-02 median (min–max) | 2026-09-30 |
+| --- | --- | --- |
+| `interval.scale` | 58.137 (55.062–73.402) | 47.795 |
+| `interval.div` | 20.532 (19.405–28.128) | 15.465 |
+| `interval.mul` | 10.275 (9.749–16.204) | 9.639 |
+| `interval.sub` | 5.521 (5.230–7.939) | 5.108 |
+| `interval.sqr` | 5.639 (5.155–7.221) | 4.807 |
+| `interval.add` | 5.692 (5.438–7.957) | 5.027 |
+| `interval.abs` | 5.058 (4.831–7.315) | 4.138 |
+
+Cheap rows are not precise to the digit on this host: the measured noise floor
+is wide enough that a change under about 10 ns/op cannot be claimed from one
+pair of runs. The profile taken the same day, what it measured, and the single
+candidate it selected for the next wave are in
+[docs/performance-handover.md](docs/performance-handover.md) — **selected, not
+implemented, and no speedup measured for it.**
 
 ## Development
 
@@ -1546,11 +1619,18 @@ summary: `x86_64-linux` natively plus `aarch64-linux`, `riscv64-linux` and
 `zbc` reported **0** errors over `selected=32 analyzed=32` and the **3** standing
 advisory float-to-integer warnings, and nothing else.
 
-**Remaining work:** Wave 2's three-run current baseline and Wave 3's measured
-solver optimization. Each benchmark has completed one smoke run with its full
-output captured; no current baseline or speedup is claimed. Remote GitHub
-Actions and the `vf` engine have not been executed. The installed local gate
-above is verified green.
+**Remaining work:** Wave 3's measured solver optimization. The Wave 2 current
+baseline is done — three complete program runs per benchmark, checked row by row
+against the earlier originals, and published as
+[docs/performance-baseline-2026-10-02.tsv](docs/performance-baseline-2026-10-02.tsv);
+**no speedup is claimed for it.** The profile taken the same day selected one
+candidate, an RHS-first short-circuit in the private
+`System.checkRowForContradiction` ahead of its `isAllZero` test, and that
+candidate is **not implemented and has no measured speedup**: it lands only with
+a differential proof that every result, checksum, geometry report and accounting
+total is unchanged plus repeatable baseline-and-candidate timing, and is
+rejected otherwise. Remote GitHub Actions and the `vf` engine have not been
+executed. The installed local gate above is verified green.
 
 | Under `$QUALITY_TOOLS_PREFIX` | Contents |
 | --- | --- |

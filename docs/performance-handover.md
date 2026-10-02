@@ -26,12 +26,17 @@ generated MPFR directed-rounding containment corpus landed, 1886 rows over 24
 labels with 427 of them exactly representable, so the 56-operation audit set is
 covered by two tiers and no figure in this file changes for it.
 
-Everything in sections 2 and 3 was measured on 2026-09-30, with one dated
-exception: the cross-target verification carries its own heading and its own
-date, **2026-10-01**, and it re-ran the test step rather than a benchmark, so
-no `ns/op` figure anywhere in this file is restated by it. The growth figures
-come from throwaway programs that read the sign buckets directly, and section 3
-step 1 gives the routine to rebuild them. Nothing here is a guess.
+Everything in sections 2 and 3 was measured on 2026-09-30, and that date still
+governs every table in them. Later material is **added under its own heading and
+its own date rather than folded into those sections**: the cross-target
+verification at **2026-10-01**, which re-ran the test step rather than a
+benchmark, and on **2026-10-02** the gate receipts, the three benchmark smokes,
+the three-run baseline and the LP profile. None of them restates a 2026-09-30
+figure and none is a delta against one — the smokes and the gate runs executed
+beside other work, and the baseline below is a fresh capture on an unpinned
+host, not a re-measurement of the state 2026-09-30 was taken in. The growth
+figures come from throwaway programs that read the sign buckets directly, and
+section 3 step 1 gives the routine to rebuild them. Nothing here is a guess.
 
 **The gate wiring in section 2 is stated as interface rather than as a run, with
 dated exceptions named below.** How the tools are installed, where the gate
@@ -48,9 +53,12 @@ install into a fresh prefix with an empty `HOME` and a **reused** work root — 
 a second cold install — followed by the full gate run out of it: **exit 0 in
 1061.0 s**, the four required Linux targets executing **348** tests each and
 `x86_64-windows` `build_only`. **That is the current status of the prefix-only
-gate.** Wave 2's three-run measurements and Wave 3's measured solver optimization
-remain. Remote GitHub Actions and the `vf` engine have not been executed; neither
-is evidence for the verified local gate.
+gate.** Wave 2's three-run measurements are now recorded, under their own date,
+in the sections below and in
+[`docs/performance-baseline-2026-10-02.tsv`](performance-baseline-2026-10-02.tsv);
+**Wave 3's measured solver optimization remains.** Remote GitHub Actions and the
+`vf` engine have not been executed; neither is evidence for the verified local
+gate.
 
 ---
 
@@ -204,7 +212,7 @@ it bought, what was measured away, and what was tried and thrown out.
 | The MPFR corpus tier reports **1886 rows checked, 0 FAILED**, in each of the four modes, of which **427 are exactly representable**. It is the only reference in the tree that was not written in the tree: `scripts/gen_corpus.c` calls MPFR at 256 bits twice per row, once `RNDD` and once `RNDU`, and the output is committed as `tests/corpus/elementary.txt`. 1813 of the rows carry the 21 operations the in-tree oracle does not judge, and 73 more carry `sqrt`, `cbrt` and `tanh`, which it does — external corroboration, not new coverage. Together with the oracle's 35 that is the whole 56-operation audit set, twice over on those three | run; the row count and that split read out of `tests/corpus/elementary.txt` |
 | `8 of 8` operations named by the NaN contract trap on a NaN scalar, and every well-formed control comes back clean | run, each in a child process |
 | The oracle is four sibling test binaries over one shared module, `tests/soundness_shared.zig`, and the LP exact block is its own module, `src/lp_exact.zig`, tested by `tests/lp_exact_test.zig`. The four are siblings over one vocabulary rather than a chain because `zig test` collects the tests of every file a binary reaches, imported or not, so a chain would run the shared file's tests a second time | counted from `build.zig` and the `tests/` tree; the extraction is proved by `probe/lp_exact.zig` failing to compile |
-| `zig build bench` completes; `bench-lp` is bounded by the 20,000-row budget and its run reports 18.5 s. Both numbers are the 2026-09-30 capture and **neither has been re-measured since**; what has been re-run is the step, one benchmark at a time, and each exits 0 — and all three to completion again on 2026-10-02, which refreshed no figure in this document | run |
+| `zig build bench` completes; `bench-lp` is bounded by the 20,000-row budget and its run reports 18.5 s. Both numbers are the 2026-09-30 capture and **neither has been re-measured since**; what has been re-run is the step, one benchmark at a time, and each exits 0 — and all three ran to completion nine more times on 2026-10-02, which produced the current three-run baseline in its own section below and left both numbers above exactly as they are | run |
 | `zig fmt --check` clean | run |
 | `zig build docs` green | run |
 | `aarch64-linux`, `riscv64-linux` and `s390x-linux` build **and run** the whole test step — corpus tier included, 0 FAILED — under QEMU user-mode, **348/348 on each**, the same 348 the native run reports and not a subset. `s390x-linux` is big-endian and is the **only byte-order coverage this project has**: the oracle's `u64` bit-pattern stepping in `src/rounding.zig` and the NaN contract trap's pattern reads are exactly the code a little-endian host cannot get wrong, so a green run on the other targets is not evidence about s390x | run, `cross-test`, 2026-10-01 — `aarch64-linux` and `s390x-linux` at `--timeout 900`, the rest at the default; per-target counts, the byte-order point and the timeout trap are in the cross-target section below |
@@ -228,12 +236,16 @@ in `docs/next-work-plan.md` gave `box` one shared elimination walk in place of
 eliminations — and it raised peak memory, because the walk holds a chain and
 one copy alive together where the old form held one. The geometry report row
 above is unaffected, and the reason is what that report prints: bounded or
-unbounded, and nothing else. **No `ns/op` figure anywhere in this document has
-been re-measured since 2026-09-30, and none is claimed to have been.** All three
-benchmarks ran to completion again on 2026-10-02, and the gate receipt below
-records that completion while saying plainly that the numbers that run printed
-are not adopted: so every table here stays the 2026-09-30 capture and no
-figure in this file may be quoted as current.
+unbounded, and nothing else. **No `ns/op` figure in this section or in section 3
+has been re-measured since 2026-09-30, and none is claimed to have been.** All
+three benchmarks ran to completion again on 2026-10-02, and the gate receipt
+below records that completion while saying plainly that the numbers that run
+printed are not adopted: so every table here stays the 2026-09-30 capture.
+**The current measured baseline is a separate, separately dated 2026-10-02
+capture in its own section below, published as its own file**; it replaces
+nothing here, and the two dates are not a before/after pair, because this
+document's tables were taken on an idle machine and the current capture was
+taken on an unpinned shared one.
 
 **The four-mode run is no longer outstanding.** It was re-run after every
 commit since the measurement, one mode at a time, at the tip named in the last
@@ -960,6 +972,13 @@ nothing in the installed gate is waiting on either. The install, re-hash, gate
 and cross logs live under a session scratch root that will not survive it, which
 is why the reproducible form is section 6's commands, not those paths.
 
+**Superseded on the same date, after this run, by the two headings below.** Wave
+2's three-run measurement is now taken, checked and published in
+[`performance-baseline-2026-10-02.tsv`](performance-baseline-2026-10-02.tsv).
+That is a later, separately dated capture; it does not rewrite this receipt's
+`not_proved` list, the gate run refreshed no figure, and **Wave 3's measured
+solver optimisation is still open.**
+
 ### Benchmark smoke verification — 2026-10-02
 
 Host `buildhost`, compiler 0.16.0.
@@ -975,10 +994,12 @@ regular file and read back from it.
 | `bench-lp` | 52.010 s | 144 lines | 26 = 13 `dbg` + 13 `smp` | 28 | `4b4f94d960b30e8e` |
 
 **Those are command wall times, not `ns/op`.** Each program ran once; its internal
-timing repetitions are unchanged. **No speedup is claimed**; the three-run baseline
-and solver optimisation remain unmeasured — they are the next wave's work, and
-these three runs are the smokes of the same 2026-10-02 verification as the green
-gate above. What
+timing repetitions are unchanged. **No speedup is claimed**; at the time of this
+capture the three-run baseline and solver optimisation were unmeasured — they
+were the next wave's work — and these three runs are the smokes of the same
+2026-10-02 verification as the green gate above. **The three-run baseline taken
+afterwards on the same date is the section below**; it does not convert these
+three runs into a baseline, and it is a different capture. What
 the capture does establish is that every row survives the redirect, where the old
 positional writer reset its offset to 0 and dropped rows with no error, and that
 the LP accounting held on both heaps: every body swept **twice** with drift or
@@ -993,6 +1014,163 @@ standing warnings, gate exit 0. See `tools/quality/PROVENANCE.md`. The 31 payloa
 hashes, 12 patches and 26 sealed files recorded above stay exactly as they are —
 they describe the tree as the red run found it, and a later count does not
 rewrite an earlier one.
+
+### Wave 2 — the current three-run baseline, 2026-10-02
+
+**This is the current measured baseline, and it supersedes nothing in sections 2
+and 3.** Those tables stay the 2026-09-30 capture; this is a second, separately
+dated capture, published as its own file,
+**[`docs/performance-baseline-2026-10-02.tsv`](performance-baseline-2026-10-02.tsv)**,
+holding **all 362 timed rows** with each row's three `ns/op` values and its
+median, minimum and maximum. Read a row out of that file; do not read a row out
+of this document and call it current.
+
+Tree `7b472aee`, host `buildhost`, compiler 0.16.0, root and `interval` both
+`ReleaseFast`, captured on a **shared host that was neither pinned nor isolated**.
+Three **complete sequential program runs** per program — the order
+`scalar` → `vec` → `lp` repeated for three rounds, sequential, with no parallel
+benchmark, profile or build — all nine exiting 0, with stdout and stderr on
+ordinary files read back afterwards. Each program was its own standalone
+`ReleaseFast` executable, root and `-Minterval` on `src/root.zig`, built under a
+private build cache and private global cache rather than the contended shared
+one:
+
+| Program | Executable sha256 | Run 1 | Run 2 | Run 3 |
+| --- | --- | --- | --- | --- |
+| `bench-scalar` | `a3fcbe386e357846…` | 4.004 s | 3.203 s | 2.974 s |
+| `bench-vec` | `dd276670adc901ba…` | 357.329 s | 345.887 s | 328.716 s |
+| `bench-lp` | `96fa59110d6c01fc…` | 30.445 s | 31.646 s | 28.078 s |
+
+Those are command wall times, not `ns/op`. **Nothing about the workload moved
+to produce this table**: no workload, iteration count, seed, elimination order,
+warmup (`1`), internal repetitions (`7`) or row budget (`20,000`) changed. Each
+TSV cell is the **minimum over that program's 7 internal repetitions**, so the
+three values per row are three program runs and the min/max columns are the
+spread **across those three**, not across the seven.
+
+**What was checked, and how.** A strict throwaway reader took each of the nine
+logs with the Wave 1 originals as a `--reference` and compared them keyed by
+row, never in report order. It found **60** timed rows in every scalar run,
+**276** in every vector run and **26** in every LP run (13 `dbg` + 13 `smp`),
+with **row identity, iteration counts, the per-body checksum sequences and the
+final folds matching the Wave 1 originals on all nine runs** — so the capture
+computes the same things the previous capture computed. For LP it also checked
+the accounting: **all 13 accounting rows identical across both heap sections of
+all three LP program runs**, the geometry report identical across them too,
+and **494,632 allocs and 494,632 frees, 306,958,852 allocated bytes and
+306,958,852 freed bytes, on each of `allocator=dbg` and `allocator=smp`** — the
+same totals the smoke run above reported, now confirmed over three runs each.
+
+**All 13 LP cases, current medians, `ns/op`.** Median of the three per-run
+minima, with the min–max span across the three runs in brackets.
+
+| LP case | iters | `allocator=dbg` | `allocator=smp` |
+| --- | --- | --- | --- |
+| `add 64 rows x 8 vars` | 2,000 | 115,956 (111,309–125,724) | 8,912 (8,816–9,082) |
+| `add 8 rows x 4 vars` | 20,000 | 36,746 (32,422–43,683) | 733 (717–746) |
+| `bounds k=0, mixed 14x2` | 500 | 92,332 (87,679–94,210) | 11,676 (11,570–12,221) |
+| `bounds k=1, straddling 11x2` | 100 | 106,401 (106,122–109,796) | 35,225 (34,949–36,990) |
+| `box, mixed 14x2` | 200 | 140,873 (130,711–141,529) | 23,030 (22,543–24,007) |
+| `box, straddling 11x2` | 50 | 169,051 (168,302–173,058) | 69,915 (69,330–70,202) |
+| `build 6 rows x 4 vars (control)` | 20,000 | 34,587 (32,017–35,206) | 585 (581–591) |
+| `eliminate k=0, 6 rows x 4 vars` | 20,000 | 51,891 (48,696–51,969) | 2,940 (2,854–2,960) |
+| `eliminateAll ascending, heuristic 4v` | 100 | 35,358 (34,199–35,819) | 2,412 (2,341–2,776) |
+| `eliminateAll chosen, heuristic 4v` | 2,000 | 34,881 (33,294–34,884) | 455 (453–572) |
+| `eliminateAll chosen, mixed 14x2` | 200 | 176,702 (174,597–177,546) | 71,710 (71,232–73,493) |
+| `eliminateInOrderOfChoice, mixed 14x2` | 500 | 172,232 (163,441–172,289) | 68,276 (65,488–69,336) |
+| `eliminationOrder, mixed 14x2` | 500 | 170,675 (160,679–171,703) | 69,053 (68,641–70,178) |
+
+The `dbg`/`smp` gap on these rows is the `DebugAllocator` round trip step 3
+measured, not a property of the solver: the shapes and the accounting are the
+same, so **this document still does not compare the two allocators as a
+result.**
+
+**Seven scalar rows, current**, same convention, beside the 2026-09-30 step-2
+table. This document does **not** read the two as a delta — the earlier capture
+was taken on an idle machine and this one on an unpinned shared host, and the
+noise floor below still binds. The ordering is stable; the cheap rows are not
+precise to the digit.
+
+| Operation | 2026-10-02 median (min–max) | 2026-09-30 step-2 figure |
+| --- | --- | --- |
+| `interval.scale` | 58.137 (55.062–73.402) | 47.795 |
+| `interval.div` | 20.532 (19.405–28.128) | 15.465 |
+| `interval.mul` | 10.275 (9.749–16.204) | 9.639 |
+| `interval.sub` | 5.521 (5.230–7.939) | 5.108 |
+| `interval.sqr` | 5.639 (5.155–7.221) | 4.807 |
+| `interval.add` | 5.692 (5.438–7.957) | 5.027 |
+| `interval.abs` | 5.058 (4.831–7.315) | 4.138 |
+
+**The 276 vector rows are not reprinted here** — they are in the TSV with the
+same three-values-plus-median-min-max shape, under the operation names
+`alloc.*`, `dyn<n>.*` and `vec<n>.*` for `n` in 2, 3, 4, 8, 16, 32.
+**No speedup is claimed**: this is one revision on an unpinned shared host, not a
+before/after pair. Run 1 was strictly highest on 211/362 rows: 54/60 scalar,
+136/276 vector and 21/26 LP. The capture provides dated, checkable figures for the
+next comparison, not evidence of a uniformly slower first run.
+
+### Wave 2 — the LP profile, 2026-10-02, and the one candidate carried into Wave 3
+
+**What was profiled.** A profiling-only consumer imported the repository's own
+public `bench/bench_lp.zig` and called its public `run(*Runner)` twenty times
+over, taking the `Runner` type from that function's own parameter type. No
+workload, case, seed, iteration, warmup, repetition or budget change, no solver
+copy, no new production API. Built `ReleaseFast` with `-fno-strip` for DWARF,
+private cache and private global cache, and sampled with
+`perf record -e cycles:u -F 999 --call-graph dwarf,16384`.
+
+**Two things about that profile must be said before any number in it.** The
+consumer initialises `Runner` with `std.heap.smp_allocator` so the actual heap
+is the real SMP one, while `bench_lp.run`'s own text still prints
+`allocator=dbg` — that label is fixed inside the imported `run` and is
+**misleading in this profile by construction**; the disclosure is the point.
+And the profile is **whole-process**: geometry, the 13 timed bodies, the untimed
+allocation accounting and the printing are all inside it. It is **not**
+timed-region-only, and no `ns/op` figure was taken under it.
+
+**What the samples say.** 36,754 samples, **0 lost**, and the per-body
+fingerprints match the original run, so the profile measured the same work the
+benchmark runs measured. `System.eliminate` is **56.74 %** of total process
+period. Within it, the **post-elimination rescan** — two address regions of the
+emitted binary, `0x1024b03`–`0x1024bc6` and `0x1024c7b`–`0x1024cb3`, taken
+from raw leaf periods because the DWARF reports would not separate them —
+accounts for **1,581 samples and 4.276 % of whole-process period, which is
+7.537 % of `eliminate`**. The `Buckets.partitionInto` collecting partition is
+**1.85 %** of process period, and that is the elimination's own bookkeeping,
+**not** the heuristic's tally.
+
+**The heuristic's own cost, stated as an upper bound and no more.** `chooseNext`
+has exactly two callers in the source, `System.eliminationOrder` and
+`System.eliminateInOrderOfChoice`, and `pairCount`/`Tally` are inlined into it.
+The two callers' **combined SELF** share is **0.594916210 %** of process
+period. That is an **upper bound for the inlined `chooseNext` plus
+`pairCountTally`, not a measurement of either**: caller self share also carries
+the wrapper's own work, and the DWARF call-chain and `--inline` reports
+returned inclusive equal to self for these inlined frames, so **no precise
+inclusive cost for the inlined scans is available from this profile and none is
+invented here.** On that upper bound the heuristic is not worth changing, which
+is the whole reason the candidate below is about the rescan and not about it.
+
+**Raw perf percentages are sample attribution, not speedups**, and this was an
+unpinned shared host.
+
+**The one candidate selected, and its exact status.** Test an **RHS-first
+short-circuit in the private `System.checkRowForContradiction`, before the
+`isAllZero` test**. Among the two scan hypotheses, the measured rescan is larger
+than the heuristic upper bound. The trial rejects rows by their upper RHS
+endpoint before scanning coefficients. The predicate stays **exactly** `rhs.hi < 0`; every all-zero
+row, all-rows, unsat transition, tie, elimination order, row budget and every
+piece of arithmetic stay as they are, and no API, validation, retry, allocator,
+cache or layout change travels with it.
+
+**It is not implemented and no speedup has been measured.** The candidate is
+selected, not proved. Wave 3 has to show it with a **differential proof** that
+every solver result, checksum, geometry report and accounting total is
+unchanged, plus **repeatable baseline-and-candidate timing** that clears the
+noise floor. If either fails, the candidate is **rejected** and recorded that
+way — the selection is a hypothesis, and nothing in this section is a claim that
+it will pay. Remote GitHub Actions and the `vf` engine remain unexercised and
+are not a Wave 2 or Wave 3 promise.
 
 ### Cross-target verification — 2026-10-01, and the 300-second timeout that reads like a defect
 
@@ -2064,9 +2242,16 @@ Read in this order if you have time for only one thing:
 Cite these by name, not by line number. The line citations in the previous
 revision of this document had already drifted by the time it was superseded.
 
+The current measured figures are not in this file's tables. They are in
+[`docs/performance-baseline-2026-10-02.tsv`](performance-baseline-2026-10-02.tsv)
+— all 362 rows, three `ns/op` values each — and the two Wave 2 sections in
+section 2 that introduce it say what was measured, what was checked, and what
+the file does not establish.
+
 ## 8. What not to do
 
-- Do not optimise before the baseline exists. It does now: see step 2.
+- Do not optimise before the baseline exists. It does now: see step 2, and for
+  the current dated capture see the Wave 2 section and its TSV.
 - Do not reintroduce a row budget below 20,000 rows, or raise any benchmark
   size past what the budget allows without re-measuring the sweep that
   `requireRowBudget` guards in `bench/bench_lp.zig`. The budget is what stops
@@ -2078,6 +2263,17 @@ revision of this document had already drifted by the time it was superseded.
 - Do not report a cheap operation's delta as a result. Five of the seven
   interval rows in the round-2 table did not clear the noise band and are
   recorded as NO CLAIM for exactly that reason.
+- Do not quote the 2026-10-02 TSV as a speedup, or as a delta against the
+  2026-09-30 tables in section 3. It is one capture on an unpinned shared host,
+  the two dates are not a before/after pair, and a perf percentage is sample
+  attribution rather than time.
+- Do not carry the RHS-first `checkRowForContradiction` guard into the tree
+  because a profile named it. It is **selected, not proved and not
+  implemented**; it lands only with a differential proof that every result,
+  checksum, geometry report and accounting total is unchanged, plus repeatable
+  baseline-and-candidate timing that clears the noise floor — and it is
+  **rejected** if either does not arrive. An API, validation, retry, allocator,
+  cache or layout change does not travel with it.
 - Do not re-export or re-register modules; the "one file, one module" rule
   will fail the build and the reason is not obvious from the error.
 - Do not remove the consumer step's private cache directories — not because

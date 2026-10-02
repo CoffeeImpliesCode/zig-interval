@@ -1398,6 +1398,20 @@ path where the row set has genuinely changed. Second, mutation: flipping the
 single-row predicate must make the lp suite report an unsatisfiable system as
 satisfiable — that is the test that proves the check is load-bearing.
 
+**One trial candidate sits against this predicate and does not reopen it.** The
+2026-10-02 profile of the whole SMP profiling consumer puts the post-elimination
+rescan at **4.276 %** of sampled cycle periods and **7.537 %** within `eliminate`,
+against a **0.595 %** upper bound for the `chooseNext` heuristic's two callers —
+enough to be worth a trial, not enough to be an accepted optimisation.
+The candidate is to test `row.rhs.hi < 0` before `isAllZero` inside
+`checkRowForContradiction`: a reordering of two pure tests, with the exact-zero
+predicate, the `rhs.hi < 0` predicate, the `unsat` latch, the `pushRow`-versus-
+`rescanForContradiction` split above, the elimination order and the row budget all
+unchanged. It is unimplemented, it has no measured speedup, and its acceptance is
+bit-level differential equality against frozen revision `7b472aee` and unchanged
+benchmark signals, plus a repeatable three-round timing comparison, with
+**reject** as a real outcome. O5 in `docs/next-work-plan.md` holds the entry. **A5 stays DONE either way.**
+
 ### A6 — DONE: `System.count()` is renamed `rowCount()`
 
 **Done.** `System.count` is `System.rowCount`, and no `count` survives on the
@@ -1836,14 +1850,26 @@ cache. The gates themselves belong to whoever is orchestrating, once, over the
 union of the work.
 
 **Cite existing measurements; do not re-derive them.** Every LP figure,
-baseline, optimisation delta and noise band is already in
-`docs/performance-handover.md` with the date, the mode and how it was taken.
-Re-running a benchmark to "confirm" a number in that file costs a contended
-host, produces a number that differs for reasons that have nothing to do with
-the code, and then invites a later session to treat the discrepancy as a
-regression. **If a change has no measurement attached, it has no claim attached
-either** — that file's convention is to record such a row as **NO CLAIM** rather
-than as a small win, and it is the right one.
+baseline, optimisation delta and noise band is already written down with the date,
+the mode and how it was taken, and the two files that hold them are named here so
+a figure is never quoted from the wrong one. The **current** baseline is
+`docs/performance-baseline-2026-10-02.tsv`: all 362 timed rows — 60 scalar, 276
+vector, 26 LP — each with three runs' `ns/op` and their median, minimum and
+maximum, at revision `7b472aee`, `ReleaseFast` throughout, warmup 1 and reps 7, LP
+row budget 20,000, three sequential rounds captured to ordinary files on a shared
+host. The tables in `docs/performance-handover.md` are the earlier **2026-09-30**
+capture and are still that capture: cite one or the other by name, never a figure
+from one as though it came from the other, and never a 2026-09-30 number as
+current. The 2026-10-02 capture and the LP profile are written up under their own
+headings in that file — **Wave 2 — the current three-run baseline, 2026-10-02** and
+**Wave 2 — the LP profile, 2026-10-02** — so "the handover's measurements" means
+the dated section, not whatever table a reader lands on first. Re-running a
+benchmark to "confirm" a number that is already recorded
+costs a contended host, produces a number that differs for reasons that have
+nothing to do with the code, and then invites a later session to treat the
+discrepancy as a regression. **If a change has no measurement attached, it has no
+claim attached either** — the convention is to record such a row as **NO CLAIM**
+rather than as a small win, and it is the right one.
 
 **The consequences, stated once.** A change to any operation under about
 10 ns/op **cannot** be claimed from a single pair of runs here: take the

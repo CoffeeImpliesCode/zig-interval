@@ -737,15 +737,52 @@ separate decision — the acceptance is P3's, one grep.
 ## 4. Optimisation backlog for the next round
 
 Drawn from the step-4 ranking in `docs/performance-handover.md`, with the
-verdicts that ranking already reached and the figures it ended on. **All four
-are now resolved** — O2 and O3 landed, O1 is answered in the negative by a proof
-that was written afterwards, and O4 is refused and closed — so nothing here is a
-task. One caveat, restated because it governs every number here: **cheap
-operations move by up to 44 % between two runs of the same binary on this shared
-host, so nothing under about 10 ns/op is claimable from a single pair of runs.**
-Take the measurement on an idle machine, or take three runs and compare minima.
-And do not re-derive a figure that file already holds: cite it, with its date
-and its mode.
+verdicts that ranking already reached and the figures it ended on. **O1 through O4
+are resolved** — O2 and O3 landed, O1 is answered in the negative by a proof that
+was written afterwards, and O4 is refused and closed — so none of those four is a
+task. **O5 is the one open entry, and it is a TRIAL rather than an accepted
+optimisation**: nothing in it is implemented, and no speedup has been measured.
+**Cheap-row noise is capture-specific.** The contended 2026-09-30 capture moved
+by up to 44% between two runs of the same binary. The current three-run capture
+is wider: max/min spread is 66.2% on `interval.mul` and 287.6% on `dyn3.contains`.
+Nothing under about 10 ns/op is claimable from a single pair of runs on this host.
+Use repeated measurements and each current row's range; cite every figure with
+its date and mode.
+
+**The current baseline is 2026-10-02; the handover retains historical 2026-09-30 tables.**
+`docs/performance-baseline-2026-10-02.tsv` carries **all 362 timed rows** — 60
+scalar, 276 vector, 26 LP, the LP 26 being the 13-body catalog run twice, once
+per heap — each row with the three runs' `ns/op` beside their median, minimum and
+maximum. It was captured at revision `7b472aee` on host `buildhost` with compiler
+0.16.0, root and interval both `ReleaseFast`, warmup 1 and reps 7, the LP row
+budget at 20,000, as three sequential rounds in the order scalar, vector, LP,
+each program's output to an ordinary file. The host is shared and unpinned, so
+this is a baseline to compare a later revision against and **not** a claim that
+any row is a stable cost. Historical `ns/op` tables in `docs/performance-handover.md`
+remain the 2026-09-30 capture; its separately dated Wave 2 tables summarise this
+current baseline. Where the dated captures differ, cite the TSV and its header
+for current measurements, without treating that difference as a speedup.
+
+The same capture is written up in `docs/performance-handover.md` under its own
+heading, **Wave 2 — the current three-run baseline, 2026-10-02**, which is where
+the recipe, the three command wall times per program and the 13 LP cases in full
+are.
+
+**The baseline is proved equal, not merely re-taken, and that is what makes it
+usable as the reference for the next change.** All nine program runs exited 0, and
+a strict parser compared them: row identities, iteration counts, the streamed
+per-row checksums and the fold are identical across all three captures of each
+program, and every row identity, iteration count, checksum and fold in the
+2026-10-02 Wave 1 smoke logs is reproduced. On LP the geometry report is identical on
+every run; the untimed accounting of all 13 bodies is identical across all three
+captures and on both heaps; `allocs == frees` and `alloc B == freed B` on every
+body; and the per-heap totals are **494,632** allocations and **306,958,852**
+bytes, the same figure on `allocator=dbg` and on `allocator=smp`. So a candidate
+change can be required to reproduce those checksums exactly, and a candidate that
+does not is wrong however fast it looks.
+
+This is a local benchmark capture. It is not a gate run, and nothing remote was
+executed to produce it.
 
 **O1 — `scale` at 47.795 ns/op, six widening steps per endpoint.**
 `src/interval.zig`. Verdict: **NO — and now answered rather than merely
@@ -794,11 +831,16 @@ COUNT — roughly half as many eliminations — and it raised peak memory, becau
 the walk holds a chain and one copy alive together where the old form held one.
 The `bench-lp` geometry report is unaffected: it records row counts, first-round
 predictions, chosen orders and boundedness, not the internal clone count.
-**No speed is claimed here.** No
-`ns/op` figure in `docs/performance-handover.md` has been re-measured since the
-2026-09-30 capture, so the `bounds`-calling rows this entry once proposed to
-measure — 75,219 ns and 152,932 ns — are still that capture's numbers and are not
-restated as current.
+**No speed is claimed here, and the reason has changed.** The
+`bounds`-calling rows this entry once proposed to measure — 75,219 ns and
+152,932 ns — are the 2026-09-30 capture's numbers, stay labelled with that
+date, and are not restated as current. What has changed is that they are no
+longer the newest figures: the current measurement of every row, three runs
+each, is `docs/performance-baseline-2026-10-02.tsv`, and those two rows are in
+it. Neither set attributes a delta to this entry, because one revision
+captured once is not a before/after pair — what the shared walk costs in
+nanoseconds is still not measured, and only the elimination count and the peak
+memory are claimed.
 
 **O3 — DONE: the `undersized` side channel in `mul` and `div`.** The flag was
 computed eagerly per corner, four byte stores and three unconditional reloads in
@@ -824,6 +866,84 @@ measured at 1.52 ULP on an ordinary exponent, and `1.0000000001^1e8` came back
 as 1.01005016788679320 against a true 1.0100501679193823. The handover reached
 the same verdict at rank 5: "do not change ... deliberately traded for
 soundness. Quantified, as asked; not a defect." Do not reopen it.
+
+**O5 — TRIAL ONLY, not an accepted optimisation: test `row.rhs.hi < 0` before
+`isAllZero` in `System.checkRowForContradiction`.** Nothing in this entry is in
+the tree and no speedup has been measured. It is selected because it is where a
+profile put the time, and it is ranked against an alternative that the same
+profile priced out.
+
+**What the profile said, 2026-10-02, same revision, same host.**
+The profile covers 20 calls to the public `bench_lp.run` path in a separate SMP
+consumer — geometry report, accounting and printing included, not the timed
+region alone — with **36,754** samples and **0 lost**, and every original signal reproduced.
+`eliminate` carries **56.74 %** of the whole profile's self time. Inside it, the
+post-elimination rescan on the `eliminate` path — raw leaf periods mapped
+through the disassembly onto two address ranges — is **7.537 %** of `eliminate`
+and **4.276 %** of the whole profile, from **1,581** samples.
+The heuristic is the thing this entry does NOT propose to touch: `chooseNext` has
+exactly two callers, `eliminationOrder` and `eliminateInOrderOfChoice` (LSP, not
+inspection), the tally is inlined into it, and their combined **self** time is
+**0.595 %** of the whole profile. That figure is an **upper bound** and not its
+cost, because caller self time also contains the wrapper's own work and the
+inlined callee is not separable there; 0.595 % is not worth changing. The
+collecting `Buckets.partitionInto` is **1.85 %**, and it is a different function
+from the heuristic's tally — do not add the two.
+Three limits travel with these numbers: the DWARF call-chain and inline reports
+did not separate the inlined scans (inclusive equalled self), so address ranges
+and raw leaf periods were used instead; the host is shared and unpinned; and
+sample attribution is **not** a speedup. One labelling trap: the profile ran the
+public `bench_lp.run`, which prints the `allocator=dbg` heading while running on
+the runner's own heap. The two heaps in the TSV's LP rows are `bench-lp`'s own
+`main`, where the labels are literal.
+
+The profile is written up in full, with the two emitted address ranges and the
+capture recipe, under **Wave 2 — the LP profile, 2026-10-02** in
+`docs/performance-handover.md`; this entry adds only the decision and its terms.
+
+**The candidate, exactly.** `checkRowForContradiction` (`src/lp.zig:1248-1252`)
+is two tests: return unless every coefficient of the row is exactly zero, and
+latch `unsat` when the right-hand side's upper bound is below zero. Asking the
+second question first skips the whole-row coefficient scan on any row that
+already cannot contradict. How many rows that is on the elimination path is
+**not** measured and is part of what the trial has to establish — the 4.276 % is
+the scan's cost, not the number of skips the reordering would buy.
+
+**Everything that must not move, stated as conditions rather than as intent.**
+The predicate stays `rhs.hi < 0`: not `rhs.lo < 0`, not `<= 0`, and the
+doc comment at `src/lp.zig:1235-1247` is why — `rhs.lo` reads a satisfiable
+system as unsatisfiable, which cuts the feasible set. `isAllZero` keeps reading
+coefficients only, keeps calling `exact.isExactZero` (`a.lo == 0 and a.hi == 0`,
+so a rounding-thin straddle is still a variable the row mentions), keeps its
+whole-row early exit, and is neither deleted nor duplicated. `pushRow` still
+checks only the row it just appended and `rescanForContradiction` still scans
+every row on the `eliminate` path — A5's split is untouched and does not reopen.
+`unsat` stays latched, and every system that latches and every system that does
+not must latch identically. Elimination order, tie-breaking between equal
+candidates, the row budget, the workloads, the seeds, the iteration counts and
+the arithmetic are all untouched: this reorders a conjunction of two pure tests
+and computes nothing.
+
+**Accept or reject, decided two ways, both required.**
+1. **Differential equality.** The candidate's captures must reproduce the
+   2026-10-02 baseline exactly — every row identity, iteration count, streamed
+   per-row checksum and fold, on all three programs; the LP geometry report and
+   the untimed accounting of all 13 bodies on both heaps; the per-heap totals
+   still **494,632** allocations and **306,958,852** bytes. "Close" is a failure.
+2. **Repeatable timing.** Run the unchanged baseline and candidate sequentially,
+   paired across three rounds, on the same host. Each row remains the minimum of
+   seven internal repetitions; compare the three-run medians and ranges.
+   Require at least 5% lower median on `eliminateAll chosen, mixed 14x2` under
+   `allocator=smp`, improvement in all three pairs, and non-overlapping ranges.
+   Its current range is 71,232.010–73,492.960 ns/op (3.17% max/min spread).
+   Otherwise reject. Use that row's fresh paired variance, not historical scalar noise.
+
+If either fails the entry closes as refused and nothing lands — not even a
+comment change. Nothing else is queued with it: no API change, no
+validation, retry or cache, no allocator, layout or heuristic redesign, no
+second candidate. If the trial is rejected, record NO CLAIM and restore the
+unchanged solver. These measurements bound the two scan hypotheses; they do not
+establish that no other bottleneck exists.
 
 ---
 

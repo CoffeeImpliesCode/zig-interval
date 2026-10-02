@@ -1,0 +1,365 @@
+# date=2026-10-02 host=buildhost compiler=0.16.0 revision=7b472aee root_optimize=ReleaseFast interval_optimize=ReleaseFast
+# Three complete sequential program runs; each row is minimum of7 internal repetitions, warmup1; unpinned shared host. No speedup claim.
+program	group	operation	iters	run1_ns	run2_ns	run3_ns	median_ns	min_ns	max_ns
+scalar	scalar:Interval algebraic operations	interval.abs	1000000	7.315	5.058	4.831	5.058	4.831	7.315
+scalar	scalar:Interval algebraic operations	interval.add	1000000	7.957	5.692	5.438	5.692	5.438	7.957
+scalar	scalar:Interval algebraic operations	interval.div	1000000	28.128	20.532	19.405	20.532	19.405	28.128
+scalar	scalar:Interval algebraic operations	interval.eql	1000000	1.519	1.355	1.296	1.355	1.296	1.519
+scalar	scalar:Interval algebraic operations	interval.expand	1000000	8.064	5.522	5.259	5.522	5.259	8.064
+scalar	scalar:Interval algebraic operations	interval.ge	1000000	1.319	1.340	1.296	1.319	1.296	1.340
+scalar	scalar:Interval algebraic operations	interval.gt	1000000	1.374	1.340	1.296	1.340	1.296	1.374
+scalar	scalar:Interval algebraic operations	interval.le	1000000	1.275	1.342	1.270	1.275	1.270	1.342
+scalar	scalar:Interval algebraic operations	interval.lt	1000000	1.302	1.340	1.255	1.302	1.255	1.340
+scalar	scalar:Interval algebraic operations	interval.mul	1000000	16.204	10.275	9.749	10.275	9.749	16.204
+scalar	scalar:Interval algebraic operations	interval.ne	1000000	1.395	1.340	1.273	1.340	1.273	1.395
+scalar	scalar:Interval algebraic operations	interval.neg	1000000	1.306	1.341	1.305	1.306	1.305	1.341
+scalar	scalar:Interval algebraic operations	interval.recip	1000000	23.370	17.842	18.783	18.783	17.842	23.370
+scalar	scalar:Interval algebraic operations	interval.scale	1000000	73.402	58.137	55.062	58.137	55.062	73.402
+scalar	scalar:Interval algebraic operations	interval.sqr	1000000	7.221	5.639	5.155	5.639	5.155	7.221
+scalar	scalar:Interval algebraic operations	interval.sub	1000000	7.939	5.521	5.230	5.521	5.230	7.939
+scalar	scalar:Interval algebraic operations	interval.translate	1000000	8.265	6.048	5.563	6.048	5.563	8.265
+scalar	scalar:elementary functions	ext.acos	200000	51.581	42.529	40.612	42.529	40.612	51.581
+scalar	scalar:elementary functions	ext.acos [out of domain]	200000	1.518	1.337	1.294	1.337	1.294	1.518
+scalar	scalar:elementary functions	ext.acosh	200000	66.697	51.415	48.903	51.415	48.903	66.697
+scalar	scalar:elementary functions	ext.acosh [out of domain]	200000	1.512	1.337	1.294	1.337	1.294	1.512
+scalar	scalar:elementary functions	ext.asin	200000	37.052	28.943	27.510	28.943	27.510	37.052
+scalar	scalar:elementary functions	ext.asin [out of domain]	200000	1.421	1.337	1.253	1.337	1.253	1.421
+scalar	scalar:elementary functions	ext.asinh	200000	73.430	56.579	53.728	56.579	53.728	73.430
+scalar	scalar:elementary functions	ext.atan	200000	53.919	44.519	42.345	44.519	42.345	53.919
+scalar	scalar:elementary functions	ext.atan2	200000	74.984	64.939	61.041	64.939	61.041	74.984
+scalar	scalar:elementary functions	ext.atanh	200000	60.841	46.771	43.953	46.771	43.953	60.841
+scalar	scalar:elementary functions	ext.atanh [out of domain]	200000	3.228	3.007	2.819	3.007	2.819	3.228
+scalar	scalar:elementary functions	ext.cbrt	200000	57.401	53.977	51.770	53.977	51.770	57.401
+scalar	scalar:elementary functions	ext.ceil	200000	20.151	14.429	13.959	14.429	13.959	20.151
+scalar	scalar:elementary functions	ext.cos	200000	58.068	36.264	35.132	36.264	35.132	58.068
+scalar	scalar:elementary functions	ext.cosh	200000	84.179	76.777	73.253	76.777	73.253	84.179
+scalar	scalar:elementary functions	ext.exp	200000	62.948	54.638	52.346	54.638	52.346	62.948
+scalar	scalar:elementary functions	ext.exp2	200000	54.360	43.165	41.672	43.165	41.672	54.360
+scalar	scalar:elementary functions	ext.expm1	200000	70.367	63.061	60.985	63.061	60.985	70.367
+scalar	scalar:elementary functions	ext.floor	200000	19.793	14.160	13.783	14.160	13.783	19.793
+scalar	scalar:elementary functions	ext.log	200000	47.813	40.646	39.155	40.646	39.155	47.813
+scalar	scalar:elementary functions	ext.log [out of domain]	200000	1.371	1.353	1.253	1.353	1.253	1.371
+scalar	scalar:elementary functions	ext.log [straddling zero]	200000	26.582	19.142	18.549	19.142	18.549	26.582
+scalar	scalar:elementary functions	ext.log10	200000	69.557	60.586	57.803	60.586	57.803	69.557
+scalar	scalar:elementary functions	ext.log10 [out of domain]	200000	1.522	1.337	1.294	1.337	1.294	1.522
+scalar	scalar:elementary functions	ext.log10 [straddling zero]	200000	38.071	29.195	27.526	29.195	27.526	38.071
+scalar	scalar:elementary functions	ext.log1p	200000	49.612	41.783	39.368	41.783	39.368	49.612
+scalar	scalar:elementary functions	ext.log1p [out of domain]	200000	1.479	1.337	1.294	1.337	1.294	1.479
+scalar	scalar:elementary functions	ext.log1p [straddling zero]	200000	37.794	26.072	25.527	26.072	25.527	37.794
+scalar	scalar:elementary functions	ext.log2	200000	68.373	59.442	57.084	59.442	57.084	68.373
+scalar	scalar:elementary functions	ext.log2 [out of domain]	200000	1.286	1.486	1.295	1.295	1.286	1.486
+scalar	scalar:elementary functions	ext.log2 [straddling zero]	200000	36.836	28.274	26.502	28.274	26.502	36.836
+scalar	scalar:elementary functions	ext.pow	200000	94.707	73.855	70.441	73.855	70.441	94.707
+scalar	scalar:elementary functions	ext.powf	50000	296.859	262.206	257.998	262.206	257.998	296.859
+scalar	scalar:elementary functions	ext.powf [out of domain]	50000	1.264	1.337	1.294	1.294	1.264	1.337
+scalar	scalar:elementary functions	ext.round	200000	19.220	13.994	13.072	13.994	13.072	19.220
+scalar	scalar:elementary functions	ext.sin	200000	58.988	36.561	35.512	36.561	35.512	58.988
+scalar	scalar:elementary functions	ext.sinh	200000	78.074	68.417	65.285	68.417	65.285	78.074
+scalar	scalar:elementary functions	ext.sqrt	200000	14.430	12.461	11.910	12.461	11.910	14.430
+scalar	scalar:elementary functions	ext.sqrt [out of domain]	200000	1.453	1.337	1.294	1.337	1.294	1.453
+scalar	scalar:elementary functions	ext.tan	200000	46.853	32.888	30.611	32.888	30.611	46.853
+scalar	scalar:elementary functions	ext.tan [across a pole]	200000	30.513	18.468	17.790	18.468	17.790	30.513
+scalar	scalar:elementary functions	ext.tanh	200000	73.660	61.025	58.818	61.025	58.818	73.660
+scalar	scalar:elementary functions	ext.trunc	200000	16.000	11.524	11.120	11.524	11.120	16.000
+vec	vec:report	alloc.16comp.debug	25000	14167.549	7037.665	6562.402	7037.665	6562.402	14167.549
+vec	vec:report	alloc.16comp.smp	25000	19.388	16.459	15.408	16.459	15.408	19.388
+vec	vec:report	alloc.2comp.debug	200000	8146.623	7509.263	6479.162	7509.263	6479.162	8146.623
+vec	vec:report	alloc.2comp.smp	200000	23.804	16.539	15.248	16.539	15.248	23.804
+vec	vec:report	alloc.32comp.debug	20000	10654.890	6301.262	6238.207	6301.262	6238.207	10654.890
+vec	vec:report	alloc.32comp.smp	20000	20.436	20.003	15.410	20.003	15.410	20.436
+vec	vec:report	alloc.3comp.debug	133333	10387.033	6948.908	6732.929	6948.908	6732.929	10387.033
+vec	vec:report	alloc.3comp.smp	133333	22.155	21.375	15.395	21.375	15.395	22.155
+vec	vec:report	alloc.4comp.debug	100000	8442.659	7187.745	6480.939	7187.745	6480.939	8442.659
+vec	vec:report	alloc.4comp.smp	100000	19.196	17.806	15.439	17.806	15.439	19.196
+vec	vec:report	alloc.8comp.debug	50000	10734.850	9992.727	8669.597	9992.727	8669.597	10734.850
+vec	vec:report	alloc.8comp.smp	50000	20.431	16.458	15.507	16.458	15.507	20.431
+vec	vec:report	dyn16.abs.inplace	25000	84.894	85.786	79.701	84.894	79.701	85.786
+vec	vec:report	dyn16.add.inplace	25000	152.408	69.998	81.125	81.125	69.998	152.408
+vec	vec:report	dyn16.add.value.dbg	25000	7510.536	6795.123	6597.002	6795.123	6597.002	7510.536
+vec	vec:report	dyn16.add.value.smp	25000	98.554	86.494	92.566	92.566	86.494	98.554
+vec	vec:report	dyn16.contains	25000	3.382	3.008	2.820	3.008	2.820	3.382
+vec	vec:report	dyn16.distance	25000	146.361	110.196	100.624	110.196	100.624	146.361
+vec	vec:report	dyn16.div.inplace	25000	552.641	558.788	518.227	552.641	518.227	558.788
+vec	vec:report	dyn16.div.value.dbg	25000	8184.360	8034.621	7027.228	8034.621	7027.228	8184.360
+vec	vec:report	dyn16.div.value.smp	25000	566.517	566.609	530.806	566.517	530.806	566.609
+vec	vec:report	dyn16.hull.value.dbg	25000	7549.414	8545.357	6518.243	7549.414	6518.243	8545.357
+vec	vec:report	dyn16.hull.value.smp	25000	42.631	42.420	39.711	42.420	39.711	42.631
+vec	vec:report	dyn16.intersect.disj.value.dbg	25000	6465.278	6514.318	5515.335	6465.278	5515.335	6514.318
+vec	vec:report	dyn16.intersect.disj.value.smp	25000	22.358	31.504	20.090	22.358	20.090	31.504
+vec	vec:report	dyn16.intersect.value.dbg	25000	6614.799	5872.874	5615.507	5872.874	5615.507	6614.799
+vec	vec:report	dyn16.intersect.value.smp	25000	21.306	18.204	19.895	19.895	18.204	21.306
+vec	vec:report	dyn16.mapResult.sqrt.ood.value.dbg	25000	6697.961	6295.260	5484.079	6295.260	5484.079	6697.961
+vec	vec:report	dyn16.mapResult.sqrt.ood.value.smp	25000	21.189	21.076	19.762	21.076	19.762	21.189
+vec	vec:report	dyn16.mapResult.sqrt.value.dbg	25000	8024.836	7725.892	6735.747	7725.892	6735.747	8024.836
+vec	vec:report	dyn16.mapResult.sqrt.value.smp	25000	311.287	304.641	284.100	304.641	284.100	311.287
+vec	vec:report	dyn16.mul.inplace	25000	163.453	163.719	156.302	163.453	156.302	163.719
+vec	vec:report	dyn16.mul.value.dbg	25000	7833.354	10807.038	6729.867	7833.354	6729.867	10807.038
+vec	vec:report	dyn16.mul.value.smp	25000	330.308	315.057	167.498	315.057	167.498	330.308
+vec	vec:report	dyn16.neg.inplace	25000	23.415	24.056	22.719	23.415	22.719	24.056
+vec	vec:report	dyn16.recip.inplace	25000	552.016	552.958	517.568	552.016	517.568	552.958
+vec	vec:report	dyn16.seed	25000	15.187	13.403	13.236	13.403	13.236	15.187
+vec	vec:report	dyn16.sqr.inplace	25000	94.516	95.469	88.637	94.516	88.637	95.469
+vec	vec:report	dyn16.sub.inplace	25000	148.767	144.588	80.588	144.588	80.588	148.767
+vec	vec:report	dyn16.sub.value.dbg	25000	10820.432	6616.915	6752.131	6752.131	6616.915	10820.432
+vec	vec:report	dyn16.sub.value.smp	25000	173.239	82.428	94.283	94.283	82.428	173.239
+vec	vec:report	dyn2.abs.inplace	200000	16.598	16.494	23.142	16.598	16.494	23.142
+vec	vec:report	dyn2.add.inplace	200000	25.745	17.004	16.620	17.004	16.620	25.745
+vec	vec:report	dyn2.add.value.dbg	200000	9785.203	7282.351	7370.031	7370.031	7282.351	9785.203
+vec	vec:report	dyn2.add.value.smp	200000	52.051	28.139	56.177	52.051	28.139	56.177
+vec	vec:report	dyn2.contains	200000	1.114	1.128	1.337	1.128	1.114	1.337
+vec	vec:report	dyn2.distance	200000	15.131	14.553	17.624	15.131	14.553	17.624
+vec	vec:report	dyn2.div.inplace	200000	64.485	79.066	73.003	73.003	64.485	79.066
+vec	vec:report	dyn2.div.value.dbg	200000	7649.338	7739.739	7189.162	7649.338	7189.162	7739.739
+vec	vec:report	dyn2.div.value.smp	200000	82.637	90.366	131.171	90.366	82.637	131.171
+vec	vec:report	dyn2.hull.value.dbg	200000	7863.461	7562.894	7036.033	7562.894	7036.033	7863.461
+vec	vec:report	dyn2.hull.value.smp	200000	20.491	25.445	22.361	22.361	20.491	25.445
+vec	vec:report	dyn2.intersect.disj.value.dbg	200000	6633.540	6327.035	6151.048	6327.035	6151.048	6633.540
+vec	vec:report	dyn2.intersect.disj.value.smp	200000	21.448	21.560	21.568	21.560	21.448	21.568
+vec	vec:report	dyn2.intersect.value.dbg	200000	7034.626	6391.776	6416.241	6416.241	6391.776	7034.626
+vec	vec:report	dyn2.intersect.value.smp	200000	36.549	23.412	20.723	23.412	20.723	36.549
+vec	vec:report	dyn2.mapResult.sqrt.ood.value.dbg	200000	8331.668	6078.346	6353.120	6353.120	6078.346	8331.668
+vec	vec:report	dyn2.mapResult.sqrt.ood.value.smp	200000	33.780	32.933	36.765	33.780	32.933	36.765
+vec	vec:report	dyn2.mapResult.sqrt.value.dbg	200000	9326.199	7772.063	7395.652	7772.063	7395.652	9326.199
+vec	vec:report	dyn2.mapResult.sqrt.value.smp	200000	54.688	54.628	78.410	54.688	54.628	78.410
+vec	vec:report	dyn2.mul.inplace	200000	24.797	25.930	45.949	25.930	24.797	45.949
+vec	vec:report	dyn2.mul.value.dbg	200000	7981.084	7585.026	7177.734	7585.026	7177.734	7981.084
+vec	vec:report	dyn2.mul.value.smp	200000	38.086	35.775	39.725	38.086	35.775	39.725
+vec	vec:report	dyn2.neg.inplace	200000	8.201	12.141	14.235	12.141	8.201	14.235
+vec	vec:report	dyn2.recip.inplace	200000	75.824	75.700	103.340	75.824	75.700	103.340
+vec	vec:report	dyn2.seed	200000	8.219	8.889	8.880	8.880	8.219	8.889
+vec	vec:report	dyn2.sqr.inplace	200000	18.057	17.715	21.082	18.057	17.715	21.082
+vec	vec:report	dyn2.sub.inplace	200000	17.665	17.381	18.475	17.665	17.381	18.475
+vec	vec:report	dyn2.sub.value.dbg	200000	8552.122	7064.730	6957.477	7064.730	6957.477	8552.122
+vec	vec:report	dyn2.sub.value.smp	200000	55.212	27.107	26.350	27.107	26.350	55.212
+vec	vec:report	dyn3.abs.inplace	133333	28.207	20.587	20.562	20.587	20.562	28.207
+vec	vec:report	dyn3.add.inplace	133333	33.172	21.893	20.619	21.893	20.619	33.172
+vec	vec:report	dyn3.add.value.dbg	133333	6462.829	9046.865	9667.351	9046.865	6462.829	9667.351
+vec	vec:report	dyn3.add.value.smp	133333	26.446	26.078	33.000	26.446	26.078	33.000
+vec	vec:report	dyn3.contains	133333	5.020	1.339	1.295	1.339	1.295	5.020
+vec	vec:report	dyn3.distance	133333	25.630	22.925	22.273	22.925	22.273	25.630
+vec	vec:report	dyn3.div.inplace	133333	98.352	138.815	107.218	107.218	98.352	138.815
+vec	vec:report	dyn3.div.value.dbg	133333	7264.019	10266.104	9874.461	9874.461	7264.019	10266.104
+vec	vec:report	dyn3.div.value.smp	133333	121.761	145.750	122.233	122.233	121.761	145.750
+vec	vec:report	dyn3.hull.value.dbg	133333	7287.274	11148.357	9889.576	9889.576	7287.274	11148.357
+vec	vec:report	dyn3.hull.value.smp	133333	23.003	41.929	24.100	24.100	23.003	41.929
+vec	vec:report	dyn3.intersect.disj.value.dbg	133333	8778.675	9568.510	8757.213	8778.675	8757.213	9568.510
+vec	vec:report	dyn3.intersect.disj.value.smp	133333	30.263	32.130	21.196	30.263	21.196	32.130
+vec	vec:report	dyn3.intersect.value.dbg	133333	8726.440	9799.895	8625.179	8726.440	8625.179	9799.895
+vec	vec:report	dyn3.intersect.value.smp	133333	18.102	32.086	34.981	32.086	18.102	34.981
+vec	vec:report	dyn3.mapResult.sqrt.ood.value.dbg	133333	7370.214	9197.814	8358.967	8358.967	7370.214	9197.814
+vec	vec:report	dyn3.mapResult.sqrt.ood.value.smp	133333	33.753	21.204	20.170	21.204	20.170	33.753
+vec	vec:report	dyn3.mapResult.sqrt.value.dbg	133333	11067.518	10524.200	9442.114	10524.200	9442.114	11067.518
+vec	vec:report	dyn3.mapResult.sqrt.value.smp	133333	104.134	71.679	71.175	71.679	71.175	104.134
+vec	vec:report	dyn3.mul.inplace	133333	34.173	50.500	34.232	34.232	34.173	50.500
+vec	vec:report	dyn3.mul.value.dbg	133333	7701.761	14460.704	9765.836	9765.836	7701.761	14460.704
+vec	vec:report	dyn3.mul.value.smp	133333	43.371	86.798	43.475	43.475	43.371	86.798
+vec	vec:report	dyn3.neg.inplace	133333	13.729	9.685	7.875	9.685	7.875	13.729
+vec	vec:report	dyn3.recip.inplace	133333	141.648	109.770	109.375	109.770	109.375	141.648
+vec	vec:report	dyn3.seed	133333	4.687	4.556	6.044	4.687	4.556	6.044
+vec	vec:report	dyn3.sqr.inplace	133333	28.713	22.844	23.155	23.155	22.844	28.713
+vec	vec:report	dyn3.sub.inplace	133333	21.988	34.481	21.558	21.988	21.558	34.481
+vec	vec:report	dyn3.sub.value.dbg	133333	9921.290	10512.220	9930.315	9930.315	9921.290	10512.220
+vec	vec:report	dyn3.sub.value.smp	133333	60.418	31.030	29.686	31.030	29.686	60.418
+vec	vec:report	dyn32.abs.inplace	20000	302.735	179.082	163.484	179.082	163.484	302.735
+vec	vec:report	dyn32.add.inplace	20000	281.933	297.184	160.409	281.933	160.409	297.184
+vec	vec:report	dyn32.add.value.dbg	20000	10763.785	7583.999	6392.086	7583.999	6392.086	10763.785
+vec	vec:report	dyn32.add.value.smp	20000	306.638	189.914	171.292	189.914	171.292	306.638
+vec	vec:report	dyn32.contains	20000	3.553	3.008	2.760	3.008	2.760	3.553
+vec	vec:report	dyn32.distance	20000	331.764	217.608	202.199	217.608	202.199	331.764
+vec	vec:report	dyn32.div.inplace	20000	1112.490	1100.510	1023.624	1100.510	1023.624	1112.490
+vec	vec:report	dyn32.div.value.dbg	20000	8460.341	8548.471	7548.874	8460.341	7548.874	8548.471
+vec	vec:report	dyn32.div.value.smp	20000	1133.429	1131.541	1031.382	1131.541	1031.382	1133.429
+vec	vec:report	dyn32.hull.value.dbg	20000	7541.540	7345.532	6434.728	7345.532	6434.728	7541.540
+vec	vec:report	dyn32.hull.value.smp	20000	110.361	88.635	78.342	88.635	78.342	110.361
+vec	vec:report	dyn32.intersect.disj.value.dbg	20000	9638.389	6251.472	5572.379	6251.472	5572.379	9638.389
+vec	vec:report	dyn32.intersect.disj.value.smp	20000	33.486	24.026	20.188	24.026	20.188	33.486
+vec	vec:report	dyn32.intersect.value.dbg	20000	6435.362	6347.527	5632.651	6347.527	5632.651	6435.362
+vec	vec:report	dyn32.intersect.value.smp	20000	28.800	21.190	19.237	21.190	19.237	28.800
+vec	vec:report	dyn32.mapResult.sqrt.ood.value.dbg	20000	9701.160	6286.287	5372.177	6286.287	5372.177	9701.160
+vec	vec:report	dyn32.mapResult.sqrt.ood.value.smp	20000	31.870	21.233	19.763	21.233	19.763	31.870
+vec	vec:report	dyn32.mapResult.sqrt.value.dbg	20000	12340.884	7952.157	7213.725	7952.157	7213.725	12340.884
+vec	vec:report	dyn32.mapResult.sqrt.value.smp	20000	885.578	595.569	545.305	595.569	545.305	885.578
+vec	vec:report	dyn32.mul.inplace	20000	326.931	329.160	305.397	326.931	305.397	329.160
+vec	vec:report	dyn32.mul.value.dbg	20000	11422.173	7901.448	6849.684	7901.448	6849.684	11422.173
+vec	vec:report	dyn32.mul.value.smp	20000	604.121	349.804	326.184	349.804	326.184	604.121
+vec	vec:report	dyn32.neg.inplace	20000	91.203	59.194	68.681	68.681	59.194	91.203
+vec	vec:report	dyn32.recip.inplace	20000	1614.901	1102.400	1010.192	1102.400	1010.192	1614.901
+vec	vec:report	dyn32.seed	20000	41.130	25.316	23.030	25.316	23.030	41.130
+vec	vec:report	dyn32.sqr.inplace	20000	339.771	197.428	183.638	197.428	183.638	339.771
+vec	vec:report	dyn32.sub.inplace	20000	282.301	298.531	159.687	282.301	159.687	298.531
+vec	vec:report	dyn32.sub.value.dbg	20000	10966.927	10937.850	6577.647	10937.850	6577.647	10966.927
+vec	vec:report	dyn32.sub.value.smp	20000	314.157	315.294	176.832	314.157	176.832	315.294
+vec	vec:report	dyn4.abs.inplace	100000	25.573	25.644	42.604	25.644	25.573	42.604
+vec	vec:report	dyn4.add.inplace	100000	29.357	26.715	25.929	26.715	25.929	29.357
+vec	vec:report	dyn4.add.value.dbg	100000	7578.217	10232.132	9996.555	9996.555	7578.217	10232.132
+vec	vec:report	dyn4.add.value.smp	100000	35.220	35.095	33.955	35.095	33.955	35.220
+vec	vec:report	dyn4.contains	100000	3.007	3.068	3.098	3.068	3.007	3.098
+vec	vec:report	dyn4.distance	100000	28.845	28.900	42.891	28.900	28.845	42.891
+vec	vec:report	dyn4.div.inplace	100000	144.550	144.420	194.757	144.550	144.420	194.757
+vec	vec:report	dyn4.div.value.dbg	100000	7978.793	10096.157	9670.298	9670.298	7978.793	10096.157
+vec	vec:report	dyn4.div.value.smp	100000	157.101	156.337	152.337	156.337	152.337	157.101
+vec	vec:report	dyn4.hull.value.dbg	100000	6922.311	10268.897	9959.752	9959.752	6922.311	10268.897
+vec	vec:report	dyn4.hull.value.smp	100000	25.487	25.202	46.050	25.487	25.202	46.050
+vec	vec:report	dyn4.intersect.disj.value.dbg	100000	6581.821	9048.615	9604.205	9048.615	6581.821	9604.205
+vec	vec:report	dyn4.intersect.disj.value.smp	100000	21.809	31.593	26.133	26.133	21.809	31.593
+vec	vec:report	dyn4.intersect.value.dbg	100000	6724.907	9191.460	8676.014	8676.014	6724.907	9191.460
+vec	vec:report	dyn4.intersect.value.smp	100000	21.754	21.219	23.524	21.754	21.219	23.524
+vec	vec:report	dyn4.mapResult.sqrt.ood.value.dbg	100000	6966.591	9240.136	12255.995	9240.136	6966.591	12255.995
+vec	vec:report	dyn4.mapResult.sqrt.ood.value.smp	100000	21.734	21.137	31.135	21.734	21.137	31.135
+vec	vec:report	dyn4.mapResult.sqrt.value.dbg	100000	7918.986	10276.386	13814.238	10276.386	7918.986	13814.238
+vec	vec:report	dyn4.mapResult.sqrt.value.smp	100000	89.273	89.023	116.207	89.273	89.023	116.207
+vec	vec:report	dyn4.mul.inplace	100000	44.573	43.708	44.833	44.573	43.708	44.833
+vec	vec:report	dyn4.mul.value.dbg	100000	7957.041	9992.481	9417.718	9417.718	7957.041	9992.481
+vec	vec:report	dyn4.mul.value.smp	100000	48.513	52.819	61.512	52.819	48.513	61.512
+vec	vec:report	dyn4.neg.inplace	100000	9.584	9.523	19.276	9.584	9.523	19.276
+vec	vec:report	dyn4.recip.inplace	100000	143.935	142.699	180.939	143.935	142.699	180.939
+vec	vec:report	dyn4.seed	100000	6.686	6.685	6.498	6.685	6.498	6.686
+vec	vec:report	dyn4.sqr.inplace	100000	28.791	28.753	40.166	28.791	28.753	40.166
+vec	vec:report	dyn4.sub.inplace	100000	24.994	27.337	28.067	27.337	24.994	28.067
+vec	vec:report	dyn4.sub.value.dbg	100000	10374.875	9916.438	9585.418	9916.438	9585.418	10374.875
+vec	vec:report	dyn4.sub.value.smp	100000	65.550	35.150	34.320	35.150	34.320	65.550
+vec	vec:report	dyn8.abs.inplace	50000	44.600	70.996	42.770	44.600	42.770	70.996
+vec	vec:report	dyn8.add.inplace	50000	74.288	43.483	40.890	43.483	40.890	74.288
+vec	vec:report	dyn8.add.value.dbg	50000	10697.102	7100.712	6685.262	7100.712	6685.262	10697.102
+vec	vec:report	dyn8.add.value.smp	50000	55.520	55.360	106.483	55.520	55.360	106.483
+vec	vec:report	dyn8.contains	50000	3.008	2.578	2.820	2.820	2.578	3.008
+vec	vec:report	dyn8.distance	50000	55.152	45.810	50.688	50.688	45.810	55.152
+vec	vec:report	dyn8.div.inplace	50000	277.878	232.380	266.044	266.044	232.380	277.878
+vec	vec:report	dyn8.div.value.dbg	50000	10763.253	6645.446	6922.560	6922.560	6645.446	10763.253
+vec	vec:report	dyn8.div.value.smp	50000	366.389	248.653	305.992	305.992	248.653	366.389
+vec	vec:report	dyn8.hull.value.dbg	50000	9422.978	7492.200	6615.879	7492.200	6615.879	9422.978
+vec	vec:report	dyn8.hull.value.smp	50000	26.879	22.456	27.454	26.879	22.456	27.454
+vec	vec:report	dyn8.intersect.disj.value.dbg	50000	7929.498	8398.391	5574.738	7929.498	5574.738	8398.391
+vec	vec:report	dyn8.intersect.disj.value.smp	50000	27.562	22.726	31.596	27.562	22.726	31.596
+vec	vec:report	dyn8.intersect.value.dbg	50000	8512.029	6429.910	5694.475	6429.910	5694.475	8512.029
+vec	vec:report	dyn8.intersect.value.smp	50000	29.929	21.215	32.004	29.929	21.215	32.004
+vec	vec:report	dyn8.mapResult.sqrt.ood.value.dbg	50000	6175.217	5866.441	5619.265	5866.441	5619.265	6175.217
+vec	vec:report	dyn8.mapResult.sqrt.ood.value.smp	50000	21.540	29.441	28.759	28.759	21.540	29.441
+vec	vec:report	dyn8.mapResult.sqrt.value.dbg	50000	10050.321	10864.452	6854.249	10050.321	6854.249	10864.452
+vec	vec:report	dyn8.mapResult.sqrt.value.smp	50000	164.932	212.641	158.101	164.932	158.101	212.641
+vec	vec:report	dyn8.mul.inplace	50000	157.262	71.876	78.039	78.039	71.876	157.262
+vec	vec:report	dyn8.mul.value.dbg	50000	14441.384	6797.395	6919.499	6919.499	6797.395	14441.384
+vec	vec:report	dyn8.mul.value.smp	50000	182.917	91.874	92.372	92.372	91.874	182.917
+vec	vec:report	dyn8.neg.inplace	50000	15.175	21.285	13.685	15.175	13.685	21.285
+vec	vec:report	dyn8.recip.inplace	50000	281.703	354.180	267.703	281.703	267.703	354.180
+vec	vec:report	dyn8.seed	50000	7.934	8.074	15.077	8.074	7.934	15.077
+vec	vec:report	dyn8.sqr.inplace	50000	50.398	76.018	48.372	50.398	48.372	76.018
+vec	vec:report	dyn8.sub.inplace	50000	75.062	43.653	41.519	43.653	41.519	75.062
+vec	vec:report	dyn8.sub.value.dbg	50000	11962.567	7453.004	6579.427	7453.004	6579.427	11962.567
+vec	vec:report	dyn8.sub.value.smp	50000	101.374	55.302	64.963	64.963	55.302	101.374
+vec	vec:report	vec16.abs	25000	119.402	82.620	123.960	119.402	82.620	123.960
+vec	vec:report	vec16.add	25000	143.099	88.237	138.606	138.606	88.237	143.099
+vec	vec:report	vec16.contains	25000	6.824	5.515	13.208	6.824	5.515	13.208
+vec	vec:report	vec16.distance	25000	137.136	110.905	147.554	137.136	110.905	147.554
+vec	vec:report	vec16.div	25000	685.373	556.452	751.974	685.373	556.452	751.974
+vec	vec:report	vec16.hull	25000	21.132	15.525	22.185	21.132	15.525	22.185
+vec	vec:report	vec16.intersect	25000	9.465	7.615	9.832	9.465	7.615	9.832
+vec	vec:report	vec16.intersect.disjoint	25000	16.736	7.556	10.039	10.039	7.556	16.736
+vec	vec:report	vec16.mapResult.sqrt	25000	426.391	331.707	456.988	426.391	331.707	456.988
+vec	vec:report	vec16.mapResult.sqrt.ood	25000	19.367	24.397	21.061	21.061	19.367	24.397
+vec	vec:report	vec16.mul	25000	294.421	173.424	311.448	294.421	173.424	311.448
+vec	vec:report	vec16.neg	25000	18.904	14.289	22.064	18.904	14.289	22.064
+vec	vec:report	vec16.recip	25000	686.976	558.298	766.858	686.976	558.298	766.858
+vec	vec:report	vec16.sqr	25000	143.689	92.765	147.393	143.689	92.765	147.393
+vec	vec:report	vec16.sub	25000	127.835	84.727	132.675	127.835	84.727	132.675
+vec	vec:report	vec2.abs	200000	15.627	11.653	14.687	14.687	11.653	15.627
+vec	vec:report	vec2.add	200000	16.990	11.444	15.995	15.995	11.444	16.990
+vec	vec:report	vec2.contains	200000	3.149	1.711	3.616	3.149	1.711	3.616
+vec	vec:report	vec2.distance	200000	22.221	16.922	21.615	21.615	16.922	22.221
+vec	vec:report	vec2.div	200000	103.794	69.838	93.370	93.370	69.838	103.794
+vec	vec:report	vec2.hull	200000	2.862	1.837	2.710	2.710	1.837	2.862
+vec	vec:report	vec2.intersect	200000	2.232	1.799	2.138	2.138	1.799	2.232
+vec	vec:report	vec2.intersect.disjoint	200000	3.141	1.734	2.712	2.712	1.734	3.141
+vec	vec:report	vec2.mapResult.sqrt	200000	49.414	38.645	45.413	45.413	38.645	49.414
+vec	vec:report	vec2.mapResult.sqrt.ood	200000	1.626	1.383	1.390	1.390	1.383	1.626
+vec	vec:report	vec2.mul	200000	33.532	20.381	33.264	33.264	20.381	33.532
+vec	vec:report	vec2.neg	200000	2.809	1.696	2.990	2.809	1.696	2.990
+vec	vec:report	vec2.recip	200000	98.810	70.177	95.460	95.460	70.177	98.810
+vec	vec:report	vec2.sqr	200000	17.473	13.241	16.307	16.307	13.241	17.473
+vec	vec:report	vec2.sub	200000	15.724	12.147	11.835	12.147	11.835	15.724
+vec	vec:report	vec3.abs	133333	24.695	15.893	23.193	23.193	15.893	24.695
+vec	vec:report	vec3.add	133333	23.401	15.919	23.151	23.151	15.919	23.401
+vec	vec:report	vec3.contains	133333	1.643	1.337	1.704	1.643	1.337	1.704
+vec	vec:report	vec3.distance	133333	31.623	22.477	31.004	31.004	22.477	31.623
+vec	vec:report	vec3.div	133333	144.589	107.118	142.948	142.948	107.118	144.589
+vec	vec:report	vec3.hull	133333	4.681	2.561	4.133	4.133	2.561	4.681
+vec	vec:report	vec3.intersect	133333	2.199	1.522	3.105	2.199	1.522	3.105
+vec	vec:report	vec3.intersect.disjoint	133333	2.994	1.471	3.002	2.994	1.471	3.002
+vec	vec:report	vec3.mapResult.sqrt	133333	68.371	55.442	67.394	67.394	55.442	68.371
+vec	vec:report	vec3.mapResult.sqrt.ood	133333	1.377	1.337	1.373	1.373	1.337	1.377
+vec	vec:report	vec3.mul	133333	48.534	28.347	48.756	48.534	28.347	48.756
+vec	vec:report	vec3.neg	133333	5.237	2.382	3.506	3.506	2.382	5.237
+vec	vec:report	vec3.recip	133333	146.337	106.317	142.795	142.795	106.317	146.337
+vec	vec:report	vec3.sqr	133333	28.480	18.327	28.030	28.030	18.327	28.480
+vec	vec:report	vec3.sub	133333	23.485	15.740	22.060	22.060	15.740	23.485
+vec	vec:report	vec32.abs	20000	271.247	173.783	278.757	271.247	173.783	278.757
+vec	vec:report	vec32.add	20000	285.534	189.716	328.148	285.534	189.716	328.148
+vec	vec:report	vec32.contains	20000	15.785	12.633	18.764	15.785	12.633	18.764
+vec	vec:report	vec32.distance	20000	289.485	225.552	315.112	289.485	225.552	315.112
+vec	vec:report	vec32.div	20000	1492.344	1153.701	1553.077	1492.344	1153.701	1553.077
+vec	vec:report	vec32.hull	20000	120.429	77.185	122.650	120.429	77.185	122.650
+vec	vec:report	vec32.intersect	20000	48.823	19.410	26.662	26.662	19.410	48.823
+vec	vec:report	vec32.intersect.disjoint	20000	35.517	19.143	40.565	35.517	19.143	40.565
+vec	vec:report	vec32.mapResult.sqrt	20000	829.057	673.634	887.381	829.057	673.634	887.381
+vec	vec:report	vec32.mapResult.sqrt.ood	20000	15.795	11.216	17.967	15.795	11.216	17.967
+vec	vec:report	vec32.mul	20000	639.919	373.196	698.003	639.919	373.196	698.003
+vec	vec:report	vec32.neg	20000	84.755	69.776	85.752	84.755	69.776	85.752
+vec	vec:report	vec32.recip	20000	1464.358	1143.084	1539.672	1464.358	1143.084	1539.672
+vec	vec:report	vec32.sqr	20000	283.570	192.504	311.418	283.570	192.504	311.418
+vec	vec:report	vec32.sub	20000	306.113	190.251	321.489	306.113	190.251	321.489
+vec	vec:report	vec4.abs	100000	32.180	20.612	31.988	31.988	20.612	32.180
+vec	vec:report	vec4.add	100000	31.486	20.725	31.071	31.071	20.725	31.486
+vec	vec:report	vec4.contains	100000	1.569	1.338	2.278	1.569	1.338	2.278
+vec	vec:report	vec4.distance	100000	40.897	30.878	41.456	40.897	30.878	41.456
+vec	vec:report	vec4.div	100000	186.469	138.760	180.010	180.010	138.760	186.469
+vec	vec:report	vec4.hull	100000	6.824	3.100	4.845	4.845	3.100	6.824
+vec	vec:report	vec4.intersect	100000	3.189	1.545	2.208	2.208	1.545	3.189
+vec	vec:report	vec4.intersect.disjoint	100000	2.350	1.484	2.010	2.010	1.484	2.350
+vec	vec:report	vec4.mapResult.sqrt	100000	93.414	72.021	86.785	86.785	72.021	93.414
+vec	vec:report	vec4.mapResult.sqrt.ood	100000	1.468	1.337	1.526	1.468	1.337	1.526
+vec	vec:report	vec4.mul	100000	64.953	36.895	65.928	64.953	36.895	65.928
+vec	vec:report	vec4.neg	100000	5.291	3.275	6.688	5.291	3.275	6.688
+vec	vec:report	vec4.recip	100000	191.124	141.443	187.689	187.689	141.443	191.124
+vec	vec:report	vec4.sqr	100000	33.874	22.732	33.792	33.792	22.732	33.874
+vec	vec:report	vec4.sub	100000	33.181	19.967	32.476	32.476	19.967	33.181
+vec	vec:report	vec8.abs	50000	59.034	42.511	63.505	59.034	42.511	63.505
+vec	vec:report	vec8.add	50000	61.642	36.310	65.165	61.642	36.310	65.165
+vec	vec:report	vec8.contains	50000	1.856	1.337	2.223	1.856	1.337	2.223
+vec	vec:report	vec8.distance	50000	71.019	55.084	73.102	71.019	55.084	73.102
+vec	vec:report	vec8.div	50000	344.481	275.643	371.740	344.481	275.643	371.740
+vec	vec:report	vec8.hull	50000	9.008	6.492	8.474	8.474	6.492	9.008
+vec	vec:report	vec8.intersect	50000	2.171	1.547	2.911	2.171	1.547	2.911
+vec	vec:report	vec8.intersect.disjoint	50000	2.368	1.486	2.845	2.368	1.486	2.845
+vec	vec:report	vec8.mapResult.sqrt	50000	186.170	149.552	202.123	186.170	149.552	202.123
+vec	vec:report	vec8.mapResult.sqrt.ood	50000	2.749	1.337	3.150	2.749	1.337	3.150
+vec	vec:report	vec8.mul	50000	141.705	73.204	145.735	141.705	73.204	145.735
+vec	vec:report	vec8.neg	50000	9.652	6.413	11.933	9.652	6.413	11.933
+vec	vec:report	vec8.recip	50000	343.187	280.546	368.619	343.187	280.546	368.619
+vec	vec:report	vec8.sqr	50000	66.983	49.992	73.867	66.983	49.992	73.867
+vec	vec:report	vec8.sub	50000	63.395	35.558	64.898	63.395	35.558	64.898
+lp	lp:allocator=dbg	add 64 rows x 8 vars	2000	125723.563	115956.160	111308.519	115956.160	111308.519	125723.563
+lp	lp:allocator=dbg	add 8 rows x 4 vars	20000	36745.572	43683.348	32422.285	36745.572	32422.285	43683.348
+lp	lp:allocator=dbg	bounds k=0, mixed 14x2	500	94209.946	92331.980	87679.390	92331.980	87679.390	94209.946
+lp	lp:allocator=dbg	bounds k=1, straddling 11x2	100	109795.520	106122.000	106400.980	106400.980	106122.000	109795.520
+lp	lp:allocator=dbg	box, mixed 14x2	200	141528.630	140873.360	130710.545	140873.360	130710.545	141528.630
+lp	lp:allocator=dbg	box, straddling 11x2	50	173058.440	169050.560	168301.580	169050.560	168301.580	173058.440
+lp	lp:allocator=dbg	build 6 rows x 4 vars (control)	20000	34587.147	35206.215	32017.063	34587.147	32017.063	35206.215
+lp	lp:allocator=dbg	eliminate k=0, 6 rows x 4 vars	20000	51891.154	51968.554	48695.829	51891.154	48695.829	51968.554
+lp	lp:allocator=dbg	eliminateAll ascending, heuristic 4v	100	35818.580	35357.830	34198.830	35357.830	34198.830	35818.580
+lp	lp:allocator=dbg	eliminateAll chosen, heuristic 4v	2000	34881.416	34884.092	33294.327	34881.416	33294.327	34884.092
+lp	lp:allocator=dbg	eliminateAll chosen, mixed 14x2	200	176701.670	174596.915	177545.545	176701.670	174596.915	177545.545
+lp	lp:allocator=dbg	eliminateInOrderOfChoice, mixed 14x2	500	172288.654	172231.692	163441.022	172231.692	163441.022	172288.654
+lp	lp:allocator=dbg	eliminationOrder, mixed 14x2	500	171703.390	170675.370	160679.366	170675.370	160679.366	171703.390
+lp	lp:allocator=smp	add 64 rows x 8 vars	2000	9081.645	8911.628	8816.110	8911.628	8816.110	9081.645
+lp	lp:allocator=smp	add 8 rows x 4 vars	20000	746.454	716.986	732.520	732.520	716.986	746.454
+lp	lp:allocator=smp	bounds k=0, mixed 14x2	500	12220.722	11676.274	11570.338	11676.274	11570.338	12220.722
+lp	lp:allocator=smp	bounds k=1, straddling 11x2	100	36989.700	35224.660	34949.470	35224.660	34949.470	36989.700
+lp	lp:allocator=smp	box, mixed 14x2	200	24007.450	22543.185	23030.425	23030.425	22543.185	24007.450
+lp	lp:allocator=smp	box, straddling 11x2	50	70201.560	69914.960	69329.960	69914.960	69329.960	70201.560
+lp	lp:allocator=smp	build 6 rows x 4 vars (control)	20000	591.341	585.203	581.486	585.203	581.486	591.341
+lp	lp:allocator=smp	eliminate k=0, 6 rows x 4 vars	20000	2960.345	2940.073	2853.537	2940.073	2853.537	2960.345
+lp	lp:allocator=smp	eliminateAll ascending, heuristic 4v	100	2775.860	2412.200	2340.920	2412.200	2340.920	2775.860
+lp	lp:allocator=smp	eliminateAll chosen, heuristic 4v	2000	571.928	455.346	452.575	455.346	452.575	571.928
+lp	lp:allocator=smp	eliminateAll chosen, mixed 14x2	200	73492.960	71232.010	71710.000	71710.000	71232.010	73492.960
+lp	lp:allocator=smp	eliminateInOrderOfChoice, mixed 14x2	500	69335.928	65487.906	68275.516	68275.516	65487.906	69335.928
+lp	lp:allocator=smp	eliminationOrder, mixed 14x2	500	70178.284	69052.904	68640.768	69052.904	68640.768	70178.284
