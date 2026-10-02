@@ -40,6 +40,11 @@ growth figures come from throwaway programs that read the sign buckets directly,
 and section 3 step 1 gives the routine to rebuild them. Nothing here is a
 guess.
 
+The later **2026-10-02 full compilation sweep** is recorded separately below:
+all 53 published targets compiled the existing library, 11 test binaries and
+NaN probe in Debug. No numerical implementation or test body needed a change.
+It adds compilation coverage, not runtime soundness evidence.
+
 **The gate wiring in section 2 is stated as interface rather than as a run, with
 dated exceptions named below.** How the tools are installed, where the gate
 resolves them and what a failed install leaves behind is written in the present
@@ -1398,6 +1403,75 @@ Four required runtime passes, 1,392 runtime tests total, overall `partial`,
 reader passed locally on that immutable summary. This is not a remote GitHub
 Actions run or a `vf` engine run. The empty `HOME` remained empty.
 
+
+### Full 53-target compilation — 2026-10-02
+
+Both the unchanged-source baseline and the permanent compilation route built
+every target in the pinned Zig 0.16.0 Tier 1/2 table. The baseline used a private
+copy with only a temporary compile-step adapter; all production sources and
+test bodies were unchanged. It exited 0 in 1626.369 s. No portability fix or
+target exclusion was required.
+
+The permanent route is `zig build test-compile` and
+`cross-test --profile ./cross-compile.profile.sh`. It compiles the same 11 test
+binaries as `test`, the Debug NaN probe and the installed library, without any
+run step. The library artifact is the harness's output marker; the test
+dependencies are what force code generation of the exercised public API.
+Benchmarks and foreign consumer fixtures are outside this compilation sweep;
+the host consumer remains in the normal runtime `test` step.
+
+```sh
+ZIG=/home/tmp2/$USER/zigbin/zig \
+  "$QUALITY_TOOLS_PREFIX/bin/cross-test" \
+  --profile ./cross-compile.profile.sh \
+  --jobs 4 --build-jobs 1 --build-timeout 900 \
+  --output /home/tmp2/$USER/zig-interval/compile-out
+```
+
+The profile derives all targets from the harness's published table, validates
+the compiler reports 0.16.0 and uses the supported artifact-mode `skip` policy.
+An inherited `TARGETS` subset cannot narrow the default sweep; explicit CLI
+`--targets` still works. The recorded run also started with
+`CROSS_REQUIRE_RUNNERS=1` in the environment, overridden by this compile-only
+profile. No runtime is represented as having passed.
+
+**Final immutable run:** `20261002-134004-50177-12744`, exit **0** in
+**1155.205 s**. Counts: `pass=0`, `fail=0`, `build_only=53`, `partial=0`;
+overall `build_only`. Every build log reports 11 Debug test compilations,
+one Debug NaN-probe compilation and a successfully installed library:
+**583 test binaries, 53 probes and 53 libraries**, with no test execution.
+
+| Platform | Compiled targets |
+| --- | --- |
+| Linux | 20 |
+| FreeBSD | 6 |
+| NetBSD | 9 |
+| OpenBSD | 9 |
+| Windows | 4 |
+| macOS | 2 |
+| Mac Catalyst | 2 |
+| WASI | 1 |
+| **Total** | **53** |
+
+The matrix includes 32-bit and 64-bit architectures and both byte orders.
+Only Debug was swept across all 53; this is not an optimize-mode product or
+runtime soundness proof. The profile validates the compiler directly;
+artifact-mode summary JSON itself leaves `zig_version` empty.
+
+The actual native `test-compile` command passed with no run steps. Native
+Debug and ReleaseSafe each passed **348/348 tests**, including **1,886 corpus
+rows, 0 failures, 427 exactly representable** and the real external consumers'
+**31 README checks**. All production and test-source hashes still match the
+unchanged-source baseline.
+
+The installed expanded gate then passed, exit **0** in **250.885 s**.
+Immutable runtime cross run `gate-20261002-140118-56402-13737` still executes
+**348 tests** on each of the four required Linux targets; Windows is
+`build_only/runtime_unavailable`, overall `partial`, `fail=0`. `zbc` analyzed
+all 32 files with 0 failed files, 0 errors, 3 standing advisory warnings and
+12 unresolved-import lookups. Both shell profiles parsed, `zig build docs`
+passed and LSP reported no build-graph issues. The isolated `HOME` remained
+empty. Remote Actions, `vf` execution and optional coverage were not run.
 
 ### Cross-target verification — 2026-10-01, and the 300-second timeout that reads like a defect
 

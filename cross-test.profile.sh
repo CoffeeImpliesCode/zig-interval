@@ -202,6 +202,12 @@ CROSS_REQUIRED_RUN_TARGETS='x86_64-linux aarch64-linux riscv64-linux s390x-linux
 #                       aarch64_be-linux powerpc64-linux mips64-linux ...' \
 #               --output /home/tmp2/$USER/cross-out
 #
+# For compilation-only coverage of all 53, use the separate profile instead:
+#   cross-test --profile ./cross-compile.profile.sh \
+#               --output /home/tmp2/$USER/compile-out
+# That builds the library, all 11 test binaries and the NaN probe through
+# `test-compile`, executes none of them and reports build_only=53.
+#
 # `cross-test --no-profile --list` prints every platform in the table with the
 # runner detected for it on this host, and is where those names come from. Note
 # what `--no-profile` costs: it drops this file, so the 900 s budget, the pinned

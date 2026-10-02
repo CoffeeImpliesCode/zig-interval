@@ -1204,6 +1204,7 @@ unsatisfiable.
 | --- | --- |
 | `install` (default) | Installs the library artifact. |
 | `test` | Runs the interval test suite and the external consumer fixture. |
+| `test-compile` | Compiles the library, all 11 test binaries and the NaN probe without running tests or the host consumer. |
 | `consumer` | Builds and runs the external consumer fixture on its own. |
 | `docs` | Emits API documentation. |
 | `bench` | Runs all three benchmarks — scalar, vector and Fourier-Motzkin — in parallel. |
@@ -1936,8 +1937,8 @@ local, writable and owned by the caller, for the reasons the scratch section
 gives: on a managed cluster host that means under `/home/tmp{,2}`, and on a
 runner it means any owned, writable, local path — `/tmp` included.
 `suite-timeout` is 3600 s because the cross section builds and runs the whole
-test step for four foreign targets, and `enforce: true` turns a non-zero exit
-into a red gate rather than a report.
+test step for the four required Linux targets, and `enforce: true` turns a
+non-zero exit into a red gate rather than a report.
 
 For a focused native test run, without the gate and without its analysers:
 
@@ -1947,8 +1948,8 @@ zig build test
 
 ### Cross-target verification
 
-`cross-test.profile.sh` is the whole target contract, and it is worth reading
-before quoting a cross-target table as this project's coverage. Five targets:
+`cross-test.profile.sh` is the runtime coverage contract, and it is worth reading
+before quoting runtime results. Five targets:
 `x86_64-linux` natively, `aarch64-linux`, `riscv64-linux` and `s390x-linux` under
 QEMU user-mode, and `x86_64-windows` **build only**. The profile raises the
 execution budget to 900 seconds; two targets run at a time with one job per
@@ -2006,6 +2007,44 @@ not merely importable inside this repository. The fixture asserts the
 enclosure property directly: it checks that results are strictly wider than the
 machine's own round-to-nearest answer while still containing the exact real
 value, which is the only claim the rest of the library rests on.
+
+#### Compilation across all 53 targets
+
+The separate [`cross-compile.profile.sh`](cross-compile.profile.sh) selects the
+pinned harness's entire Zig 0.16.0 support table and marks every runner `skip`.
+It validates the selected compiler version and does not copy or narrow the
+published target list. The default sweep ignores an inherited `TARGETS` subset;
+an explicit `--targets` option still permits a diagnostic subset.
+
+```sh
+ZIG=/home/tmp2/$USER/zigbin/zig \
+  "$QUALITY_TOOLS_PREFIX/bin/cross-test" \
+  --profile ./cross-compile.profile.sh \
+  --jobs 4 --build-jobs 1 --build-timeout 900 \
+  --output /home/tmp2/$USER/zig-interval/compile-out
+```
+
+Each target runs `zig build test-compile`: the same **11 test binaries** that
+contain the 348-test suite, the Debug NaN probe and the installed library.
+The test dependencies force analysis and code generation of the exercised
+public operations; a library archive alone would not establish that because
+Zig analyzes declarations lazily. No tests, benchmarks or host consumer execute.
+Benchmark executables and foreign consumer fixtures are not part of this sweep.
+
+**Verified on 2026-10-02:** all **53 targets compiled in Debug**, with
+**583 test binaries, 53 NaN probes and 53 libraries**. Immutable run
+`20261002-134004-50177-12744`, exit 0:
+
+```text
+status=build_only pass=0 fail=0 build_only=53 partial=0
+```
+
+This includes 32-bit and 64-bit targets, both byte orders, Linux, FreeBSD,
+NetBSD, OpenBSD, Windows, macOS, Mac Catalyst and WASI. It is compilation
+coverage, not 53 runtime passes or a target-by-optimize-mode matrix.
+The normal gate retains its four required Linux runtime passes and Windows
+compile-only row.
+
 
 ## License
 
