@@ -1,4 +1,4 @@
-# date=2026-10-02 host=buildhost compiler=0.16.0 baseline_code=7b472aee baseline_lp_sha256=40868f63e901c04204234e9f28eb5d832f44a5817ecb2ad484213835cfa5fb23 candidate_lp_sha256=606fa7f15a55ccf0410beffefc23aeea9757459f7191e87167f498f3a5f0551a
+# date=2026-10-02 host=shared compiler=0.16.0 baseline_code=7b472aee baseline_lp_sha256=40868f63e901c04204234e9f28eb5d832f44a5817ecb2ad484213835cfa5fb23 candidate_lp_sha256=606fa7f15a55ccf0410beffefc23aeea9757459f7191e87167f498f3a5f0551a
 # outcome=REJECTED NO_CLAIM; three counterbalanced sequential pairs AB/BA/AB; each row minof7, warmup1; shared unpinned host; original solver restored.
 variant	program	group	operation	iters	run1_ns	run2_ns	run3_ns	median_ns	min_ns	max_ns
 baseline	lp	lp:allocator=dbg	add 64 rows x 8 vars	2000	355439.329	192869.737	197011.137	197011.137	192869.737	355439.329

@@ -309,7 +309,8 @@ table read FIXED. **Section 3's features are all done and section 4's
 optimisations are all resolved** — one answered in the negative, two landed, two
 refused — so no entry in this document is a task. Final verification passed:
 all four native modes, the MPFR corpus, external consumers, all benchmarks,
-docs, LSP diagnostics and the installed expanded gate; see the handover's final receipt.
+docs, LSP diagnostics and the installed expanded gate; see the handover's final
+Wave 3 verification section.
 
 ### P1 — DONE: `div` at infinite endpoints (D1)
 
@@ -749,28 +750,28 @@ speedup is claimed. **This section has no open entry left.**
 **Cheap-row noise is capture-specific.** The contended 2026-09-30 capture moved
 by up to 44% between two runs of the same binary. The current three-run capture
 is wider: max/min spread is 66.2% on `interval.mul` and 287.6% on `dyn3.contains`.
-Nothing under about 10 ns/op is claimable from a single pair of runs on this host.
-Use repeated measurements and each current row's range; cite every figure with
-its date and mode.
+Nothing under about 10 ns/op is claimable from a single pair of runs on a
+shared host. Use repeated measurements and each current row's range; cite every
+figure with its date and mode.
 
-**The current baseline is 2026-10-02; the handover retains historical 2026-09-30 tables.**
+**The current baseline is 2026-10-02; the handover's 2026-09-30 capture is the historical one.**
 `docs/performance-baseline-2026-10-02.tsv` carries **all 362 timed rows** — 60
 scalar, 276 vector, 26 LP, the LP 26 being the 13-body catalog run twice, once
 per heap — each row with the three runs' `ns/op` beside their median, minimum and
-maximum. It was captured at revision `7b472aee` on host `buildhost` with compiler
+maximum. It was captured at revision `7b472aee` on a shared host with compiler
 0.16.0, root and interval both `ReleaseFast`, warmup 1 and reps 7, the LP row
 budget at 20,000, as three sequential rounds in the order scalar, vector, LP,
 each program's output to an ordinary file. The host is shared and unpinned, so
 this is a baseline to compare a later revision against and **not** a claim that
-any row is a stable cost. Historical `ns/op` tables in `docs/performance-handover.md`
-remain the 2026-09-30 capture; its separately dated Wave 2 tables summarise this
-current baseline. Where the dated captures differ, cite the TSV and its header
-for current measurements, without treating that difference as a speedup.
+any row is a stable cost. The earlier capture in `docs/performance-handover.md`
+is the 2026-09-30 one and stays historical; its separately dated Wave 2 section
+summarises this current baseline. Where the dated captures differ, cite the TSV
+and its header for current measurements, without treating that difference as a
+speedup.
 
 The same capture is written up in `docs/performance-handover.md` under its own
-heading, **Wave 2 — the current three-run baseline, 2026-10-02**, which is where
-the recipe, the three command wall times per program and the 13 LP cases in full
-are.
+heading, **Wave 2 — the current three-run baseline, 2026-10-02**, which is
+where the recipe and the 13 LP cases in full are.
 
 **The baseline is proved equal, not merely re-taken, and that is what makes it
 usable as the reference for the next change.** All nine program runs exited 0, and
@@ -942,7 +943,7 @@ tests and computed nothing, and every one of those conditions held in the end.
    `allocator=smp`, improvement in all three pairs, and non-overlapping ranges.
    Otherwise reject. Use that row's fresh paired variance, not historical scalar noise.
 
-**What the trial ran.** Same host, compiler and mode as the baseline: `buildhost`,
+**What the trial ran.** Same shared host, compiler and mode as the baseline:
 compiler 0.16.0, root and `interval` both `ReleaseFast`, the complete unchanged
 LP program with its iterations and seeds untouched, minimum of seven internal
 repetitions, warmup 1, LP row budget 20,000, ordinary-file stdout and stderr,

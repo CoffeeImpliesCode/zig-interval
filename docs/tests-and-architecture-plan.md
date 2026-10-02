@@ -111,20 +111,20 @@ cache directories (`build.zig:159-168`) had been justified by a claimed
 `Cache.Manifest.hit` locks ONE manifest at a time, with
 `lock_nonblocking = want_shared_lock`, which defaults to true, so a parent and
 a nested build can share one global cache. Dropping both flags was measured: the
-step finishes in the same ~43 s and prints the same `consumer ok: 29 checks`.
+step finishes in the same time and prints the same `consumer ok: 29 checks`.
 The flags are **kept**, with the true reason in their place: at that time both
 paths were relative to the working directory set on the child, so the cache
-output landed in `fixture/.zig-cache` — 163 MB when the comment was written —
-and went away with the fixture, instead of joining the machine-wide cache this
-build shares with every other project. One consequence worth knowing, and the
-reason the wiring no longer reads that way: `fixture` is one of the six entries
-in `build.zig.zon`'s `.paths`, and that entry is recursive, so `zig fetch` or a
-package hash walked that cache too. `.gitignore` excluded it from version
-control, and it had to be cleaned before hashing a package. **Superseded since
-by `build.zig`'s `consumerCacheRoot`, which names both cache directories
-absolutely** — a per-user directory on a local volume where a host has one, the
-parent build's own local cache root where it does not, with the two directory
-names appended under it — so a gigabyte of generated compiler output no longer
+output landed in `fixture/.zig-cache` and went away with the fixture, instead
+of joining the machine-wide cache this build shares with every other project.
+One consequence worth knowing, and the reason the wiring no longer reads that
+way: `fixture` is one of the six entries in `build.zig.zon`'s `.paths`, and
+that entry is recursive, so `zig fetch` or a package hash walked that cache
+too. `.gitignore` excluded it from version control, and it had to be cleaned
+before hashing a package. **Superseded since by `build.zig`'s
+`consumerCacheRoot`, which names both cache directories absolutely** — the
+`ZIG_INTERVAL_CONSUMER_CACHE` override where it is set, and the cache directory
+this build was given otherwise, with the two directory names appended under
+whichever root wins — so a gigabyte of generated compiler output no longer
 lands inside the fixture at all, which is what that `.paths` recursion was
 costing. **The install output is a separate question and did not move:** the
 child gets no `--prefix`, so its binaries still land in `fixture/zig-out` — the
@@ -1843,22 +1843,22 @@ in the oracle are guards, not obsolete reproducers, and must not be deleted;
 
 ---
 
-## 6. The measurement constraint on this host, for whoever measures anything
+## 6. The measurement constraint, for whoever measures anything
 
-**This host is shared, and other users run training jobs on it.** The snapshot
-taken while this file was written: **72 cores**, **7 logged-in users**, load
-average **28.51 / 67.98 / 103.01** over 1 / 5 / 15 minutes, **1007 GB** total
-RAM with **354 GB** in use. Those numbers will have moved; the property they
-record will not. A measurement taken here measures a contended machine unless
-the contention is controlled.
+**A host is shared, and other users run heavy work on it.** The core count,
+the load average, the memory in use and the number of logged-in users at the
+moment this file was written are properties of one machine at one moment: they
+have moved every time anyone has looked, and none of them is recorded here. The
+property they record is the one that matters. A measurement taken on a
+contended host measures a contended host unless the contention is controlled.
 
-**Delegated measurement must be ONE process and ONE verification mode.** Both
+**Measurement must be ONE process and ONE verification mode.** Both
 rules are about concurrency, not about accuracy of effort:
 
 - **One process.** `zig build bench` depends on all three benchmark run steps
-  (`build.zig:265-271`), so it runs three benchmark executables at once. Add a
-  delegated agent compiling or benchmarking and you have six-plus compilers and
-  benchmark loops against a host that already averages dozens of runnable tasks.
+  (`build.zig:265-271`), so it runs three benchmark executables at once. Add
+  anything else that compiles or benchmarks concurrently and you have six-plus
+  compilers and benchmark loops against a host already carrying other work.
   The measured cost is not a wash: the noise floor in
   `docs/performance-handover.md` is **+33.6 %** on `add`, **+36.5 %** on
   `expand` and **+43.9 %** on `mul` between two runs of the SAME BINARY with
@@ -1866,7 +1866,7 @@ rules are about concurrency, not about accuracy of effort:
   on the contention.
 - **One verification mode.** `zig build test` in four modes is four full
   compilations, each ending in a nested `zig build run` for the fixture
-  (`build.zig:159-172`, ~43 s each). Run all four concurrently and the wall
+  (`build.zig:159-172`). Run all four concurrently and the wall
   clock is the slowest plus the noise of the others. They also answer different
   questions: Debug is where the `lo <= hi` assertions and the NaN probe live,
   ReleaseFast elides them. Pick the mode the question is about.
@@ -1885,13 +1885,14 @@ a figure is never quoted from the wrong one. The **current** baseline is
 vector, 26 LP — each with three runs' `ns/op` and their median, minimum and
 maximum, at revision `7b472aee`, `ReleaseFast` throughout, warmup 1 and reps 7, LP
 row budget 20,000, three sequential rounds captured to ordinary files on a shared
-host. The tables in `docs/performance-handover.md` are the earlier **2026-09-30**
-capture and are still that capture: cite one or the other by name, never a figure
-from one as though it came from the other, and never a 2026-09-30 number as
-current. The 2026-10-02 capture and the LP profile are written up under their own
-headings in that file — **Wave 2 — the current three-run baseline, 2026-10-02** and
-**Wave 2 — the LP profile, 2026-10-02** — so "the handover's measurements" means
-the dated section, not whatever table a reader lands on first. Re-running a
+host. The earlier **2026-09-30** capture is the one recorded in
+`docs/performance-handover.md`, and it stays that capture: cite one or the other
+by name, never a figure from one as though it came from the other, and never a
+2026-09-30 number as current. The 2026-10-02 capture and the LP profile are
+written up under their own headings in that file — **Wave 2 — the current
+three-run baseline, 2026-10-02** and **Wave 2 — the LP profile, 2026-10-02** — so
+"the handover's measurements" means the dated section, not whatever a reader
+lands on first. Re-running a
 benchmark to "confirm" a number that is already recorded
 costs a contended host, produces a number that differs for reasons that have
 nothing to do with the code, and then invites a later session to treat the
@@ -1914,9 +1915,10 @@ two of its three predeclared timing conditions.
 measurement on an otherwise idle machine, or take three runs and compare minima,
 as the noise-floor section of `docs/performance-handover.md` says. The cheap
 rows are where optimisation is most tempting and where the evidence is weakest.
-And **never run an LP benchmark without a row budget** — 329 GB was observed in
-one `zig build bench` on this host, which has 1 TB and other users on it. A
-larger system does not fail; it takes the machine with it.
+And **never run an LP benchmark without a row budget** — an unbudgeted run has
+been observed to exhaust a shared host's memory outright. A larger system does
+not fail; it takes the machine with it, and on a shared host that includes
+everybody else's work.
 
 **What this means for the work in this file.** Sections 2 through 5 are
 correctness and structure work. None of it needs a benchmark, and **none of it

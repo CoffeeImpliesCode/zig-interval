@@ -1,4 +1,4 @@
-# date=2026-10-02 host=buildhost compiler=0.16.0 revision=7b472aee root_optimize=ReleaseFast interval_optimize=ReleaseFast
+# date=2026-10-02 host=shared compiler=0.16.0 revision=7b472aee root_optimize=ReleaseFast interval_optimize=ReleaseFast
 # Three complete sequential program runs; each row is minimum of7 internal repetitions, warmup1; unpinned shared host. No speedup claim.
 program	group	operation	iters	run1_ns	run2_ns	run3_ns	median_ns	min_ns	max_ns
 scalar	scalar:Interval algebraic operations	interval.abs	1000000	7.315	5.058	4.831	5.058	4.831	7.315
