@@ -16,10 +16,9 @@
 # Usage:  ./scripts/build_mpfr.sh && "$SCRATCH_ROOT/mpfr/gen_corpus" > tests/corpus/elementary.txt
 #
 # Scratch space (MPFR source, install prefix, the generator binary; a few hundred
-# MB) goes under a sanctioned large volume, never local /tmp. See scripts/scratch.sh
-# for which locations qualify: /vol/tmp and /vol/tmp2 exist on every buildhost but are
-# NFS, and this project cannot build on NFS (renameat2 EINVAL), so the local volumes
-# /home/tmp2 and /home/tmp are the sanctioned ones that also work.
+# MB) goes under the large local volume scripts/scratch.sh resolves, never local
+# /tmp and never an NFS volume - this project cannot build on NFS (renameat2
+# EINVAL); scripts/scratch.sh says where and why.
 set -euo pipefail
 
 # Resolve the script's own directory up front, before anything moves the shell.

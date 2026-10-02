@@ -278,26 +278,26 @@ pub fn build(b: *std.Build) void {
     // manifest file at a time, with `lock_nonblocking = want_shared_lock`,
     // which defaults to true and downgrades to a shared lock for the rest
     // of the build, so a parent and a nested build can share one global
-    // cache. Measured on 0.16.0, with both flags dropped and the nested
-    // build left on the parent's default global cache, this step finishes
-    // in about the same time and prints the same `readme examples ok: 31
-    // checks`. The flags are kept for containment, which is the real
-    // reason: the nested build's artifacts must not join the machine-wide
-    // cache this build shares with every other project.
+    // cache. Dropping both flags and leaving the nested build on the
+    // parent's default global cache finishes in about the same time and
+    // reports the same result. The flags are kept for containment, which
+    // is the real reason: the nested build's artifacts must not join the
+    // machine-wide cache this build shares with every other project, and
+    // must not disappear when this build's output is removed.
     //
     // Containment used to be achieved by RELATIVE paths - `.zig-cache` and
     // `.zig-cache/global` - resolved against the working directory set on
     // the child, so the fixture's output landed in `fixture/.zig-cache` and
-    // "went away with it". That put build artifacts inside the repository on
-    // a shared host, and the containment estimate above was wrong by more
-    // than an order of magnitude: the directory reached 1014 MB, not ~50 MB.
-    // A gigabyte of generated `builtin.zig` inside the working tree is also
-    // what the fmt and lint steps used to walk, which is why they reported
-    // five unformatted files and a hundred-odd lint findings that were all
-    // copies of the compiler's own output.
+    // "went away with it". That put build artifacts inside the repository,
+    // and the containment estimate above was wrong by more than an order
+    // of magnitude. A large generated `builtin.zig` inside the working
+    // tree is also what the fmt and lint steps used to walk, which is why
+    // they reported unformatted files and lint findings that were all
+    // copies of the compiler's own output rather than problems in this
+    // repository's sources.
     //
-    // So: absolute paths, outside the repository wherever this host has a
-    // local volume to put them, chosen by `consumerCacheRoot`. The
+    // So: absolute paths, outside the repository wherever the machine has
+    // local storage to put them, chosen by `consumerCacheRoot`. The
     // containment property is unchanged and now actually holds, because
     // nothing the nested build writes to a CACHE lands in `fixture/` or in
     // any other directory `build.zig.zon`'s `.paths` walks.
@@ -306,16 +306,16 @@ pub fn build(b: *std.Build) void {
     // no `--prefix` is passed and this step's cwd is `fixture/`, so it is
     // `fixture/zig-out` - two small binaries, ignored by git, and covered by
     // the recursive `fixture` entry in `.paths` exactly as it was before.
-    // The gigabyte that made that entry a problem, described above, was
-    // cache output, and cache output is what this moved.
+    // The bulk of the output that made that entry a problem, described
+    // above, was cache output, and cache output is what this moved.
     //
-    // Set ZIG_INTERVAL_CONSUMER_CACHE to choose the location on a machine with
-    // none of the defaults. Where there are none - a CI runner with no
-    // /home/tmp* and no --cache-dir - that helper reuses the cache directory
-    // THIS build was given, which is inside the tree. That is the point of
-    // it: the nested caches then land beside the parent's own output in a
-    // directory that is already ignored, instead of in a storage location
-    // this build invented for itself.
+    // Set ZIG_INTERVAL_CONSUMER_CACHE to choose the location. Where that
+    // is not set, the helper reuses the cache directory THIS build was
+    // given, which on a plain CI runner with no --cache-dir is inside the
+    // tree. That is the point of it: the nested caches then land beside
+    // the parent's own output in a directory that is already ignored,
+    // instead of in a storage location this build invented for itself at
+    // the last moment.
     const consumer_root = consumerCacheRoot(b);
     const run_consumer = b.addSystemCommand(&.{
         "zig",
@@ -360,9 +360,9 @@ pub fn build(b: *std.Build) void {
     // the mode. The rule is that a compilation is compiled in the mode of
     // its ROOT module: a module's own `.optimize` does not choose the
     // machine code its files are compiled into, it only decides what
-    // `builtin.mode` reads inside that module. Measured on 0.16.0 with a
-    // root in one mode importing a module declared in another, a root at
-    // ReleaseFast emits no safety check for an imported module that
+    // `builtin.mode` reads inside that module. With a root in one mode
+    // importing a module declared in another, a root at ReleaseFast emits
+    // no safety check for an imported module that
     // declared Debug or ReleaseSafe, and a root at Debug or ReleaseSafe
     // emits one, and panics, for an imported module that declared
     // ReleaseFast. Each of the three executables below is its own
@@ -471,43 +471,36 @@ pub fn build(b: *std.Build) void {
 /// Always absolute. The caller appends the two directory names, which is why
 /// this returns a root and not a complete path.
 ///
-/// Three candidates, in order:
+/// Two candidates, in order:
 ///
 /// 1. `ZIG_INTERVAL_CONSUMER_CACHE`, if it is set to something.
-/// 2. The per-user local volumes this project already uses for scratch:
-///    `/home/tmp2/$USER/zig-interval`, then `/home/tmp/$USER/zig-interval`,
-///    the first whose per-user directory exists and is readable, writable and
-///    traversable.
-/// 3. The cache directory THIS build was itself given - `--cache-dir`, or
+/// 2. The cache directory THIS build was itself given - `--cache-dir`, or
 ///    `.zig-cache` - resolved to an absolute path.
 ///
-/// Two of the three can be relative, and the absolute rule is why this
-/// function exists at all: the nested build runs with its working directory
-/// set to `fixture/`, so a relative root resolves against the fixture and not
-/// against the repository root, which puts both caches under `fixture/` -
-/// and `build.zig.zon`'s `.paths` includes that directory, recursively.
+/// Either can be relative, and the absolute rule is why this function exists
+/// at all: the nested build runs with its working directory set to `fixture/`,
+/// so a relative root resolves against the fixture and not against the
+/// repository root, which puts both caches under `fixture/` - and
+/// `build.zig.zon`'s `.paths` includes that directory, recursively.
 ///
-/// There is no `XDG_CACHE_HOME`, no `HOME` and no `/tmp` in that list, and
-/// each was removed deliberately. An environment variable is not a decision:
-/// on a host that never set `XDG_CACHE_HOME` it names a directory nobody
-/// chose for a build cache, `HOME` may be an NFS mount, and `/tmp` is the
-/// volume Rechnerbetriebsgruppe asked this project to keep clear - see
-/// `scripts/scratch.sh` and docs/performance-handover.md section 0. What
-/// replaced them is the parent's own cache directory, which somebody did
-/// choose, and which is portable to a host with none of this cluster's
-/// volumes.
+/// Nothing else is consulted. A directory is not a build cache because a
+/// plausible default names it: no environment variable is read as a decision,
+/// and no well-known path is invented at the last moment for a machine
+/// somebody did not configure. The parent's own cache directory is the one
+/// location here that somebody did choose, and it is the one that travels to
+/// a machine with none of this project's storage laid out.
 ///
-/// Candidate 3 can therefore point inside the repository - `.zig-cache` on a
+/// A network filesystem is not a candidate either, however convenient it
+/// looks: this project's builds fail on one with `renameat2 EINVAL` - the same
+/// `programmer bug caused syscall error` a cache hint warns about - so
+/// falling back to one would be a slower copy of the same failure while
+/// appearing to comply.
+///
+/// Candidate 2 can therefore point inside the repository - `.zig-cache` on a
 /// runner that passes no `--cache-dir` - and nothing here promises otherwise.
 /// It does not have to: that output lands beside the parent's own output in a
 /// directory git already ignores, which is a location this build chose rather
 /// than one it invented at the last moment.
-///
-/// `/vol/tmp` and `/vol/tmp2` are deliberately not offered even though they
-/// are sanctioned on every buildhost: both are NFS, and this project's builds
-/// fail on NFS with `renameat2 EINVAL` - the same `programmer bug caused
-/// syscall error` the gate's cache hint warns about. Falling back to them
-/// would be a slower copy of the same failure while appearing to comply.
 fn consumerCacheRoot(b: *std.Build) []const u8 {
     const env = &b.graph.environ_map;
     const usable = struct {
@@ -519,23 +512,6 @@ fn consumerCacheRoot(b: *std.Build) []const u8 {
 
     if (usable.check(env.get("ZIG_INTERVAL_CONSUMER_CACHE"))) |d| {
         return absolutePath(b, d);
-    }
-
-    // A per-user directory is used only when it exists and can hold a cache.
-    // Handing the nested build a path it cannot create fails later and less
-    // legibly than falling through to the next candidate. This is the check
-    // `scripts/scratch.sh` step 3 makes, one level deeper: the directory that
-    // will be written to, not the volume above it. The old code returned the
-    // volume itself - `/home/tmp2`, world-shared and sticky - so the nested
-    // build's output sat in the same directory as every other user's.
-    if (usable.check(env.get("USER") orelse env.get("LOGNAME"))) |user| {
-        const io = b.graph.io;
-        for ([_][]const u8{ "/home/tmp2", "/home/tmp" }) |volume| {
-            const dir = b.pathJoin(&.{ volume, user });
-            if (std.Io.Dir.accessAbsolute(io, dir, .{ .read = true, .write = true, .execute = true })) |_| {
-                return b.pathJoin(&.{ dir, "zig-interval" });
-            } else |_| {}
-        }
     }
 
     // build_runner always passes a cache root string, so `path` is set; `null`

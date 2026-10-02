@@ -165,14 +165,17 @@ jobs:
           # ABSOLUTE, named by `consumerCacheRoot`. They are a parent local-cache
           # root with two CHILD names appended - never the parent's own cache or
           # global-cache directory - so flattening them into the parent's would
-          # delete the containment those flags exist for. Which root that is:
-          # a per-user directory on a local volume where the runner has one, and
-          # otherwise the cache directory this job's own `zig build` was given,
-          # which with no --cache-dir passed is the .zig-cache the restore step
-          # above keeps. The only thing this step still writes inside fixture/
-          # is fixture/zig-out, where the child installs - it gets no --prefix -
-          # and the recursive `fixture` entry in `.paths` covers that directory
-          # as well, which is why `.gitignore` already lists it.
+          # delete the containment those flags exist for. Which root that is
+          # comes down to TWO candidates and nothing else: 1, what
+          # ZIG_INTERVAL_CONSUMER_CACHE names, if that variable is set to
+          # something, and 2, the cache directory this job's own `zig build` was
+          # given - --cache-dir, or .zig-cache when no flag is passed. Both are
+          # resolved to an absolute path. This job passes no --cache-dir and
+          # sets no such variable, so candidate 2 applies: the .zig-cache the
+          # restore step above keeps. The only thing this step still writes
+          # inside fixture/ is fixture/zig-out, where the child installs - it
+          # gets no --prefix - and the recursive `fixture` entry in `.paths`
+          # covers that directory as well, which is why `.gitignore` lists it.
           zig build test -Doptimize=${{ matrix.optimize }}
 
   # ------------------------------------------------------------- benchmarks --
@@ -550,11 +553,12 @@ jobs:
           # do not need this - the gate validates their location and Zig
           # creates them - but their parent has to exist either way, which is
           # what this mkdir gives them.
-          # /tmp is accepted here because this runner is not a managed cluster
+          # /tmp is accepted here because this runner is not a managed
           # host: the portable rule is a writable local path that is not NFS,
-          # and on a buildhost host the same variable must name a directory under
-          # /home/tmp{,2}. This job does not decide which mode applies; it
-          # names a path the runner owns.
+          # and on a managed host the same variable must name a directory
+          # under a local volume that host's own policy reserves for this.
+          # This job does not decide which mode applies; it names a path the
+          # runner owns.
           mkdir -p -- "$GATE_SCRATCH" "$GATE_CACHE_DIR" "$GATE_GLOBAL_CACHE_DIR"
           df -h -- "$GATE_SCRATCH" | tail -1
 
@@ -661,8 +665,8 @@ jobs:
       QUALITY_TOOLS_WORK_ROOT: /tmp/zig-interval-quality/work
       # cross-test REFUSES to start without TMPDIR and keeps its own state
       # there, so it is named here rather than inherited from the shell: /tmp on
-      # this runner is the runner's own local volume, and nothing under /vol is
-      # used, because a Zig cache on that NFS mount dies on renameat2.
+      # this runner is the runner's own local volume, and no network mount is
+      # used, because a Zig cache on NFS dies on renameat2.
       TMPDIR: /tmp/zig-interval-quality/tmp
       ZIG_GLOBAL_CACHE_DIR: /tmp/zig-interval-quality/zig-global-cache
       # An absolute output prefix on a local volume. cross-test keeps the
@@ -1116,21 +1120,23 @@ jobs:
 # build would reuse. The nested consumer build under fixture/ is left alone for
 # the same reason its own flags are: `consumerCacheRoot` in build.zig gives it
 # two cache directories of its own rather than the machine-wide global cache,
-# and where they land is that function's decision - outside the repository on a
-# host with a sanctioned local volume, and otherwise under the local cache root
-# THIS build was itself given. The second case is the test job's, and there the
-# result is CORRECT for three reasons, each a property of this cache rather
-# than of luck: the local cache is content-addressed, so a restored manifest is
+# and where they land is that function's decision, and it has exactly TWO
+# candidates: what ZIG_INTERVAL_CONSUMER_CACHE names, if that variable is set
+# to something, and otherwise the cache directory THIS build was itself given -
+# --cache-dir, or .zig-cache when no flag is passed. Both are resolved to an
+# absolute path. The second candidate is the test job's, and there the result
+# is CORRECT for three reasons, each a property of this cache rather than of
+# luck: the local cache is content-addressed, so a restored manifest is
 # used only when every input hashes the same; every key in this file already
 # hashes build.zig, so a change to the resolver invalidates that entry
 # outright; and the bench and cross jobs never run the consumer step at all, so
 # no key here has two writers of it.
 #
 # It is NOT free, and calling that case harmless was wrong. On a runner the
-# third candidate is `.zig-cache` - the cache directory this job's own `zig
-# build` was given - with `zig-interval-consumer` and
-# `zig-interval-consumer-global` appended, so both child caches sit inside the
-# `path: .zig-cache` this job's cache action archives: the test entry now
+# second candidate is `.zig-cache` - the cache directory this job's own `zig
+# build` was given, with no --cache-dir passed - with `zig-interval-consumer`
+# and `zig-interval-consumer-global` appended, so both child caches sit inside
+# the `path: .zig-cache` this job's cache action archives: the test entry now
 # carries the consumer build's output too. Correct is not the same as free.
 # The only size evidence here is dated - that same nested build's local cache
 # measured 163 MB when it was captured and 1014 MB at its worst, back when it

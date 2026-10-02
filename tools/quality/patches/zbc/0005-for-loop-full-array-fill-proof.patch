@@ -41,9 +41,9 @@
 # 16 expect the rule SET to be exactly {use-undefined} and assert no count. Plus 2 helpers.
 # EVIDENCE. Two runs of `zig test --test-filter "use_undefined:"`, 29 selected each, all 20 of
 # these tests among them. The first, taken before the review correction was folded in here,
-# passed in 7.4878057 s — waves/wave1-zbc-array-green-final.log. The second, over the bytes this
+# passed; the second, over the bytes this
 # file now carries, so with the payload bound, the moved query and the carried length present,
-# passed in 13.7402239 s — waves/wave1-zbc-array-reviewed-green.log.
+# passed as well.
 # BUILT AND GATED. The tree 0001-0005 produces was built with `zig build cli`, installed into a
 # fresh prefix under an empty HOME with a REUSED work cache (276.1623 s, so not a cold install),
 # and the full gate from that prefix exited 0 in 1061.0422 s: zbc selected=32 analyzed=32

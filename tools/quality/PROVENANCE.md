@@ -12,9 +12,10 @@ content hashes. This file is the reasoning.
 
 `zig-gate` and `cross-test` had no home. They lived in one person's
 `~/.local/bin` and `~/.local/lib/cross-test`, nothing in any repository tracked
-them, and `.github/workflows/ci.yml` said so in a block headed *REVISIT THIS
-BLOCK WHEN THE HARNESS HAS A HOME*, listing exactly two ways to give it one: a
-tagged upstream release, or a vendored copy reviewed into the tree.
+them, and the CI workflow said so in a block headed *REVISIT THIS BLOCK WHEN
+THE HARNESS HAS A HOME*, listing exactly two ways to give it one: a tagged
+upstream release, or a vendored copy reviewed into the tree. That block is gone
+now that the harness has a home in this repository.
 
 There is no tagged upstream release. `cross-test --help` is its entire
 documentation and its only home was a filesystem. So this is the second option,
@@ -226,11 +227,11 @@ and is unchanged by this.
 onto a pristine `419d153` + `0001`+`0002`+`0003` checkout, cleanly, and the
 only file that differs from that base is `build.zig`; the `src/**/*.zig`
 digest recomputes to `b794e308…e5e3d2`, unchanged, which is why the
-`source_digest` column does not move. The first 2026-10-02 empty-`HOME` cold
-attempt compiled and staged zbc with `zig build cli`, then compiled ziglint and
-zlint, and failed on zwanzig's captured source and removed the partial prefix;
-that attempt proved those three artifact builds and nothing beyond them. The
-later installs recorded under **Receipts** completed all four from a fresh
+`source_digest` column does not move. An earlier empty-`HOME` cold attempt
+compiled and staged zbc with `zig build cli`, then compiled ziglint and zlint,
+and failed on zwanzig's captured source and removed the partial prefix; that
+attempt proved those three artifact builds and nothing beyond them. The
+installs recorded under **Receipts** completed all four from a fresh
 prefix and an empty `HOME`, so this recipe is witnessed by a completed
 installation as well as by that failed attempt.
 
@@ -328,9 +329,7 @@ the difference from `0004` and is recorded as such in `manifest.tsv`.
 
 **Two test runs exist for this series, and the second covers the bytes as
 shipped.** The first was over the tree one revision back: `zig test
---test-filter "use_undefined:"`, **exit 0, 29 tests selected, all passed,
-7.4878056910820305 s** —
-`/tmp/zig-interval/waves/wave1-zbc-array-green-final.log`. Those
+--test-filter "use_undefined:"`, **exit 0, 29 tests selected, all passed**. Those
 29 are this patch's **20** tests plus the 9 pre-existing ones the same filter
 selects, so the run covers the whole set rather than the 19 an earlier run did.
 It **predated the review correction folded into the current patch** — the
@@ -339,9 +338,8 @@ and the carried neighbour length — so on its own it witnessed none of those
 three.
 
 The second run is over the bytes this patch now carries: the same filter, the
-same 29 selected, **all passed, 13.740223854314536 s**,
-`/tmp/zig-interval/waves/wave1-zbc-array-reviewed-green.log`.
-The review correction is therefore witnessed, by those same 29 tests.
+same 29 selected, **all passed**. The review correction is therefore witnessed,
+by those same 29 tests.
 
 Beyond that, `0005` has been built, installed and gated: `zig build cli` ran as
 the installer's recipe against this tree, the analyzer landed in a fresh prefix
@@ -442,17 +440,17 @@ first capture was discarded, and `0001` is the retake.
 
 ## Receipts
 
-Two installs and two gates, both on 2026-10-02 on `buildhost` with Zig 0.16.0.
-They are different runs about different trees and must not be read as one
-result or relabelled as each other. Logs are under
-`/tmp/zig-interval/waves/`.
+Two installs and two gates, both run with Zig 0.16.0. They are different runs
+about different trees and must not be read as one result or relabelled as each
+other. Each is named below by the log it wrote; those logs are the runs' own
+output and are not part of this distribution.
 
 **Historical — a genuine cold install, and the red gate that followed.**
-Fresh prefix *and* fresh work root, empty `HOME`: **exit 0,
-285.8154720328748 s**, `wave1-complete-cold-install.log`. That install hashed
+Fresh prefix *and* fresh work root, empty `HOME`: **exit 0**,
+`wave1-complete-cold-install.log`. That install hashed
 **31** payload files and **12** patches and sealed **26** source files, rehash
-exit 0. The first full gate run from that prefix was **exit 1,
-322.3062626081519 s**, `wave1-installed-full-gate.log`: four ziglint findings
+exit 0. The first full gate run from that prefix was **exit 1**,
+`wave1-installed-full-gate.log`: four ziglint findings
 (one Z024 at `bench/bench_lp.zig:1284` and three Z023 parameter-order findings)
 and four zbc `use-undefined` errors in the compile-time-initialised `bench_vec`
 arrays, alongside the three reviewed `intfromfloat-without-clamp` warnings.
@@ -460,11 +458,8 @@ This is the `0001`–`0004` tree's historical result; `0005` addresses the array
 initialization errors.
 
 **Current — fresh prefix and empty `HOME`, reused work cache.** The install in
-force now wrote a **fresh prefix**
-(`waves/quality-wave1-9fby02wf/prefix`) and ran under an **empty `HOME`**
-(`waves/quality-wave1-9fby02wf/empty-home`, which was still empty when it
-finished), but it **reused an existing work cache**
-(`waves/quality-cold-final-9mngc9u6/work`): exit 0, **276.16231817100197 s**,
+force now wrote a **fresh prefix** and ran under an **empty `HOME`** (which was
+still empty when it finished), but it **reused an existing work cache**: exit 0,
 `wave1-reviewed-prefix-install.log`. It is therefore **not a second cold
 install** and is not counted as one; what it proves is that the `cli` recipe
 builds the tree `0001`–`0005` produces and that the prefix installs and
@@ -474,13 +469,13 @@ payload files, **13** patches and **27** sealed source files — the growth from
 31 / 12 / 26 is `0005` itself, as a patch file and as an installed row.
 
 The post-review regression run is recorded under **What the patches were
-verified against**. The gate from that fresh prefix: **exit 0,
-1061.0421875622123 s**, `wave1-reviewed-full-gate.log`, `GATE PASSED`. zbc
+verified against**. The gate from that fresh prefix: **exit 0**,
+`wave1-reviewed-full-gate.log`, `GATE PASSED`. zbc
 reported `selected=32 analyzed=32 failed=0` with **0 errors and 3 warnings**, all
 three the standing `intfromfloat-without-clamp` advisory, so the four historical
 `bench_vec` `use-undefined` errors no longer appear in the project's own gate.
-The cross run `gate-20261002-045938-6457-7192` is immutable and bound to that
-gate: four Linux targets at `build=pass run=pass tests=348` each — 1392
+The cross run recorded in that same gate is immutable and bound to it:
+four Linux targets at `build=pass run=pass tests=348` each — 1392
 executed tests — and `x86_64-windows` at `build=pass run=unavailable`,
 `fail=0`, `status=partial`.
 
@@ -500,12 +495,11 @@ developer's `~/.local/bin`. The build optimizer is an installer flag
 source.
 
 The development binaries were also newer than some of the trees they came from:
-`zbc`'s sources were last touched 2026-10-02 01:38 and its binary was built
-2026-09-29 22:30; zwanzig's sources 2026-10-02 01:13 against a binary from
-2026-10-01 22:48. Those two had drifted past the binaries before this capture
-started. `ziglint`'s tree (2026-10-01 22:59) predates its binary (23:22) and is
-consistent with it. Nothing in this directory depends on those binaries; they are
-recorded here only so nobody reads these pins as a reconstruction of them.
+for `zbc` and `zwanzig` the working sources had already drifted past the sources
+their binaries were built from, while `ziglint`'s tree predates its binary and
+is consistent with it. Nothing in this directory depends on those binaries;
+they are recorded here only so nobody reads these pins as a reconstruction of
+them.
 
 **No published upstream patch.** These patches are not on any upstream branch and
 are not offered as contributions. They are a local diff against a published
@@ -548,10 +542,11 @@ version. The pin rests instead on fingerprints the binary does expose:
 * the literal `zlint.json` in the binary, introduced 2026-09-15 (`5628391c`).
 
 The newest revision consistent with all four is `3ef67af` (2026-09-17), which is
-also `origin/main` HEAD and the commit tagged `v0.10.0`. The binary was built
-2026-09-29. The binary's own source paths say `~/tools/zlint`, so it
-was not built here, and the version it prints carries no information about which
-revision it was. `3ef67af` is the strongest pin the available evidence supports.
+also `origin/main` HEAD and the commit tagged `v0.10.0`. The binary that
+exposed these fingerprints was built elsewhere — its own embedded source paths
+name a build tree outside this repository — so it was not built here, and the
+version it prints carries no information about which revision it was. `3ef67af`
+is the strongest pin the available evidence supports.
 
 ## The distributed harness
 
@@ -572,15 +567,16 @@ it is listed here in full rather than summarised as "a few things".
    silently runs a *different* analyzer than the one it was installed with
    reports findings about a tool nobody pinned.
 
-2. **No required machine-wide policy.** `cross-test` used to exit 2 unless
-   `~/.local/lib/host-scratch.sh` existed. That is a developer-home dependency
-   and a cold install with an isolated HOME has no such file. The rules now come
-   from `harness/lib/cross-test/scratch-contract.sh`, which is self-contained:
-   on a managed cluster host it enforces the sanctioned local-volume list
-   itself, and elsewhere it accepts an explicitly chosen local directory. The
-   machine policy is still sourced first and still wins where it is readable, so
-   this host's behaviour is unchanged. Nothing in the host's global
-   configuration was modified to achieve that.
+2. **No machine-wide policy is required, and none is looked for.** `cross-test`
+   used to exit 2 unless a host policy script in a developer's home existed. That
+   is a developer-home dependency, and a cold install with an isolated `HOME` has
+   no such file. The rules now come from
+   `harness/lib/cross-test/scratch-contract.sh`, which is self-contained: in
+   managed mode it enforces the volume list the environment named, and in
+   portable mode it accepts an explicitly chosen writable local directory. A
+   policy named by `QUALITY_HOST_SCRATCH_POLICY`, where one is readable, is still
+   sourced first and still wins. Nothing in the host's global configuration was
+   modified to achieve that.
 
 3. **One file-list exclusion.** `tools/quality/harness/` joins the default
    `GATE_EXCLUDE` so the vendored `run_policy.zig` is not linted and formatted as
@@ -590,21 +586,25 @@ it is listed here in full rather than summarised as "a few things".
 
 **What the first real distribution run found wrong, and what was corrected:**
 
-4. **An unset `HOME` no longer aborts the harness.** The machine-policy path was
-   expanded from `$HOME` in a default word, so under `set -u` an unset `HOME`
-   raised an unbound-variable error in `cross-test`, `zig-gate`, `test.sh` and
-   `test-zig.sh` before argument parsing — including on `--list` and `--help`.
-   The policy path is now consulted only from an explicit
-   `QUALITY_HOST_SCRATCH_POLICY` or a non-empty `HOME`, so a cold install with an
-   isolated environment works and no bare `/.local/lib/host-scratch.sh` lookup
-   happens.
+4. **An unset `HOME` no longer aborts the harness, and `HOME` is no longer
+   consulted at all.** The machine-policy path was expanded from `$HOME` in a
+   default word, so under `set -u` an unset `HOME` raised an unbound-variable
+   error in `cross-test`, `zig-gate`, `test.sh` and `test-zig.sh` before argument
+   parsing — including on `--list` and `--help`. The lookup is now gone rather
+   than guarded: a policy is sourced only when `QUALITY_HOST_SCRATCH_POLICY`
+   names a readable one, and unset means there is none, so no bare home-relative
+   lookup can happen at all. A *named* policy that cannot be read is an error in
+   both modes, where it used to be tolerated in portable mode — it is an
+   operator asking for rules this run cannot apply, and the only honest answer
+   to that is to stop rather than to build under different ones.
 
 5. **The `--output` prefix is re-checked once it exists.** Only the
-   pre-creation location check ran, so `--output /home/tmp2/<other-user>/…`
-   passed and the run directory was then created inside another user's tree. The
-   prefix is now re-checked with the full predicate — real directory, writable,
-   and owned on a managed host — before the lock file or the run directory is
-   touched, exactly as the `TMPDIR` path already was.
+   pre-creation location check ran, so an `--output` prefix inside another
+   user's tree on a sanctioned volume passed and the run directory was then
+   created inside it. The prefix is now re-checked with the full predicate —
+   real directory, writable, and owned by the caller in managed mode — before
+   the lock file or the run directory is touched, exactly as the `TMPDIR` path
+   already was.
 
 6. **An inherited `ZIG_GLOBAL_CACHE_DIR` is held to the same contract.** It was
    used as the cache base with no validation, so an ambient NFS value created a
@@ -638,17 +638,17 @@ it is listed here in full rather than summarised as "a few things".
 9. **`quality_scratch_pick` was returning the volume, not the candidate.**
    `quality_scratch_path_ok` and `quality_scratch_why` left `candidate` and
    `root` undeclared. Under bash's dynamic scoping an undeclared assignment
-   writes a global, so `quality_scratch_pick` returned the matched volume
-   (`/home/tmp2`) instead of the caller's candidate — and exited 0, which is the
-   worst possible shape for that bug. Both functions now declare every variable
-   they write, loop variables included.
+   writes a global, so `quality_scratch_pick` returned the matched sanctioned
+   volume instead of the caller's candidate — and exited 0, which is the worst
+   possible shape for that bug. Both functions now declare every variable they
+   write, loop variables included.
 
 10. **Scratch refusals say what the predicate said.** Refusals print the
     `QUALITY_SCRATCH_WHY` sentence from the failing predicate set instead of
     re-deriving one from the path, and `quality_scratch_why` separates "on an
     approved volume but not permitted" from "outside the approved volumes" —
     the old wording sent the reader after the wrong volume for a path that was
-    under `/home/tmp{,2}` all along.
+    under an approved volume all along.
 
 11. **Concurrency is pinned in the profile, and the profile's comments match
     reality.** `cross-test.profile.sh` sets `CROSS_JOBS=2` and
@@ -662,8 +662,8 @@ it is listed here in full rather than summarised as "a few things".
     prefix — not a developer's `~/.local/bin` — describe the current CI job as
     one that installs qemu-user and asserts the runtime rows rather than the
     compile-only job the old comment claimed, and cite the current line numbers.
-    The measured 108 s and 5m98.663ms timeout story and the lost-test reading
-    rule are kept, still dated as the measurements they are.
+    The measured per-target timeout story and the lost-test reading rule are
+    kept, still recorded as the dated measurements they are.
 
 12. **Four new consumer-visible cases in `test.sh`**, the harness's own suite,
     so items 4, 5, 6 and 9 cannot silently come back: `quality_scratch_pick`
@@ -675,18 +675,56 @@ it is listed here in full rather than summarised as "a few things".
     the suite runs as root, where `-w` cannot fail). No existing assertion was
     changed or removed.
 
+**What the origin-specific part of the contract was replaced with:**
 
-No new option, environment variable or per-tool argument passthrough was added to
-the gate: section 7 invokes the analyzers with the plain file list, `ZBC_STRICT`
-is still unset, and no analyzer rule is disabled. The accepted advisory-warning
-policy is untouched.
+13. **Managed mode is named by the environment.** The contract used to decide
+   what kind of host it was running on by matching `hostname -s` against one
+   host-name prefix, and then hold every location to a list of that host's own
+   volumes written into the source. Both are gone, and the replacements are
+   neutral by construction:
+
+   * `quality_scratch_managed` is true when `QUALITY_MANAGED_ROOTS` is set and
+     non-empty. Unset is the default, so a host that has named nothing is in
+     portable mode — the same path a CI runner has always taken — and the
+     unset-environment case is decided by an empty string, not by a probe that
+     could get a hostname wrong.
+   * `QUALITY_MANAGED_HOST_PATTERN`, when set, narrows managed mode further to
+     hosts whose `hostname -s` matches it. It is a shell glob used as a `case`
+     pattern and it is empty by default, so a list exported by a shared profile
+     applies wherever it is read unless a host deliberately scopes it. The
+     hostname probe only runs when this variable is set.
+   * The managed free-space floor is `QUALITY_MANAGED_MIN_FREE_GIB`, still 100
+     GiB. The host-specific spelling it replaces is **not** read as a fallback:
+     a host that set that name has to move it once, which is the whole point of
+     a name that does not carry one host's identity into a distributed file.
+   * The NFS refusal is unchanged, and its diagnostic is now read off the
+     filesystem instead of off a list of directories. Naming volumes in the
+     message made the sentence a fact about one host's storage layout; the
+     mount a path lands on is the thing that actually breaks a Zig cache.
+
+   `cross-test`'s state base, `zig-gate`'s `gate_select_root`, and the scratch
+   base of both regression suites scan `QUALITY_MANAGED_ROOTS` for a per-user
+   directory, so the list exists in exactly one place. Each of them used to
+   carry its own copy of it; a second copy is a second answer as soon as an
+   administrator changes the first.
+
+No new command-line option or per-tool argument passthrough was added to the
+gate: section 7 invokes the analyzers with the plain file list, `ZBC_STRICT` is
+still unset, and no analyzer rule is disabled. What item 13 adds is
+environment variables, read by the contract rather than by the gate's argument
+parser, which is where every scratch rule already lived. The accepted
+advisory-warning policy is untouched.
 
 `run_policy.zig` and `zig-targets.sh` are byte-for-byte the reviewed originals.
 `test.sh` and `test-zig.sh` keep every assertion they had; they now find their
-own command and their own scratch beside themselves, their system-temp
-expectations key off the contract's mode instead of a second hostname test that
-could disagree with the code it is testing, and `test.sh` carries the four added
-cases named above.
+own command and their own scratch beside themselves, choose that scratch by
+scanning `QUALITY_MANAGED_ROOTS` instead of a restated list of one host's
+volumes, key their system-temp expectations off the contract's mode instead of a
+second hostname test that could disagree with the code it is testing, and
+`test.sh` carries the four added cases named above. Both suites pass in both
+modes — portable with every variable cleared, and managed with
+`QUALITY_MANAGED_ROOTS` naming a real mountpoint — which is what makes "unset
+means portable" a checked claim rather than a comment.
 
 ## Licenses
 

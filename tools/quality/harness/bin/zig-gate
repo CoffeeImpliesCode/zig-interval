@@ -12,8 +12,8 @@
 #   1. It resolves its analyzers inside an explicit prefix and does NOT fall
 #      back to a developer's home or to PATH once one is selected.
 #   2. It takes the scratch contract from ../lib/cross-test/scratch-contract.sh
-#      instead of requiring ~/.local/lib/host-scratch.sh, and it gains a default
-#      file-list exclusion for the quality-tools sources under
+#      instead of requiring a policy file in a developer's home, and it gains a
+#      default file-list exclusion for the quality-tools sources under
 #      tools/quality/harness/.
 set -u
 
@@ -87,15 +87,15 @@ environment
                           histogram first, so the shape survives any truncation.
   GATE_SCRATCH            root for this run's scratch: this run's log
                           directory, the private mktemp -d, and the parent of
-                          the Zig cache directories. On a managed cluster host
-                          (hostname starting buildhost) it must be under
-                          /home/tmp or /home/tmp2, on a real mountpoint, with at
-                          least 100 GiB free. On every other host any absolute
-                          path is accepted when it is a real, non-symlink
-                          directory this user owns and can write, has at least
-                          1 GiB free, and is not on NFS. /tmp, /var/tmp,
-                          /dev/shm and the NFS exports are always refused.
-                          Defaults to TMPDIR, then to a verified candidate.
+                          the Zig cache directories. In managed mode it must be
+                          on a volume QUALITY_MANAGED_ROOTS named, on a real
+                          mountpoint, with at least QUALITY_MANAGED_MIN_FREE_GIB
+                          free. In portable mode any absolute path is accepted
+                          when it is a real, non-symlink directory this user
+                          can write, has at least 1 GiB free, and is not on NFS.
+                          System temp volumes and NFS exports are refused in
+                          managed mode. Defaults to TMPDIR, then to a verified
+                          candidate.
   GATE_CROSS_OUTPUT       cross-test --output directory (default
                           $GATE_SCRATCH/zig-gate-cross). Kept after the run —
                           section 9 reads its per-target logs back — and never
@@ -104,16 +104,31 @@ environment
                           that run and reads only runs/<that id>/summary.json,
                           so evidence can never come from another run in the
                           same tree.
+  QUALITY_MANAGED_ROOTS   space-separated volumes this host approves for
+                          build scratch, most capable first. Set and non-empty
+                          is what managed mode IS; unset or empty is portable
+                          mode, which is what every host without it gets.
+                          Nothing else in this file assumes any storage layout.
+  QUALITY_MANAGED_HOST_PATTERN
+                          optional shell glob, tested against `hostname -s`,
+                          that narrows managed mode to matching hosts. Empty
+                          means no narrowing: the approved list applies wherever
+                          it is read.
+  QUALITY_MANAGED_MIN_FREE_GIB
+                          managed free-space floor per approved volume, in GiB
+                          (default 100). A volume below it is skipped instead
+                          of being filled up.
   QUALITY_HOST_SCRATCH_POLICY
                           path to an optional machine-wide scratch policy
-                          script, default $HOME/.local/lib/host-scratch.sh when
-                          HOME is set and that file is readable. A host with no
-                          HOME simply has no home policy. It is sourced first
-                          and its exports win.
-                          It is NOT required: a cold install with an isolated
-                          HOME and no such file is enforced by
-                          ../lib/cross-test/scratch-contract.sh instead, which
-                          applies the same rules.
+                          script. Unset means there is none: no policy is looked
+                          for, in a home directory or anywhere else. A named
+                          policy that cannot be read is an error in both modes,
+                          because the operator asked for rules this run cannot
+                          apply. It is sourced first and its exports win.
+                          It is NOT required: with none, and with no
+                          QUALITY_MANAGED_ROOTS either,
+                          ../lib/cross-test/scratch-contract.sh applies the
+                          portable rules on its own.
   ZIGLINT_ARGS            extra ziglint args       (e.g. "--ignore Z024")
   ZLINT_ARGS              extra zlint args         (e.g. "--deny-warnings")
   ZWANZIG_ARGS            extra zwanzig args
@@ -149,39 +164,42 @@ profile declaration read by section 9
   ZBC_STRICT=1            make section 7 advisory findings fail
   ZIG_COV_FAIL_UNDER=<p>  make section 10's coverage threshold fail
 
-WHERE SCRATCH GOES, AND WHY THE RULE IS THE HOST'S
+WHERE SCRATCH GOES, AND WHY THE MODE IS THE ENVIRONMENT'S
   One constraint is not up for taste. Every directory this gate writes is
   either a Zig cache or is read back by one, and a Zig cache needs
   renameat2(). An NFS mount rejects it with EINVAL, so a cache there is
   refused with that prerequisite named, rather than accepted and left to fail
   inside `zig build` with an error that names the syscall and not the volume.
-  That is why "sanctioned scratch" is not the test. /vol/tmp and /vol/tmp2 are
-  sanctioned and are NFS.
+  That is why "sanctioned scratch" is not the test: a volume can be sanctioned
+  and still be NFS, and only the filesystem answers the question.
 
-  On a managed cluster host -- `hostname -s` starting with buildhost, the same
-  probe ~/.local/lib/host-scratch.sh uses to decide whether it applies at all
-  -- the sanctioned list is short and physical: /home/tmp2 and /home/tmp, each
-  required to be a real mountpoint with at least 100 GiB free. The cluster has
-  asked processes to keep the small system volumes clear (Rechnerbetriebsgruppe,
-  2026-10-01): /tmp is a 9.8 G local ext4 volume here and /var is 20 G, and
-  user processes have repeatedly filled both. So /tmp, /var/tmp and /dev/shm
-  are refused there, never as a last resort.
+  Managed mode is what QUALITY_MANAGED_ROOTS being set and non-empty MEANS.
+  There is no host name anywhere in that decision any more, and no directory
+  this gate assumes: the operator names the volumes this host approves for
+  build scratch, each one is required to be a real mountpoint with at least
+  QUALITY_MANAGED_MIN_FREE_GIB free, and the small system volumes are refused
+  there rather than used as a last resort, because a host that has approved
+  storage for its builds has said that much on purpose.
+  QUALITY_MANAGED_HOST_PATTERN, when set, narrows managed mode to hosts whose
+  `hostname -s` matches it, so one exported list can be shared without
+  switching the rule on everywhere it is read.
 
-  On every other host -- a CI runner, a laptop, anything without that volume
-  list -- there is nothing to honour and nothing to guess, so the test is
-  explicit ownership: an absolute path that is a real, non-symlink directory
-  this user owns and can write, with at least 1 GiB free and not on NFS. /tmp
-  is ordinary in that mode, because on a runner it is the only sane scratch.
-  The NFS test and the symlink resolution are the same in both modes; only the
-  volume list and the free-space floor differ.
+  Portable mode is every host that has named no volumes: a CI runner, a
+  laptop, a cold install. There is nothing to honour and nothing to guess, so
+  the test is writability: an absolute path that is a real, non-symlink
+  directory this user can write, with at least 1 GiB free and not on NFS. A
+  system temp volume is ordinary in that mode, because on a runner it is the
+  only sane scratch. The NFS test and the symlink resolution are the same in
+  both modes; only the volume list and the free-space floor differ.
 
-  ~/.local/lib/host-scratch.sh, when it is readable, is sourced first and its
-  exports win. It is not required: ../lib/cross-test/scratch-contract.sh
+  A policy named by QUALITY_HOST_SCRATCH_POLICY, when it is readable, is
+  sourced first and its exports win. It is not required, and nothing is looked
+  for when the variable is unset: ../lib/cross-test/scratch-contract.sh
   enforces the same rules on its own, so a cold install with an isolated HOME
-  and no such file is not weaker than one with it.
+  is not weaker than one with a policy.
 
   Order: GATE_SCRATCH, then TMPDIR, then a verified candidate -- the per-user
-  directories under the approved volumes on a managed host, and TMPDIR or /tmp
+  directories under the approved volumes in managed mode, and TMPDIR or /tmp
   elsewhere. An explicit GATE_SCRATCH that does not verify stops the run
   (exit 2) instead of being quietly replaced, because the sections below print
   paths from this run; an ambient TMPDIR that does not verify is corrected
@@ -251,7 +269,7 @@ GATE_CONTRACT="${GATE_SELF%/bin/zig-gate}/lib/cross-test/scratch-contract.sh"
 . "$GATE_CONTRACT" ||
     { echo "zig-gate: scratch contract $GATE_CONTRACT failed" >&2; exit 2; }
 quality_scratch_load_policy ||
-    { echo "zig-gate: cannot establish a scratch policy on this host" >&2; exit 2; }
+    { echo "zig-gate: cannot establish a scratch policy" >&2; exit 2; }
 
 # WHERE THE ANALYZERS COME FROM. Two layouts, and the difference is not
 # cosmetic.
@@ -354,11 +372,14 @@ gate_make_root() { quality_scratch_make "$1"; }
 gate_select_root() {
     local root d
     if quality_scratch_managed; then
-        # Same layout the machine policy uses — tmp/ beside cache/ — and created
-        # when the volume allows it, so this path is the one a later run of any
-        # tool gets from TMPDIR rather than a second private corner.
-        for root in "/home/tmp2/$GATE_USER" "/home/tmp/$GATE_USER"; do
-            for d in "$root/tmp" "$root"; do
+        # A per-user directory under each approved volume, in the order the
+        # environment named them: tmp/ beside cache/, created when the volume
+        # allows it, so this is the path a later run of any tool gets from
+        # TMPDIR rather than a second private corner. The list is read from
+        # QUALITY_MANAGED_ROOTS and never restated here, so a change to it
+        # cannot leave a second copy of it behind in a different order.
+        for root in $QUALITY_MANAGED_ROOTS; do
+            for d in "$root/$GATE_USER/tmp" "$root/$GATE_USER"; do
                 if gate_make_root "$d"; then
                     printf '%s\n' "$(realpath -m -- "$d")"
                     return 0
@@ -367,7 +388,7 @@ gate_select_root() {
         done
         return 1
     fi
-    # Off the cluster there is no sanctioned list to search, so the platform
+    # In portable mode there is no approved list to search, so the platform
     # default is the whole of the fallback: TMPDIR when it verifies, /tmp
     # otherwise. Both are explicit in what the gate prints, and both are held
     # to the same ownership, free-space and NFS rules as anything named.
@@ -396,7 +417,7 @@ fi
 if [ -z "$GATE_SCRATCH" ]; then
     GATE_SCRATCH=$(gate_select_root) || {
         if quality_scratch_managed; then
-            echo "zig-gate: no usable volume under /home/tmp{,2}/$GATE_USER; set GATE_SCRATCH" >&2
+            echo "zig-gate: no usable directory under the approved volumes ($QUALITY_MANAGED_ROOTS) for $GATE_USER; set GATE_SCRATCH" >&2
         else
             echo "zig-gate: no usable scratch directory (tried \$TMPDIR and /tmp);" >&2
             echo "          set GATE_SCRATCH to a directory you own with at least 1 GiB free" >&2
@@ -813,7 +834,7 @@ fi
 #    documented in ./cross-test.profile.sh and both handled here:
 #
 #    1. A GREEN RUN SAYS `status=partial`, not `status=pass`. x86_64-windows
-#       has no runner on this host, so cross-test records it
+#       has no runner here, so cross-test records it
 #       build_only/runtime_unavailable and deliberately never counts it as a
 #       pass. Exit status is 0. `--require-runners` would turn that normal
 #       result into a failure and is NOT passed here. This section therefore
@@ -960,7 +981,7 @@ if $use_cross; then
                 # classification is the input and none of it is re-derived here: a
                 # required row must show a build that passed, a run that passed, a
                 # final status of pass and an executed-test count above zero. A
-                # build_only row -- no runner on this host -- is compile coverage
+                # build_only row -- no runner here -- is compile coverage
                 # and fails here, which is the entire reason a profile declares
                 # the set: without qemu_user every Linux row degrades to
                 # build_only, and reading fail=0 alone would call that a green
@@ -1129,7 +1150,7 @@ PY
             if [ "$ct_ok" -eq 1 ]; then
                 if [ "$ct_state" = partial ] || [ "$ct_state" = build_only ]; then
                     echo "  cross-test: OK (status=$ct_state, fail=0 — build_only rows are"
-                    echo "    targets with no runner on this host and are compile coverage only;"
+                    echo "    targets with no runner here and are compile coverage only;"
                     if [ -n "$ct_required" ]; then
                         echo "    the rows the profile requires to run are the REQUIRED ones above)"
                     else

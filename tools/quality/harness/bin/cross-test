@@ -93,11 +93,11 @@
 # ZIG_GLOBAL_CACHE_DIR when set, otherwise the state base, and an inherited value
 # is held to the same contract as the output prefix -- a refused one exits 2
 # before it creates anything. An output lock rejects
-# concurrent writers. On a managed cluster host (hostname starting buildhost) an
-# output prefix that lands on /tmp, /var/tmp or /dev/shm is refused before
-# anything is created, symlinks resolved first, and NFS is refused in both
-# modes; on any other host those paths are ordinary, because a CI runner has
-# nowhere else to put a run.
+# concurrent writers. In managed mode -- the environment having named
+# QUALITY_MANAGED_ROOTS -- an output prefix that lands on a system temp volume
+# (/tmp, /var/tmp or /dev/shm) is refused before anything is created, symlinks
+# resolved first, and NFS is refused in both modes; in portable mode those
+# paths are ordinary, because a CI runner has nowhere else to put a run.
 # Requires Linux, Bash 4.4+, GNU coreutils, awk, and util-linux (setsid/flock).
 #
 # DISTRIBUTED COPY. A reviewed source copy, installed by
@@ -106,14 +106,14 @@
 # <prefix>/share/zig-interval-quality/PROVENANCE.md. The matrix, the verdict
 # logic, the summary schema, the artifact safety rules, the worker isolation
 # and every exit code are unchanged. Two things differ, and only these two:
-#   1. ~/.local/lib/host-scratch.sh is no longer a hard startup requirement. The
-#      same rules come from lib/cross-test/scratch-contract.sh, which is
-#      self-contained: on a managed cluster host it enforces the sanctioned
-#      local-volume list itself, and elsewhere it accepts an explicitly chosen
-#      owned, writable, non-NFS local directory. The machine policy is still
-#      sourced first and still wins whenever it is readable.
+#   1. No machine-wide policy in a developer's home is a startup requirement.
+#      The same rules come from lib/cross-test/scratch-contract.sh, which is
+#      self-contained: in managed mode it enforces the volume list the
+#      environment named, and in portable mode it accepts an explicitly chosen
+#      writable, non-NFS local directory. A policy named by
+#      QUALITY_HOST_SCRATCH_POLICY is still sourced first and still wins.
 #   2. The output-prefix refusal is stated in terms of that contract rather than
-#      in terms of one hostname prefix alone, and it still happens before any
+#      in terms of one environment variable, and it still happens before any
 #      directory, lock file or run directory is created.
 #
 # Keep the sibling lib/cross-test/ helpers when installing this command.
@@ -123,22 +123,23 @@ export LC_ALL=C
 
 SELF=$(realpath -- "${BASH_SOURCE[0]}") || exit 2
 LIB_DIR=${SELF%/bin/cross-test}/lib/cross-test
-# The scratch contract, not a required developer-home file. The machine-wide
-# policy is still sourced first and still wins when it is readable; what changed
-# is that its ABSENCE is no longer fatal, because scratch-contract.sh enforces
-# the same rules on its own. On a managed cluster host that means the sanctioned
-# local-volume list, a real mountpoint, the policy's own free-space floor and the
-# NFS refusal, all applied here; on any other host it means an explicitly chosen
-# local directory this user owns. Sourced before anything reads TMPDIR or
-# ZIG_GLOBAL_CACHE_DIR, because the state and cold-cache directories below are
-# created under it and a missing policy used to leave them unplaced.
+# The scratch contract, not a required developer-home file. A machine-wide
+# policy is still sourced first and still wins when QUALITY_HOST_SCRATCH_POLICY
+# names a readable one; what changed is that its ABSENCE is no longer fatal,
+# because scratch-contract.sh enforces the same rules on its own. In managed
+# mode that means the volume list the environment named, a real mountpoint, the
+# free-space floor and the NFS refusal, all applied here; in portable mode it
+# means an explicitly chosen local directory this user can write. Sourced
+# before anything reads TMPDIR or ZIG_GLOBAL_CACHE_DIR, because the state and
+# cold-cache directories below are created under it and a missing policy used
+# to leave them unplaced.
 [ -r "$LIB_DIR/scratch-contract.sh" ] ||
   { printf 'cross-test: missing scratch contract %s\n' "$LIB_DIR/scratch-contract.sh" >&2; exit 2; }
 # shellcheck source=../lib/cross-test/scratch-contract.sh
 source "$LIB_DIR/scratch-contract.sh" ||
   { printf 'cross-test: scratch contract %s failed\n' "$LIB_DIR/scratch-contract.sh" >&2; exit 2; }
 quality_scratch_load_policy ||
-  { printf 'cross-test: cannot establish a scratch policy on this host\n' >&2; exit 2; }
+  { printf 'cross-test: cannot establish a scratch policy\n' >&2; exit 2; }
 # shellcheck source=../lib/cross-test/zig-targets.sh
 source "$LIB_DIR/zig-targets.sh" || exit 2
 unset CROSS_MATRIX
@@ -189,16 +190,17 @@ CROSS_LIBC_RUNTIMES supplies Zig's --libc-runtimes directory when needed.
 Output: PREFIX/runs/RUN_ID/{build,run}-TARGET.log and summary.json.
 PREFIX/cross-test-summary.json is the atomic current-run summary (schema 2).
 Where PREFIX may point is decided by lib/cross-test/scratch-contract.sh, not by
-this file. On a managed cluster host (hostname starting buildhost) PREFIX must be
-on the sanctioned physical volume /home/tmp{,2}, symlinks resolved first, and
-may not resolve to /tmp, /var/tmp or /dev/shm; the command exits 2 and creates
-nothing. Point it at $HOST_SCRATCH_ROOT/cross-out. On every other host those
-paths are ordinary and only the NFS refusal applies, so a CI runner can use
-/tmp. A machine-wide policy at ~/.local/lib/host-scratch.sh, when readable, is
-sourced first and wins; it is not required. QUALITY_HOST_SCRATCH_POLICY names
-an alternative path for it.
+this file. In managed mode, which is what QUALITY_MANAGED_ROOTS being set and
+non-empty means, PREFIX must be on one of the volumes that variable names, with
+symlinks resolved first, and may not resolve to /tmp, /var/tmp or /dev/shm; the
+command exits 2 and creates nothing. Point it at $HOST_SCRATCH_ROOT/cross-out.
+In portable mode, which is every host that has named no volumes, those paths are
+ordinary and only the NFS refusal applies, so a CI runner can use /tmp. A
+machine-wide policy named by QUALITY_HOST_SCRATCH_POLICY, when readable, is
+sourced first and wins; it is not required, and no policy is looked for when the
+variable is unset.
 State goes to TMPDIR when it is set and verifies, otherwise to the per-user
-directory under the approved volumes on a managed host, otherwise to /tmp. The
+directory under each approved volume in managed mode, otherwise to /tmp. The
 per-run Zig cache is ZIG_GLOBAL_CACHE_DIR when that is set and verifies, and the
 state base otherwise; a refused one exits 2 with the reason named.
 Exit: 0 complete or explicitly partial coverage, 1 failed checks, 2 setup error,
@@ -252,7 +254,8 @@ resolve_zig() {
   local version installed candidate directory information compiler
   version=$("${ZIG_COMMAND[@]}" version 2>/dev/null) || version=
   if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.+-]+)?$ ]]; then
-    # Use an installed real compiler when anyzig has no project version pin.
+    # Use an installed real compiler when a version-manager shim has no project
+    # version pin.
     installed=$("${ZIG_COMMAND[@]}" any list-installed 2>/dev/null) || installed=
     while IFS=$'\t' read -r candidate directory; do
       if [[ $candidate == 0.16.0 && -x $directory/zig ]]; then
@@ -734,31 +737,32 @@ fi
 [[ $MODE != zig-build || -f build.zig ]] || die 'run from a project root containing build.zig, or provide artifact hooks'
 for tool in timeout setsid flock awk grep realpath mktemp date cp mv stat df hostname uname tr dirname; do command -v "$tool" >/dev/null 2>&1 || die "$tool is required"; done
 command -v mountpoint >/dev/null 2>&1 || quality_scratch_managed ||
-  die 'mountpoint is required on a managed cluster host'
+  die 'mountpoint is required in managed mode'
 ulimit -c 0 || die 'cannot disable core dumps'
 umask 077
 CROSS_PREFIX=$(realpath -m -- "$CROSS_PREFIX") || die 'cannot resolve output directory'
 # Where a run's logs, artifacts and lock file may live. The rule is the
-# contract's, not one hostname literal: on a managed cluster host the output
-# prefix must be on the sanctioned physical volume, symlinks resolved first, and
-# the small system temp volumes are refused with the reason named; on any other
-# host the same NFS refusal applies and a /tmp prefix is ordinary, because a CI
-# runner has nowhere else to put a run. Validation happens BEFORE anything is
-# created, so a refusal leaves no directory, no lock file and no run id behind.
+# contract's, and the mode is the environment's: in managed mode the output
+# prefix must be on one of the volumes QUALITY_MANAGED_ROOTS named, symlinks
+# resolved first, and the small system temp volumes are refused with the reason
+# named; in portable mode the same NFS refusal applies and a /tmp prefix is
+# ordinary, because a CI runner has nowhere else to put a run. Validation
+# happens BEFORE anything is created, so a refusal leaves no directory, no lock
+# file and no run id behind.
 quality_scratch_path_ok "$CROSS_PREFIX" ||
   die "output $CROSS_PREFIX cannot host a run: $QUALITY_SCRATCH_WHY"
 if quality_scratch_managed; then
   for system_temp_root in $QUALITY_SYSTEM_TEMP_ROOTS; do
     case "$CROSS_PREFIX" in
       "$system_temp_root" | "$system_temp_root"/*)
-        die "output resolves to system temp storage: $CROSS_PREFIX; use ${HOST_SCRATCH_ROOT:-/home/tmp{,2}/${USER:-$(id -un)}}/cross-out"
+        die "output resolves to system temp storage: $CROSS_PREFIX; use \$HOST_SCRATCH_ROOT/cross-out, or a per-user directory on an approved volume ($QUALITY_MANAGED_ROOTS)"
         ;;
     esac
   done
 fi
 # Then judged as a DIRECTORY, which is the check a location check cannot make
-# about a path that does not exist yet: real, writable, and this user's on a
-# managed host -- exactly what the state base below already goes through, and
+# about a path that does not exist yet: real, writable, and owned by the caller
+# in managed mode -- exactly what the state base below already goes through, and
 # for the same reason. Both orders are covered, because a prefix can already be
 # there: an existing directory is judged before a lock file or run directory is
 # written into it, a new one is judged the moment it exists. A prefix in
@@ -775,19 +779,27 @@ RUN_DIR="$CROSS_PREFIX/runs/$CROSS_RUN_ID"
 mkdir -- "$RUN_DIR" || die 'run id already exists; choose a new CROSS_RUN_ID'
 # State lives under a verified scratch directory, chosen the same way the gate
 # chooses one: TMPDIR when the operator set it and it verifies, otherwise the
-# per-user directory under the approved volumes on a managed host, otherwise /tmp.
+# per-user directory under each approved volume in managed mode, otherwise /tmp.
 # The old behaviour was to require TMPDIR and exit 2 when it was unset, which is
-# right on a cluster host and wrong everywhere else: cross-test REFUSES to start
-# without a state base, so an unset TMPDIR turned into a hard failure on any
-# runner that had not been told to export one.
+# right where scratch storage is scarce and wrong everywhere else: cross-test
+# REFUSES to start without a state base, so an unset TMPDIR turned into a hard
+# failure on any runner that had not been told to export one.
 if [[ -n ${TMPDIR:-} ]]; then
   quality_scratch_make "$TMPDIR" ||
     die "TMPDIR=$TMPDIR cannot host cross-test state: $QUALITY_SCRATCH_WHY"
   TMP_BASE=$TMPDIR
 elif quality_scratch_managed; then
-  TMP_BASE=$(quality_scratch_pick "${HOST_SCRATCH_ROOT:+$HOST_SCRATCH_ROOT/tmp}" \
-    "/home/tmp2/$(id -un)/tmp" "/home/tmp/$(id -un)/tmp") ||
-    die 'set TMPDIR to approved scratch storage'
+  # A per-user directory under each approved volume, in the order the
+  # environment named them. The list is never restated here: one place names
+  # it, so a change to it cannot leave a second copy of it behind in a
+  # different order.
+  cross_user=$(id -un) || die 'cannot determine the current user'
+  TMP_CANDIDATES=("${HOST_SCRATCH_ROOT:+$HOST_SCRATCH_ROOT/tmp}")
+  for managed_root in $QUALITY_MANAGED_ROOTS; do
+    TMP_CANDIDATES+=("$managed_root/$cross_user/tmp")
+  done
+  TMP_BASE=$(quality_scratch_pick "${TMP_CANDIDATES[@]}") ||
+    die "set TMPDIR to scratch on one of the approved volumes: $QUALITY_MANAGED_ROOTS"
 else
   TMP_BASE=$(quality_scratch_pick /tmp) || die 'set TMPDIR to a writable local directory'
 fi

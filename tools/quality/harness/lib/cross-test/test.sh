@@ -14,17 +14,28 @@ quality_scratch_load_policy
 COMMAND=${CROSS_TEST_COMMAND:-$LIB_DIR/../../bin/cross-test}
 [ -x "$COMMAND" ] || { printf 'FAIL: cross-test not found at %s\n' "$COMMAND" >&2; exit 1; }
 # The same state base cross-test itself would pick: TMPDIR when it verifies,
-# otherwise the managed per-user directory, otherwise /tmp. A test harness that
-# required an exported TMPDIR could only ever be run by someone who had already
-# configured their shell.
+# otherwise a per-user directory under each approved volume in managed mode,
+# otherwise /tmp. A test harness that required an exported TMPDIR could only
+# ever be run by someone who had already configured their shell. The approved
+# volumes are read from QUALITY_MANAGED_ROOTS rather than restated here, and
+# with that variable unset this is /tmp -- the portable path every host without
+# a scratch policy takes.
 if [[ -n ${TMPDIR:-} ]] && quality_scratch_make "$TMPDIR"; then
     BASE=$TMPDIR
-elif BASE=$(quality_scratch_pick "${HOST_SCRATCH_ROOT:+$HOST_SCRATCH_ROOT/tmp}" \
-    "/home/tmp2/$(id -un)/tmp" "/home/tmp/$(id -un)/tmp" /tmp); then
-    :
 else
-    printf 'FAIL: no usable scratch directory for the regression suite\n' >&2
-    exit 1
+    SCRATCH_CANDIDATES=()
+    if [[ -n ${HOST_SCRATCH_ROOT:-} ]]; then SCRATCH_CANDIDATES+=("$HOST_SCRATCH_ROOT/tmp"); fi
+    if quality_scratch_managed; then
+        SCRATCH_USER=$(id -un)
+        for SCRATCH_ROOT in $QUALITY_MANAGED_ROOTS; do
+            SCRATCH_CANDIDATES+=("$SCRATCH_ROOT/$SCRATCH_USER/tmp")
+        done
+    fi
+    SCRATCH_CANDIDATES+=(/tmp)
+    if ! BASE=$(quality_scratch_pick "${SCRATCH_CANDIDATES[@]}"); then
+        printf 'FAIL: no usable scratch directory for the regression suite\n' >&2
+        exit 1
+    fi
 fi
 ROOT=$(mktemp -d "$BASE/cross-test-regressions.XXXXXXXX")
 trap 'rm -rf -- "$ROOT"' EXIT
@@ -41,8 +52,9 @@ reason() { grep -q "\"reason\":\"$1\"" "$2/cross-test-summary.json" || fail "mis
 # quality_scratch_pick must return the candidate it was handed, not the volume
 # above it. Bash scoping is dynamic, so one undeclared loop counter in the
 # contract rewrote this caller's `candidate` with the matched managed root and
-# handed back /home/tmp2 with exit 0: a per-user directory quietly becoming the
-# world-shared sticky volume, which is what every rule above exists to prevent.
+# handed back the matched volume with exit 0: a per-user directory quietly
+# becoming the world-shared sticky volume, which is what every rule above exists
+# to prevent.
 picked=$(quality_scratch_pick "$BASE") || fail 'quality_scratch_pick refused a usable scratch base'
 [[ $picked == "$(realpath -m -- "$BASE")" ]] || fail "quality_scratch_pick returned $picked, not $BASE"
 
@@ -230,7 +242,7 @@ finally:
 PY
 
 # --output must not put a run's logs and artifacts on a small system temp
-# volume on a managed cluster host, and the refusal must land before any
+# volume on a managed host, and the refusal must land before any
 # directory, lock file or run directory exists. Expectations follow the host,
 # not the flag: the same paths stay generic where the contract has no opinion.
 # build-only.sh supplies a real artifact hook, so an accepted run really builds
