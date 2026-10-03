@@ -227,6 +227,14 @@ pub fn Vec(comptime n: usize) type {
         /// The receiver is a pointer because the components live inside
         /// it: a slice taken from a by-value copy would point at a
         /// stack frame that is gone the moment the call returns.
+        /// The slice borrows the receiver's storage, so it ends where
+        /// the receiver does: the box going out of scope, or being moved
+        /// after the slice was taken, is what invalidates it. `set` is
+        /// not one of those — it writes the same array through the same
+        /// pointer, so a slice taken before it reads the new component.
+        /// Nothing here owns heap storage, so there is nothing to free;
+        /// `DynVec.slice` is the one that has to name the call which
+        /// ends its borrow.
         pub fn slice(self: *const Self) []const Interval {
             return &self.comps;
         }
@@ -567,6 +575,11 @@ pub const DynVec = struct {
     /// The components as a slice, for code written against the core.
     /// The receiver is a pointer, matching `Vec(n).slice`, so the two
     /// representations are spelled the same way at every call site.
+    /// The slice borrows the box's own allocation, and `deinit` is the
+    /// call that ends the borrow: it frees that memory, so a slice taken
+    /// before it must not be read after. `set` does not end the borrow
+    /// — it writes one component of the same allocation, so the slice
+    /// sees the new value.
     pub fn slice(self: *const DynVec) []const Interval {
         return self.comps;
     }
@@ -607,8 +620,13 @@ pub const DynVec = struct {
         return .{ .gpa = self.gpa, .comps = comps, .own = comps.ptr };
     }
 
-    /// The shared width check of every binary box operation.
-    fn sameWidth(self: DynVec, other: DynVec) Error!void {
+    /// The shared width check of every binary box operation. Its error
+    /// set is `DimensionMismatch` alone and not the whole `Error`,
+    /// because comparing two lengths allocates nothing: a caller that
+    /// runs only this check cannot reach `OutOfMemory`, and the four
+    /// in-place operations below say so in their own signatures rather
+    /// than promise an allocation failure they cannot have.
+    fn sameWidth(self: DynVec, other: DynVec) error{DimensionMismatch}!void {
         if (self.comps.len != other.comps.len) return error.DimensionMismatch;
     }
 
@@ -663,25 +681,31 @@ pub const DynVec = struct {
 
     /// `self + other`, overwriting the receiver. The in-place twin of
     /// `add`, and the reason `add` can stay non-destructive.
-    pub fn iadd(self: *DynVec, other: DynVec) Error!void {
+    ///
+    /// `DimensionMismatch` is the whole error set, not the wider `Error`
+    /// the allocating operations carry: an in-place form writes the
+    /// receiver's own components and draws nothing, so there is no
+    /// allocation here for `OutOfMemory` to refuse. The width check
+    /// comes first, so that failure has changed nothing.
+    pub fn iadd(self: *DynVec, other: DynVec) error{DimensionMismatch}!void {
         try self.sameWidth(other);
         zipInPlace(self.comps, other.comps, Interval.add);
     }
 
     /// `self - other`, overwriting the receiver.
-    pub fn isub(self: *DynVec, other: DynVec) Error!void {
+    pub fn isub(self: *DynVec, other: DynVec) error{DimensionMismatch}!void {
         try self.sameWidth(other);
         zipInPlace(self.comps, other.comps, Interval.sub);
     }
 
     /// `self * other`, overwriting the receiver.
-    pub fn imul(self: *DynVec, other: DynVec) Error!void {
+    pub fn imul(self: *DynVec, other: DynVec) error{DimensionMismatch}!void {
         try self.sameWidth(other);
         zipInPlace(self.comps, other.comps, Interval.mul);
     }
 
     /// `self / other`, overwriting the receiver.
-    pub fn idiv(self: *DynVec, other: DynVec) Error!void {
+    pub fn idiv(self: *DynVec, other: DynVec) error{DimensionMismatch}!void {
         try self.sameWidth(other);
         zipInPlace(self.comps, other.comps, Interval.div);
     }
@@ -784,9 +808,11 @@ pub const DynVec = struct {
     }
 };
 
-/// The result `mapResult` gives for a receiver of type V: a plain
-/// optional for a `Vec(n)`, which fills a stack array and cannot fail,
-/// and an error union for a `DynVec`, which allocates.
+/// The result `mapResult` gives for a receiver of type V: `?V`, a plain
+/// optional, for a `Vec(n)`, which fills a stack array and cannot fail,
+/// and `DynVec.Error!?DynVec`, an error union over the same optional,
+/// for a `DynVec`, which allocates. The name is private to this file,
+/// so those two spellings are what a caller writes.
 ///
 /// The split lives here rather than in an inferred return type because
 /// the error set of a `!?V` is collected from every `try` in the body,
@@ -814,8 +840,15 @@ fn MapResult(comptime V: type) type {
 /// plain `?Vec(n)`; a `DynVec` allocates from the allocator it carries
 /// and frees the partial box again when the fold leaves the domain, so a
 /// null there costs nothing but the allocations already made, and its
-/// result is an error union over the same optional. `MapResult` says
-/// why the two arms have different types.
+/// result is `DynVec.Error!?DynVec`, an error union over the same
+/// optional. Those are the two spellings a caller writes; the return
+/// type below resolves through a private alias that no call site outside
+/// this file can name.
+///
+/// The owned arm carries the whole `DynVec.Error` even though a unary
+/// fold compares no widths, so only `error.OutOfMemory` is reachable
+/// there. Handle both at the call site, or the compiler will not let
+/// you forget one.
 ///
 /// A POINTER is a compile error, and that is deliberate. A pointer
 /// names a box the caller owns and says nothing about where a result

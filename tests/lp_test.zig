@@ -1315,3 +1315,224 @@ test "box: the shared walk answers exactly what a private sweep per variable ans
         }
     }
 }
+
+test "add(.eq) allocates the flipped copy before it stores a row" {
+    // The `.eq` arm used to push `(a, .le, r)` and only then allocate the
+    // flipped copy, so the single allocation that can fail in an `eq` failed
+    // with half an equality already in the system. The `ge` arm has always
+    // allocated first; both do now, and this is the test that holds them
+    // to it.
+    var failing = std.testing.FailingAllocator.init(gpa, .{});
+    var sys = try lp.System.init(failing.allocator(), 2);
+    defer sys.deinit();
+
+    // One ordinary row first, so `rowCount` and `isUnsat` have something to
+    // be unchanged FROM. An empty system would be unchanged by an `add` that
+    // did nothing at all, which is not the property under test.
+    try sys.add(&[_]Interval{ pt(1), pt(0) }, .le, pt(4));
+    try std.testing.expectEqual(@as(usize, 1), sys.rowCount());
+    try std.testing.expect(!sys.isUnsat());
+
+    // The very next allocation this allocator hands out is the flipped copy,
+    // and refusing it refuses the whole `add`. `add` makes no other
+    // allocation before it, which is as much the property under test as the
+    // row count is: an arm that grew a row table first would be refused
+    // there instead and this index would name something else.
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, sys.add(&[_]Interval{ pt(1), pt(1) }, .eq, pt(2)));
+
+    // Nothing was committed: not the first row of the equality, not the
+    // second, and no contradiction latched by either. The row that was
+    // already in the system is the row that is still there, unchanged.
+    try std.testing.expectEqual(@as(usize, 1), sys.rowCount());
+    try std.testing.expect(!sys.isUnsat());
+    const survivor = try sys.at(0);
+    try std.testing.expectEqual(@as(f64, 4.0), survivor.rhs.lo);
+    try std.testing.expectEqual(@as(f64, 1.0), survivor.coeffs[0].lo);
+    try std.testing.expectEqual(@as(f64, 0.0), survivor.coeffs[1].lo);
+
+    // And the same call with nothing failing stores BOTH rows, so this test
+    // cannot be satisfied by an `.eq` arm that refuses every equality. A
+    // fresh system, because the allocator above refuses every allocation
+    // from the induced failure onwards: `alloc_index` does not advance when
+    // an allocation is refused, so the same index keeps refusing.
+    var ok = std.testing.FailingAllocator.init(gpa, .{});
+    var whole = try lp.System.init(ok.allocator(), 2);
+    defer whole.deinit();
+    try whole.add(&[_]Interval{ pt(1), pt(1) }, .eq, pt(2));
+    try std.testing.expectEqual(@as(usize, 2), whole.rowCount());
+    try std.testing.expect(!whole.isUnsat());
+    try std.testing.expectEqual(@as(f64, 2.0), (try whole.at(0)).rhs.lo);
+    try std.testing.expectEqual(@as(f64, -2.0), (try whole.at(1)).rhs.lo);
+}
+
+// The leak sweep. One function per operation, each self-contained and each
+// freeing everything it was given on every path INCLUDING the ones an
+// induced failure opens, because `checkAllAllocationFailures` runs each of
+// them once per allocation with that allocation refused and then asks the
+// allocator whether everything it handed out came back. The ordinary
+// `std.testing.allocator` leak check cannot see any of this: it is only
+// asked about a run that never failed, and every path worth checking here is
+// one that only opens when an allocation does.
+//
+// Each of these propagates the failure rather than catching it. A function
+// that swallowed an induced `error.OutOfMemory` is reported by the helper as
+// `error.SwallowedOutOfMemoryError` and fails the test, so recovering from
+// exhaustion by ignoring it is caught here too rather than passing quietly.
+
+/// `add` as `eq`: the one arm that stores two rows, so the one arm where an
+/// induced failure can land with a row already committed and one still to
+/// come. This is the path that has to be freeable.
+fn leakSweepAddEq(allocator: std.mem.Allocator) !void {
+    var sys = try lp.System.init(allocator, 2);
+    defer sys.deinit();
+    try sys.add(&[_]Interval{ pt(1), pt(1) }, .eq, pt(3));
+    try std.testing.expectEqual(@as(usize, 2), sys.rowCount());
+    try std.testing.expect(!sys.isUnsat());
+}
+
+/// The single-row tags, so the sweep is over `add` and not over the one arm
+/// of it that stores two rows. `le` and `lt` push a row straight in, and
+/// `ge` and `gt` allocate a flipped copy for one — the shape `.eq` was
+/// brought back to, and the shape whose allocation used to be the one an
+/// `eq` reached only after it had already stored a row.
+fn leakSweepAddGe(allocator: std.mem.Allocator) !void {
+    var sys = try lp.System.init(allocator, 2);
+    defer sys.deinit();
+    try sys.add(&[_]Interval{ pt(1), pt(1) }, .le, pt(10));
+    try sys.add(&[_]Interval{ pt(1), pt(-1) }, .ge, pt(2));
+    try sys.add(&[_]Interval{ pt(-1), pt(1) }, .gt, pt(-4));
+    try sys.add(&[_]Interval{ pt(1), pt(1) }, .lt, pt(9));
+    try std.testing.expectEqual(@as(usize, 4), sys.rowCount());
+    try std.testing.expect(!sys.isUnsat());
+}
+
+/// `eliminate`, over a system whose `x` coefficient straddles zero, so the
+/// sweep covers the round that pairs a row against BOTH side lists rather
+/// than only the one-sided rounds. Every right-hand side here is positive
+/// and both multipliers are non-negative, so no combination of these rows
+/// states `0 <= negative` and the round cannot latch a contradiction.
+fn leakSweepEliminate(allocator: std.mem.Allocator) !void {
+    var sys = try lp.System.init(allocator, 2);
+    defer sys.deinit();
+    try sys.add(&[_]Interval{ pt(1), pt(1) }, .le, pt(3));
+    try sys.add(&[_]Interval{ pt(-1), pt(1) }, .le, pt(2));
+    try sys.add(&[_]Interval{ pt(0), pt(1) }, .le, pt(5));
+    try sys.add(&[_]Interval{ pt(1), pt(-1) }, .le, pt(2));
+    try sys.add(&[_]Interval{ Interval.init(-1.0, 1.0), pt(0) }, .le, pt(1));
+
+    try sys.eliminate(0);
+    try std.testing.expect(!sys.isUnsat());
+    try std.testing.expect(sys.rowCount() > 0);
+
+    // The round is finished and the system is still a system, which is the
+    // other half of the question: a half-applied elimination would leave a
+    // system that cannot be driven again.
+    try sys.eliminate(1);
+    try std.testing.expect(!sys.isUnsat());
+}
+
+/// `partition`, which hands three lists to a caller who frees them through
+/// the allocator stored inside the `Partition`. All three lists are filled
+/// here, so each of the three `toOwnedSlice` calls is a place an induced
+/// failure can land with the other two already handed over, and the
+/// caller's system has to outlive the attempt either way.
+fn leakSweepPartition(allocator: std.mem.Allocator) !void {
+    var sys = try lp.System.init(allocator, 2);
+    defer sys.deinit();
+    try sys.add(&[_]Interval{ pt(1), pt(1) }, .le, pt(3));
+    try sys.add(&[_]Interval{ pt(-1), pt(1) }, .le, pt(2));
+    try sys.add(&[_]Interval{ pt(0), pt(1) }, .le, pt(5));
+    try sys.add(&[_]Interval{ pt(1), pt(-1) }, .le, pt(2));
+
+    const part = try sys.partition(0);
+    defer part.deinit();
+    try std.testing.expectEqual(@as(usize, 1), part.lower.len);
+    try std.testing.expectEqual(@as(usize, 2), part.upper.len);
+    try std.testing.expectEqual(@as(usize, 1), part.carried.len);
+    try std.testing.expectEqual(@as(usize, 3), part.rowsProduced());
+}
+
+/// The deep copy every simulation starts from. `clone` is private, so the
+/// sweep reaches it the way a caller can: through `eliminationOrder`, the
+/// one public method whose whole job is to build a copy and drive it to the
+/// end. The scratch system is what has to be freed when one of its rounds
+/// fails, and the caller's copy is what has to survive it.
+fn leakSweepClone(allocator: std.mem.Allocator) !void {
+    var sys = try lp.System.init(allocator, 3);
+    defer sys.deinit();
+    try sys.add(&[_]Interval{ pt(1), pt(0), pt(0) }, .le, pt(10));
+    try sys.add(&[_]Interval{ pt(-1), pt(0), pt(0) }, .le, pt(0));
+    try sys.add(&[_]Interval{ pt(0), pt(1), pt(0) }, .le, pt(10));
+    try sys.add(&[_]Interval{ pt(0), pt(-1), pt(0) }, .le, pt(0));
+    try sys.add(&[_]Interval{ pt(0), pt(0), pt(1) }, .le, pt(10));
+    try sys.add(&[_]Interval{ pt(0), pt(0), pt(-1) }, .le, pt(0));
+
+    const order = try sys.eliminationOrder();
+    defer allocator.free(order);
+    try std.testing.expectEqual(@as(usize, 3), order.len);
+    // The caller's system is untouched by the order being read off it, so
+    // the six rows it was given are still the six rows it holds.
+    try std.testing.expectEqual(@as(usize, 6), sys.rowCount());
+}
+
+/// `bounds`, which clones, sweeps every other variable away on the copy and
+/// reads the answer off what is left. The copy is the thing that has to be
+/// freed when any of that fails, and `self` is taken by value, so the
+/// caller's system cannot be the thing that is freed by mistake.
+fn leakSweepBounds(allocator: std.mem.Allocator) !void {
+    var sys = try lp.System.init(allocator, 3);
+    defer sys.deinit();
+    try sys.add(&[_]Interval{ pt(1), pt(0), pt(0) }, .le, pt(10));
+    try sys.add(&[_]Interval{ pt(-1), pt(0), pt(0) }, .le, pt(0));
+    try sys.add(&[_]Interval{ pt(0), pt(1), pt(0) }, .le, pt(10));
+    try sys.add(&[_]Interval{ pt(0), pt(-1), pt(0) }, .le, pt(0));
+    try sys.add(&[_]Interval{ pt(0), pt(0), pt(1) }, .le, pt(10));
+    try sys.add(&[_]Interval{ pt(0), pt(0), pt(-1) }, .le, pt(0));
+
+    for (0..3) |k| {
+        try std.testing.expect((try sys.bounds(k)) != null);
+    }
+    // A projection is a question, not a mutation: six rows in, six rows out.
+    try std.testing.expectEqual(@as(usize, 6), sys.rowCount());
+    try std.testing.expect(!sys.isUnsat());
+}
+
+/// `box`, the one that allocates memory it HANDS BACK: a slice the caller
+/// frees through the allocator the system was built with. The paths that
+/// answer null free that slice themselves and the paths that fail free it
+/// through an `errdefer`, and a sweep over the successes alone would see
+/// neither.
+fn leakSweepBox(allocator: std.mem.Allocator) !void {
+    var sys = try lp.System.init(allocator, 3);
+    defer sys.deinit();
+    try sys.add(&[_]Interval{ pt(1), pt(0), pt(0) }, .le, pt(10));
+    try sys.add(&[_]Interval{ pt(-1), pt(0), pt(0) }, .le, pt(0));
+    try sys.add(&[_]Interval{ pt(0), pt(1), pt(0) }, .le, pt(10));
+    try sys.add(&[_]Interval{ pt(0), pt(-1), pt(0) }, .le, pt(0));
+    try sys.add(&[_]Interval{ pt(0), pt(0), pt(1) }, .le, pt(10));
+    try sys.add(&[_]Interval{ pt(0), pt(0), pt(-1) }, .le, pt(0));
+
+    const derived = try projectedBox(try sys.box());
+    defer allocator.free(derived);
+    try std.testing.expectEqual(@as(usize, 3), derived.len);
+    for (derived) |iv| try std.testing.expect(iv.lo <= iv.hi);
+    try std.testing.expectEqual(@as(usize, 6), sys.rowCount());
+}
+
+test "every allocation in add, eliminate, partition, clone, bounds and box can fail without leaking" {
+    // One sweep per operation, each run once per allocation with that
+    // allocation refused. The helper counts the allocations a run makes, then
+    // replays it once per index, and after every replay compares what the
+    // allocator handed out with what it got back: unequal is
+    // `error.MemoryLeakDetected` with the failing allocation's stack trace,
+    // and a run that swallowed the induced `error.OutOfMemory` is
+    // `error.SwallowedOutOfMemoryError`.
+    try std.testing.checkAllAllocationFailures(gpa, leakSweepAddEq, .{});
+    try std.testing.checkAllAllocationFailures(gpa, leakSweepAddGe, .{});
+    try std.testing.checkAllAllocationFailures(gpa, leakSweepEliminate, .{});
+    try std.testing.checkAllAllocationFailures(gpa, leakSweepPartition, .{});
+    try std.testing.checkAllAllocationFailures(gpa, leakSweepClone, .{});
+    try std.testing.checkAllAllocationFailures(gpa, leakSweepBounds, .{});
+    try std.testing.checkAllAllocationFailures(gpa, leakSweepBox, .{});
+}

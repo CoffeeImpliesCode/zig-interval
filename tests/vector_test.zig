@@ -1733,3 +1733,63 @@ test "Vec: distance is never below the true Euclidean distance" {
     );
     try std.testing.expectEqual(@as(usize, 0), failures);
 }
+
+/// Every allocation a `DynVec` can be asked to make, swept one failure
+/// at a time.
+///
+/// The three allocating paths are `init`, `fromArray` and the owned arm
+/// of `mapResult`, and between them they are every draw this file can
+/// fail: the first two are one allocation each with nothing taken before
+/// them, and the third is `allocLike`, the draw the other operations
+/// share. `checkAllAllocationFailures` runs the body once with nothing
+/// forced to fail to learn how many draws it makes, then once per draw
+/// with that one forced, and after each forced failure it checks that
+/// every byte the wrapper handed out came back — so a path that
+/// allocates and then drops the box on the floor is caught rather than
+/// merely counted.
+///
+/// The last block is the case a single `fail_index` cannot express. A
+/// fold that leaves the domain has ALREADY written components into the
+/// box it allocated, so that path has to release a partly built box, and
+/// the only way to say so is to walk every draw with the rest of the
+/// body balanced underneath it.
+fn sweepDynVecAllocations(gpa: std.mem.Allocator) !void {
+    {
+        var built = try interval.DynVec.init(gpa, 3, iv(1.0, 2.0));
+        defer built.deinit();
+        try std.testing.expectEqual(@as(usize, 3), built.dim());
+        try expectOrdered(built.slice());
+    }
+    {
+        var copied = try interval.DynVec.fromArray(gpa, sample().slice());
+        defer copied.deinit();
+        var expected = try interval.DynVec.fromArray(gpa, sample().slice());
+        defer expected.deinit();
+        try std.testing.expect(copied.eql(expected));
+        try expectOrdered(copied.slice());
+    }
+    {
+        var receiver = try interval.DynVec.fromArray(gpa, sample().slice());
+        defer receiver.deinit();
+        var mapped = (try interval.mapResult(receiver, double)) orelse return error.ExpectedMappedBox;
+        defer mapped.deinit();
+        try std.testing.expectEqual(@as(usize, 3), mapped.dim());
+        try expectOrdered(mapped.slice());
+    }
+    {
+        // The second component is the one below zero, so the fold has
+        // written the first result into the box before it gives up.
+        const straddling = interval.Vec(3).fromArray(.{
+            iv(1.0, 3.0),
+            iv(-4.0, -1.0),
+            iv(10.0, 20.0),
+        });
+        var v = try interval.DynVec.fromArray(gpa, straddling.slice());
+        defer v.deinit();
+        try std.testing.expect(try interval.mapResult(v, nonNegativeSqrt) == null);
+    }
+}
+
+test "DynVec: no allocating operation keeps a box when an allocation fails" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, sweepDynVecAllocations, .{});
+}

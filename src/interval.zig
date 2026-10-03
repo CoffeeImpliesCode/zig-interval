@@ -379,7 +379,9 @@ pub const Interval = struct {
         return (self.lo + self.hi) / 2.0;
     }
 
-    /// Clamp x into [lo, hi]. Values below lo map to lo, above hi to hi.
+    /// Clamp x into [lo, hi]. A non-finite x has no case of its own, since
+    /// `@min` and `@max` answer with their non-NaN operand: `+inf` maps to
+    /// hi and `-inf` to lo as any out-of-range value does, and a NaN to lo.
     pub fn clamp(self: Interval, x: f64) f64 {
         return @min(@max(x, self.lo), self.hi);
     }
@@ -615,6 +617,13 @@ pub const Interval = struct {
     /// margin inverts the interval, which `init`'s ordering check diagnoses
     /// in Debug and ReleaseSafe and which is a precondition violation rather
     /// than a guarantee in ReleaseFast and ReleaseSmall.
+    ///
+    /// A NaN margin is the same class of input and reaches the same check by
+    /// another road: it is not `-inf`, so the branch below is skipped and
+    /// the two roundings of `lo - NaN` and `hi + NaN` are NaN, which fails
+    /// `lo <= hi` for the reason a NaN endpoint does: Debug and ReleaseSafe
+    /// abort on it, and a build that elides the check hands back a silent
+    /// NaN interval instead.
     ///
     /// Each end is one correctly rounded operation, so as in add the
     /// outward step per side is the whole of the widening. A zero margin

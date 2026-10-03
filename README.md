@@ -334,6 +334,19 @@ The dependency key `zig_interval` is the package name; the module name
 package registers, and it re-exports every type, so one entry point reaches the
 whole library.
 
+The package installs a library artifact as well, named `interval`, and that is
+the route for a consumer that links the library rather than importing the
+module:
+
+```zig
+const lib = b.dependency("zig_interval", .{}).artifact("interval");
+```
+
+The two names are for two different things — `module("interval")` is the public
+module, `artifact("interval")` the installed library — and both are resolved by
+name while the build graph is configured, so a rename fails there rather than at
+link time. The consumer fixture resolves both.
+
 ## API
 
 ### Why algebraic operations are methods and elementary functions are not
@@ -426,7 +439,7 @@ for; this is the one table that lists all of them together.
 | `lp.System` | `coeffs` | `std.ArrayList(Interval)` | Every coefficient of every row in one row-major list, `var_count` entries per row. |
 | `lp.System` | `rhs` | `std.ArrayList(Interval)` | One right-hand side per row, parallel to `coeffs`, so `rhs.items.len` is the row count. |
 | `lp.System` | `alive` | `[]bool` | One flag per variable, cleared when that variable has been eliminated. |
-| `lp.System` | `unsat` | `bool` | Set once an elimination derives a contradiction. This is the field behind `isUnsat`, which returns it unchanged. |
+| `lp.System` | `unsat` | `bool` | Set once an added or derived row is a contradiction. Both paths set it: `add` checks the row it stores, and `eliminate` checks every row the round derives. This is the field behind `isUnsat`, which returns it unchanged. |
 
 Treat the two `Interval` endpoints as read-only: writing `a.lo` directly
 bypasses the `lo <= hi` check that `init` and every operation rely on, and the
@@ -672,8 +685,8 @@ rather than the overflow ray, and nothing normalises it afterwards, because
 inputs and repair nothing. If you want the ray, call `init`.
 
 `init` checks the invariant with `std.debug.assert`, which traps in Debug and
-ReleaseSafe builds. The check is elided in ReleaseFast, so in fast builds the
-caller is responsible for passing a valid range.
+ReleaseSafe builds. The check is elided in ReleaseFast and ReleaseSmall, so in
+those builds the caller is responsible for passing a valid range.
 
 Widening preserves the invariant: `roundDown` only ever decreases a lower bound
 and `roundUp` only ever increases an upper bound, so a valid input interval
@@ -696,9 +709,9 @@ dimension is worth treating in two different ways.
 `get` and `set` bounds-check their index, on both types. `Vec(n)` indexes a
 `[n]Interval` field and `DynVec` indexes a slice, and Zig checks a runtime index
 into either one in Debug and ReleaseSafe. As with every `std.debug` assertion,
-the check is compiled out in ReleaseFast, so a ReleaseFast build is the only
-mode in which an out-of-range index goes unchecked, and the caller is
-responsible there.
+the check is compiled out in ReleaseFast and ReleaseSmall, so those two are
+the only modes in which an out-of-range index goes unchecked, and the caller
+is responsible there.
 
 Use `Vec(n)` when the dimension is a constant in your program — 2 for a
 rectangle, 3 for a bounding box, 7 for a state vector. It has no allocator in
@@ -1059,7 +1072,7 @@ strictly bounded has its bound widen, never tighten.
 | `rowCount(self) usize` | The number of stored **rows**, not of constraints. A row added as `eq` is stored as two, so three constraints of which one is an `eq` answer `4` here. `gt` and `lt` are relaxed rather than duplicated, so the inflation is specifically from equalities and its factor cannot be predicted from the input count. |
 | `add(self, coeffs: []const Interval, op: Cmp, rhs: Interval) !void` | Insert a constraint, copying `coeffs`. `coeffs.len` must equal `varCount()`, else `error.BadVariableCount`. An `eq` inserts two rows. |
 | `at(self, i: usize) !Lin` | Row `i`, borrowed and **read-only**: `error.BadRow` for an index at or above `rowCount()`, and `row.coeffs` is a `[]const` so a write through the view is a compile error rather than a silent edit of the solver's own storage. |
-| `isUnsat(self) bool` | True once the system holds a derived row with an all-zero coefficient vector and a strictly negative right-hand side. Only an `eliminate` derives one, so this is `false` on a system that merely holds conflicting rows. |
+| `isUnsat(self) bool` | True once the system holds a row with an all-zero coefficient vector and a strictly negative right-hand side, whether `add` stored that row or `eliminate` derived it. Conflicting rows that both mention a variable are not such a row, so this is `false` until an elimination pairs them. |
 | `eliminate(self, k: usize) !void` | Eliminate variable `k` exactly. `error.BadVariable` for an out-of-range index, `error.VariableEliminated` for one already gone. |
 | `eliminationOrder(self) ![]usize` | The order the solver would pick. Caller-owned; free it with the system's allocator. |
 | `eliminateInOrderOfChoice(self) !bool` | Eliminate in that order. Returns `false` when the system is proven unsatisfiable. |
@@ -1192,9 +1205,11 @@ pub fn main(init: std.process.Init) !void {
 **entirely zero** and whose right-hand side is strictly negative: a row stating
 `0 <= -1`, which no variable can rescue. Neither row above is that, because both
 mention `x`. It is the elimination that derives it, pairing `x <= 1` against
-`x >= 2` and cancelling the `x` terms. So the flag is only meaningful after an
-elimination has run, and a test of `isUnsat` on a freshly built system is testing
-nothing. `bounds` and `box` do not set it either: each runs its elimination on a
+`x >= 2` and cancelling the `x` terms. An `add` sets the flag too, on a
+stored row of exactly that shape, so the two paths are not exclusive; what
+holds either way is that rows which merely conflict are not one, and a test
+of `isUnsat` on a system holding nothing but those is testing nothing.
+`bounds` and `box` do not set it either: each runs its elimination on a
 private clone, so read their return value, which is `null` when the system is
 unsatisfiable.
 
