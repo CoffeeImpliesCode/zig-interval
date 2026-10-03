@@ -429,71 +429,56 @@ pub fn Vec(comptime n: usize) type {
     };
 }
 
-/// A box whose dimension is known only at runtime. It owns its
-/// component slice and the allocator that slice came from, so every
-/// operation either reuses the receiver or draws its result from that
-/// same allocator, and a result stays valid for as long as the box
-/// that produced it.
+/// A runtime-dimensional box that owns its component allocation and stores
+/// its allocator. `takeFrom` adopts the source allocation and allocator.
+/// The allocator's backing state must outlive the allocation, including
+/// independently allocated result boxes.
 ///
-/// The value semantics differ from `Vec(n)`, so read this before use:
-/// an operation that produces a new box returns `!DynVec` and can fail
-/// on a dimension mismatch or on allocation, while an operation that
-/// can reuse the receiver is in place, takes a `*DynVec`, and returns
-/// `void`. So `add` leaves the receiver alone, `iadd` overwrites it,
-/// and `neg` is in place because there is no second box worth keeping.
+/// Binary value-returning operations borrow their operands and return a new
+/// owned box. They can fail on a dimension mismatch or allocation. In-place
+/// operations overwrite the receiver without allocating. See each method's
+/// error set.
 ///
-/// Ownership: one box, one owner. A constructor hands the box to the
-/// caller, and so does every method that returns a `DynVec`: the
-/// returned box is the new owner's, the receiver keeps whatever it
-/// held, and the new owner frees that box once, with `deinit`, using
-/// the allocator the box was built from. A copy, `var b = a;`, is a
-/// second reference to the SAME slice rather than a second box, so
-/// freeing both is a double free, and nothing in the type can catch
-/// it: the language has no move qualifier to forbid the copy with.
-/// The convention above is the whole of the rule, and the assignment
-/// that honours it frees the old box before overwriting it:
+/// Ownership is unique. Constructors and methods returning a `DynVec` give
+/// the caller cleanup duties. Call `deinit` on the current owner. A raw copy,
+/// `var b = a;`, aliases the same allocation: releasing both is invalid in
+/// every optimize mode. Zig has no move qualifier to prevent that copy.
+/// Use `fromArray(gpa, source.slice())` for an independent copy, or `takeFrom`
+/// to replace an owner and drain a mutable source:
 ///
-///     const next = try acc.add(o);
-///     acc.deinit();
-///     acc = next;
+///     var next = try acc.add(o);
+///     defer next.deinit();
+///     acc.takeFrom(&next);
 ///
-/// `deinit` is idempotent, so the one mistake the type CAN catch, a
-/// second `deinit` on one box, costs nothing.
+/// Cleanup of the drained source is safe. `deinit` also permits repeated
+/// cleanup of the same object, leaving a valid zero-dimensional box.
+/// No stable address for the object itself is required.
 ///
-/// The slice must not be REPLACED, and the type cannot say so. `gpa`
-/// and `comps` are public fields and the language has no field
-/// privacy, so a caller can point `comps` at a slice this box never
-/// allocated; a private inner struct hides nothing either, because the
-/// fields are reached through the same path either way. Every
-/// constructor records the address its slice had, and `deinit`
-/// compares that record with the address the slice has now, so the
-/// mistake is caught by an assertion in this file that NAMES it,
-/// rather than by `Allocator.free` further down the stack naming the
-/// allocator, or, under a release allocator, not at all.
+/// Do not replace `gpa`, `comps`, or `own`. Zig fields are reachable even
+/// without `pub`, so this is a caller precondition. In Debug and ReleaseSafe,
+/// `deinit` diagnoses a changed component address, and `takeFrom` diagnoses
+/// distinct nonempty inputs that share one component address. ReleaseFast
+/// and ReleaseSmall omit these checks. Neither check detects all copied
+/// owners, stale views, allocator replacement, or field forgery.
 ///
-/// That is an assertion, so ReleaseFast and ReleaseSmall elide it,
-/// which is the trade every other check in this library makes and the
-/// same one: the caller keeps the slice it was given, because the
-/// rule cannot be carried by the type.
+/// A borrowed slice follows its allocation across transfer. Replacement or
+/// release by the current owner ends that borrow. Synchronize mutation,
+/// transfer, and teardown with all readers.
 pub const DynVec = struct {
     /// Failures of the box operations: the operand widths disagree, or
     /// the allocation for a new box did not fit.
     pub const Error = error{ DimensionMismatch, OutOfMemory };
 
-    /// The allocator every result of this box is drawn from. `deinit`
-    /// frees with it, so it must be the one `init` was handed.
+    /// The allocator of the current allocation, also used for new results.
+    /// `takeFrom` adopts the source allocator. Its backing state must stay live.
     gpa: std.mem.Allocator,
 
-    /// The components, one per coordinate axis, and the box's own
-    /// allocation. Replace it and `deinit` frees a slice this box
-    /// never allocated; see the ownership note on this type.
+    /// The owned components, one per coordinate axis. Do not replace this
+    /// slice. Use `set` to change a component or `takeFrom` to replace an owner.
     comps: []Interval,
 
-    /// The address `comps` had when the constructor returned the box,
-    /// and the only thing `deinit` trusts. Private by convention
-    /// alone, since the language has no field privacy: a caller can
-    /// read and write it, and a write to `comps` that leaves this
-    /// behind is exactly what `deinit` checks for.
+    /// The component address recorded at allocation and carried by `takeFrom`.
+    /// `deinit` checks it in Debug and ReleaseSafe. Do not change this record.
     own: [*]Interval,
 
     /// A box of n components, all set to fill.
@@ -509,6 +494,8 @@ pub const DynVec = struct {
     /// for `Vec(n).fromArray`, for `init(fill)`, and for a write to
     /// `comps[i]`, and an invalid component is stored here unchanged. See
     /// `isEmpty`.
+    /// Use `fromArray(gpa, source.slice())` for an independent owned copy.
+    /// Allocation failure changes neither the source nor its borrowed views.
     pub fn fromArray(gpa: std.mem.Allocator, comps: []const Interval) !DynVec {
         const owned = try gpa.dupe(Interval, comps);
         return .{ .gpa = gpa, .comps = owned, .own = owned.ptr };
@@ -532,15 +519,11 @@ pub const DynVec = struct {
     /// This does not make a COPY safe to free, and cannot: the copy
     /// holds the same slice, so the second free is a double free. One
     /// box, one owner; see the ownership note on this type.
+    /// A source drained by `takeFrom` has the same safe cleanup state.
     pub fn deinit(self: *DynVec) void {
-        // A box owns one slice, the one its constructor allocated, and
-        // `own` is the address of that slice. Both fields are public,
-        // so `comps` can name a slice this box never allocated, and
-        // freeing that through `gpa` hands the allocator memory it
-        // never handed out: a silent heap corruption under a release
-        // allocator, and under a checked one a death inside
-        // `Allocator.free` that names the allocator rather than the
-        // mistake. So the check is here, and it names the mistake.
+        // `own` records this allocation's address, including after transfer.
+        // The fields are reachable, so a caller can replace `comps` with a
+        // slice this box does not own. Releasing it can corrupt the heap.
         //
         // `runtime_safety` is the elision every other check in this
         // library gets from `std.debug.assert`, spelled out because an
@@ -567,6 +550,38 @@ pub const DynVec = struct {
         self.gpa.free(comps);
     }
 
+    /// Release this box's old allocation, adopt the source allocation and
+    /// allocator, then drain the source to a valid zero-dimensional box.
+    /// This can change the dimension. It allocates nothing and copies no
+    /// component data. Self-transfer is an unconditional no-op.
+    ///
+    /// Both inputs must be valid owners or valid zero-dimensional objects.
+    /// No stale owning aliases or replaced fields are valid inputs. Debug
+    /// and ReleaseSafe diagnose distinct nonempty inputs with the same
+    /// component address before releasing either allocation. ReleaseFast
+    /// and ReleaseSmall omit that diagnostic, not the ownership precondition.
+    ///
+    /// Old destination views end here. Source views follow the allocation
+    /// to this box and survive cleanup of the drained source. The source
+    /// allocator's backing state must outlive this box's adopted allocation
+    /// and any later allocated results. Transfer does not extend an arena's life.
+    pub fn takeFrom(self: *DynVec, source: *DynVec) void {
+        if (self == source) return;
+        if (std.debug.runtime_safety) {
+            if (self.comps.len != 0 and source.comps.len != 0 and
+                self.comps.ptr == source.comps.ptr)
+            {
+                std.debug.panic("DynVec.takeFrom: distinct boxes share one owned allocation", .{});
+            }
+        }
+        const gpa = source.gpa;
+        const comps = source.comps;
+        const own = source.own;
+        self.deinit();
+        self.* = .{ .gpa = gpa, .comps = comps, .own = own };
+        source.comps = comps[0..0];
+    }
+
     /// The runtime component count.
     pub fn dim(self: DynVec) usize {
         return self.comps.len;
@@ -575,11 +590,12 @@ pub const DynVec = struct {
     /// The components as a slice, for code written against the core.
     /// The receiver is a pointer, matching `Vec(n).slice`, so the two
     /// representations are spelled the same way at every call site.
-    /// The slice borrows the box's own allocation, and `deinit` is the
-    /// call that ends the borrow: it frees that memory, so a slice taken
-    /// before it must not be read after. `set` does not end the borrow
-    /// — it writes one component of the same allocation, so the slice
-    /// sees the new value.
+    /// The slice borrows the allocation, not the receiver's object address.
+    /// `takeFrom` invalidates old destination views, but source views follow
+    /// the adopted allocation and survive cleanup of the drained source.
+    /// Release or replacement by the current owner ends the borrow. Self-transfer
+    /// preserves it. `set` writes the same allocation, so a live view sees the
+    /// new value. Do not race reads with mutation, transfer, or cleanup.
     pub fn slice(self: *const DynVec) []const Interval {
         return self.comps;
     }

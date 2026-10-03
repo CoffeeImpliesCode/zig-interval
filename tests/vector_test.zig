@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const interval = @import("interval");
 const Interval = interval.Interval;
@@ -156,11 +157,14 @@ const probe_var = "ZIG_INTERVAL_DYNVEC_OWNERSHIP_PROBE";
 /// fails the control instead of reading as a trap.
 const probe_replace = "replace";
 const probe_control = "control";
+const probe_take_control = "take-control";
+const probe_take_alias = "take-alias";
+const probe_take_replace = "take-replace";
 
 /// The status a child exits with when `deinit` returned instead of aborting.
 /// Deliberately not zero, and matched by value: a child that never reached
 /// the mistake must not be readable as one that survived it.
-const untrapped_status: u8 = 3;
+const untrapped_status: u8 = 11;
 
 /// The status for a part this probe does not know, which is the same rule
 /// `tests/nan_probe.zig` follows with its own usage status: a run that
@@ -180,9 +184,8 @@ const ProbeVerdict = struct {
     aborted: bool,
     /// The status the child exited with, or null when it never exited.
     code: ?u8,
-    /// What the child wrote to its standard error, owned by the caller. The
-    /// panic message is in here, and a child process is the only place the
-    /// text of the check can be read from.
+    /// Standard error, owned by the caller, for diagnostics if a refusal
+    /// check fails. The verdict does not depend on its wording.
     output: []u8,
 };
 
@@ -212,6 +215,27 @@ fn probeDeinit(replace: bool) void {
     gpa.free(owned);
 }
 
+fn probeTake(part: []const u8) void {
+    const gpa = std.testing.allocator;
+    var destination = interval.DynVec.init(gpa, 0, iv(0.0, 0.0)) catch @panic("probe: allocation failed");
+    var source = interval.DynVec.init(gpa, 3, iv(1.0, 2.0)) catch @panic("probe: allocation failed");
+    if (std.mem.eql(u8, part, probe_take_alias)) {
+        destination = source; // Invalid owning copy, confined to a checked child.
+        destination.takeFrom(&source);
+        return;
+    }
+    if (std.mem.eql(u8, part, probe_take_replace)) {
+        source.comps = gpa.alloc(Interval, 3) catch @panic("probe: allocation failed");
+        destination.takeFrom(&source);
+        destination.deinit();
+        return;
+    }
+    if (!std.mem.eql(u8, part, probe_take_control)) std.process.exit(usage_status);
+    destination.takeFrom(&source);
+    source.deinit();
+    destination.deinit();
+}
+
 /// Run one child, playing `part`. A failure to run at all is an error and
 /// never a verdict: a process that cannot be spawned has reported nothing
 /// about the library, and turning that into "it trapped" would be the
@@ -237,10 +261,8 @@ fn runOwnershipProbe(part: []const u8) !ProbeVerdict {
         .environ_map = &env,
         .stdin = .ignore,
         .stdout = .ignore,
-        // stderr is a pipe rather than /dev/null because the panic message
-        // is half of what is being pinned: an abort says that something
-        // stopped the child, and the message says what, and "reached
-        // unreachable code" is a message that names nothing.
+        // Keep diagnostics for a failed refusal check. Status decides the
+        // verdict, not the panic wording.
         .stderr = .pipe,
     });
     defer child.kill(std.testing.io);
@@ -286,30 +308,21 @@ fn probePart(gpa: std.mem.Allocator) ![]u8 {
     };
 }
 
-/// The check's own words, as the child wrote them: the line carrying the
-/// marker, or nothing at all when the child died without one. A report that
-/// printed the first line of the stream instead would be printing the test
-/// runner's progress line, since the runner writes to standard error too.
-fn probeMessage(v: ProbeVerdict) []const u8 {
-    const start = std.mem.indexOf(u8, v.output, "DynVec.deinit:") orelse return "";
-    const rest = v.output[start..];
-    return rest[0 .. std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len];
-}
-
 /// The verdict, one line each.
 fn reportProbe(part: []const u8, v: ProbeVerdict) void {
     if (v.code) |code| {
         std.debug.print("    {s: <9} -> exit code {d}\n", .{ part, code });
         return;
     }
-    if (probeMessage(v).len == 0) {
-        std.debug.print("    {s: <9} -> killed, with no message of its own\n", .{part});
-        return;
-    }
-    std.debug.print("    {s: <9} -> killed: {s}\n", .{ part, probeMessage(v) });
+    std.debug.print("    {s: <9} -> killed\n", .{part});
 }
 
-test "contract: a comps replaced since construction traps deinit" {
+fn probeRefused(verdict: ProbeVerdict) bool {
+    // Zig's Windows abort exits with 3. The survived and usage statuses differ.
+    return verdict.aborted or (builtin.os.tag == .windows and verdict.code == 3);
+}
+
+test "DynVec: replaced components trap deinit" {
     const gpa = std.testing.allocator;
     const part = try probePart(gpa);
     defer gpa.free(part);
@@ -318,6 +331,10 @@ test "contract: a comps replaced since construction traps deinit" {
         // exit below, which is the report that nothing trapped. The control
         // reports the opposite and comes back clean, so the two children
         // differ in one bit of status and one line of the probe.
+        if (std.mem.startsWith(u8, part, "take-")) {
+            probeTake(part);
+            std.process.exit(if (std.mem.eql(u8, part, probe_take_control)) 0 else untrapped_status);
+        }
         const replace = if (std.mem.eql(u8, part, probe_replace))
             true
         else if (std.mem.eql(u8, part, probe_control))
@@ -345,18 +362,13 @@ test "contract: a comps replaced since construction traps deinit" {
     // again with a clean status and no message from the check.
     try std.testing.expect(!control.aborted);
     try std.testing.expectEqual(@as(?u8, 0), control.code);
-    try std.testing.expectEqual(@as(usize, 0), probeMessage(control).len);
     if (checked) {
         // The decoy is a real block of the same allocator, so the free the
         // child goes on to perform is well formed and cannot be what killed
         // it: the abort came from a check in this library, and the only
         // check between the replacement and that free is the one in
         // `src/vector.zig`.
-        try std.testing.expect(replace.aborted);
-        // And the check names the mistake rather than reporting that two
-        // pointers differ, which is what a bare `assert` would leave. The
-        // message is the contract, so it is read back rather than assumed.
-        try std.testing.expect(std.mem.indexOf(u8, replace.output, "comps was replaced since construction") != null);
+        try std.testing.expect(probeRefused(replace));
     } else {
         // ReleaseFast and ReleaseSmall compile the check out, the trade the
         // ownership note on the type names. So the child is EXPECTED to
@@ -365,6 +377,21 @@ test "contract: a comps replaced since construction traps deinit" {
         // not meant to survive.
         try std.testing.expect(!replace.aborted);
         try std.testing.expectEqual(@as(?u8, untrapped_status), replace.code);
+    }
+}
+
+test "DynVec: takeFrom refuses a copied owner and preserves address diagnostics" {
+    if (!std.debug.runtime_safety) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const control = try runOwnershipProbe(probe_take_control);
+    defer gpa.free(control.output);
+    try std.testing.expect(!control.aborted);
+    try std.testing.expectEqual(@as(?u8, 0), control.code);
+    for ([_][]const u8{ probe_take_alias, probe_take_replace }) |part| {
+        const refusal = try runOwnershipProbe(part);
+        defer gpa.free(refusal.output);
+        if (!probeRefused(refusal)) std.debug.print("{s}\n", .{refusal.output});
+        try std.testing.expect(probeRefused(refusal));
     }
 }
 
@@ -839,62 +866,177 @@ test "DynVec: deinit is safe to call twice on one box" {
     try std.testing.expectEqual(@as(usize, 0), v.dim());
     try std.testing.expectEqual(@as(usize, 0), v.slice().len);
     try std.testing.expect(!v.isEmpty());
-    // The recorded address is what carries the second and third call past
-    // the check in `deinit`: the empty slice still sits where the owned
-    // slice was, so the record and the slice agree at every call, and a
-    // record compared against nothing would fire here instead.
-    try std.testing.expect(v.own == v.comps.ptr);
     v.deinit();
 }
 
-test "contract: every constructor records the address deinit checks" {
-    // The record is the whole of the check, so a constructor that forgot it
-    // would make every `deinit` of its own box abort, on a box no caller
-    // had touched and no other statement in this file would notice. The
-    // record is the address, not the length: two boxes of the same width
-    // hold different addresses, and a check on the length would pass for
-    // both of them.
+test "DynVec: takeFrom replaces the allocation and preserves source borrows" {
+    var old_heap = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var adopted_heap = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var destination = try interval.DynVec.init(old_heap.allocator(), 1, iv(-3.0, -1.0));
+    defer destination.deinit();
+    var source = try interval.DynVec.fromArray(adopted_heap.allocator(), &.{
+        iv(1.0, 2.0),
+        iv(3.0, 4.0),
+    });
+    defer source.deinit();
+    const view = source.slice();
+    old_heap.fail_index = old_heap.alloc_index;
+    adopted_heap.fail_index = adopted_heap.alloc_index;
+
+    destination.takeFrom(&source);
+    try std.testing.expectEqual(old_heap.allocated_bytes, old_heap.freed_bytes);
+    try std.testing.expectEqual(@as(usize, 0), adopted_heap.freed_bytes);
+    try std.testing.expect(!old_heap.has_induced_failure);
+    try std.testing.expect(!adopted_heap.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 2), destination.dim());
+    try std.testing.expectEqual(@as(usize, 0), source.dim());
+    try std.testing.expect(!source.isEmpty());
+    try std.testing.expect(destination.get(0).eql(iv(1.0, 2.0)));
+
+    source.deinit();
+    destination.set(1, iv(8.0, 9.0));
+    try std.testing.expect(view[1].eql(iv(8.0, 9.0)));
+    old_heap.fail_index = std.math.maxInt(usize);
+    try std.testing.expectError(error.OutOfMemory, destination.add(destination));
+    try std.testing.expect(adopted_heap.has_induced_failure);
+    try std.testing.expect(!old_heap.has_induced_failure);
+    destination.deinit();
+    try std.testing.expectEqual(adopted_heap.allocated_bytes, adopted_heap.freed_bytes);
+}
+
+test "DynVec: takeFrom self-transfer preserves allocation and views" {
+    var heap = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var box = try interval.DynVec.init(heap.allocator(), 2, iv(1.0, 2.0));
+    defer box.deinit();
+    const view = box.slice();
+    heap.fail_index = heap.alloc_index;
+    box.takeFrom(&box);
+    try std.testing.expectEqual(@as(usize, 2), box.dim());
+    try std.testing.expect(view[0].eql(iv(1.0, 2.0)));
+    box.set(0, iv(3.0, 4.0));
+    try std.testing.expect(view[0].eql(iv(3.0, 4.0)));
+    try std.testing.expectEqual(@as(usize, 0), heap.freed_bytes);
+    try std.testing.expect(!heap.has_induced_failure);
+
+    box.deinit();
+    const empty_view = box.slice();
+    box.takeFrom(&box);
+    try std.testing.expectEqual(@as(usize, 0), box.dim());
+    try std.testing.expect(empty_view.ptr == box.slice().ptr);
+    try std.testing.expect(!box.isEmpty());
+}
+
+test "DynVec: takeFrom accepts every empty and nonempty combination" {
     const gpa = std.testing.allocator;
+    for ([_]usize{ 0, 3 }) |source_width| {
+        for ([_]usize{ 0, 2 }) |destination_width| {
+            var destination = try interval.DynVec.init(gpa, destination_width, iv(-2.0, -1.0));
+            defer destination.deinit();
+            var source = try interval.DynVec.init(gpa, source_width, iv(3.0, 4.0));
+            destination.takeFrom(&source);
+            defer source.deinit();
+            try std.testing.expectEqual(source_width, destination.dim());
+            try std.testing.expectEqual(@as(usize, 0), source.dim());
+            try std.testing.expect(!source.isEmpty());
+            for (destination.slice()) |component| {
+                try std.testing.expect(component.eql(iv(3.0, 4.0)));
+            }
+        }
+    }
+}
 
-    var filled = try interval.DynVec.init(gpa, 3, iv(1.0, 2.0));
-    defer filled.deinit();
-    try std.testing.expect(filled.own == filled.comps.ptr);
+test "DynVec: takeFrom accepts retained empty addresses reused by a live allocation" {
+    var buffer: [4 * @sizeOf(Interval)]u8 align(@alignOf(Interval)) = undefined;
+    var heap = std.heap.FixedBufferAllocator.init(&buffer);
+    var released = try interval.DynVec.init(heap.allocator(), 2, iv(1.0, 2.0));
+    defer released.deinit();
+    const address = released.slice().ptr;
+    released.deinit();
+    var source = try interval.DynVec.init(heap.allocator(), 2, iv(3.0, 4.0));
+    defer source.deinit();
+    try std.testing.expect(address == source.slice().ptr);
 
-    var copied = try interval.DynVec.fromArray(gpa, sample().slice());
-    defer copied.deinit();
-    try std.testing.expect(copied.own == copied.comps.ptr);
+    released.takeFrom(&source);
+    try std.testing.expectEqual(@as(usize, 2), released.dim());
+    try std.testing.expect(released.get(0).eql(iv(3.0, 4.0)));
+    source.deinit();
+    released.takeFrom(&source);
+    try std.testing.expectEqual(@as(usize, 0), released.dim());
+    try std.testing.expect(!released.isEmpty());
+}
 
-    // The value-returning operations allocate their own box, so their
-    // constructor is the one behind `add` rather than a public one.
-    var sum = try filled.add(copied);
-    defer sum.deinit();
-    try std.testing.expect(sum.own == sum.comps.ptr);
+test "DynVec: takeFrom nullable replacements commit only after allocation succeeds" {
+    var heap = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var accumulator = try interval.DynVec.init(heap.allocator(), 2, iv(0.0, 10.0));
+    defer accumulator.deinit();
+    var operand = try interval.DynVec.init(std.testing.allocator, 2, iv(3.0, 8.0));
+    defer operand.deinit();
+    const original = accumulator.slice();
+    heap.fail_index = heap.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, accumulator.add(operand));
+    try std.testing.expect(original[0].eql(iv(0.0, 10.0)));
+    try std.testing.expect(accumulator.get(1).eql(iv(0.0, 10.0)));
 
-    var twin = try interval.DynVec.init(gpa, 3, iv(3.0, 4.0));
-    defer twin.deinit();
-    try std.testing.expectEqual(sum.dim(), twin.dim());
-    try std.testing.expect(twin.own != sum.own);
+    heap.fail_index = std.math.maxInt(usize);
+    var shared = try accumulator.intersect(operand);
+    defer if (shared) |*box| box.deinit();
+    if (shared) |*box| {
+        accumulator.takeFrom(box);
+        try std.testing.expectEqual(@as(usize, 0), box.dim());
+    } else return error.ExpectedIntersection;
+    try std.testing.expect(accumulator.get(0).eql(iv(3.0, 8.0)));
+    try std.testing.expect(accumulator.get(1).eql(iv(3.0, 8.0)));
+
+    operand.set(1, iv(9.0, 10.0));
+    var missing = try accumulator.intersect(operand);
+    defer if (missing) |*box| box.deinit();
+    try std.testing.expect(missing == null);
+    try std.testing.expect(accumulator.get(1).eql(iv(3.0, 8.0)));
+}
+
+test "DynVec: independent copies survive source cleanup and preserve OOM state" {
+    const gpa = std.testing.allocator;
+    var source = try interval.DynVec.fromArray(gpa, &.{
+        iv(1.0, 2.0),
+        iv(3.0, 4.0),
+        .{ .lo = -0.0, .hi = 0.0 },
+    });
+    defer source.deinit();
+    const view = source.slice();
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, interval.DynVec.fromArray(failing.allocator(), view));
+    try std.testing.expect(view[0].eql(iv(1.0, 2.0)));
+    var copy = try interval.DynVec.fromArray(gpa, view);
+    defer copy.deinit();
+    source.set(0, iv(8.0, 9.0));
+    source.deinit();
+    try std.testing.expect(copy.get(0).eql(iv(1.0, 2.0)));
+    try std.testing.expect(copy.get(1).eql(iv(3.0, 4.0)));
+    try std.testing.expect(std.math.signbit(copy.get(2).lo));
+    try std.testing.expect(!std.math.signbit(copy.get(2).hi));
+
+    var empty = try interval.DynVec.fromArray(failing.allocator(), &.{});
+    defer empty.deinit();
+    try std.testing.expectEqual(@as(usize, 0), empty.dim());
+    try std.testing.expect(!empty.isEmpty());
+    try std.testing.expectEqual(@as(usize, 0), failing.allocated_bytes);
 }
 
 test "DynVec: a returned box belongs to whoever holds it last" {
-    // The convention the type cannot enforce: freeing a COPY is a
-    // double free, because the copy names the same slice, so the old
-    // box goes before the assignment that would drop it on the floor.
-    // The testing allocator reports an allocation that was never
-    // freed, so a step that loses a box fails here rather than
-    // passing quietly.
+    // Each replacement drains its source. Both registered cleanups stay valid.
+    // The testing allocator catches dropped allocations and duplicate release.
     const gpa = std.testing.allocator;
     var acc = try interval.DynVec.fromArray(gpa, sample().slice());
+    defer acc.deinit();
     var want = sample();
     for (0..3) |_| {
         var o = try interval.DynVec.fromArray(gpa, other().slice());
         defer o.deinit();
-        const next = try acc.add(o);
-        acc.deinit();
-        acc = next;
+        var next = try acc.add(o);
+        defer next.deinit();
+        acc.takeFrom(&next);
         want = want.add(other());
     }
-    defer acc.deinit();
 
     try expectOrdered(acc.slice());
     for (0..3) |i| {

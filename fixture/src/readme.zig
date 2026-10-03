@@ -733,30 +733,26 @@ fn readmeBoxOwnership(report: *Report) !void {
         var acc = try interval.DynVec.init(dbg.allocator(), n, fill);
 
         for (others) |o| {
-            const next = try acc.add(o);
-            acc.deinit();
-            acc = next;
+            var next = try acc.add(o);
+            defer next.deinit();
+            acc.takeFrom(&next);
         }
 
         acc.deinit();
-        try expectBool(report, "readme-box-free-then-overwrite", dbg.deinit() == .ok, true);
+        try expectBool(report, "readme-box-transfer-frees-everything", dbg.deinit() == .ok, true);
     }
 
-    // The same rule for `intersect`, where there is nothing to free on the
-    // `null` arm because no box was built. The loop header is added here:
-    // the README quotes the four lines of the body and leaves the loop they
-    // belong to to the prose above, and `o` has nothing to refer to without
-    // it. The operands overlap on no component, so the `null` arm is the one
-    // taken and its claim — that it frees nothing — is what is checked.
+    // The first operand intersects at the shared endpoint. Later operands
+    // produce null and leave the accumulator unchanged. Mutable payload
+    // capture lets transfer drain the owned nonnull result safely.
     {
         var dbg: std.heap.DebugAllocator(.{ .safety = true }) = .init;
         var acc = try interval.DynVec.init(dbg.allocator(), n, fill);
 
         for (others) |o| {
-            if (try acc.intersect(o)) |shared| {
-                acc.deinit();
-                acc = shared;
-            }
+            var shared = try acc.intersect(o);
+            defer if (shared) |*box| box.deinit();
+            if (shared) |*box| acc.takeFrom(box);
             // else: no box, and acc is unchanged
         }
 

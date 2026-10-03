@@ -745,10 +745,11 @@ defer dyn.deinit();
 | `set(self: *Self, i: usize, v: Interval) void` | Overwrite component `i`, through a pointer. | Overwrite component `i`, through a pointer. |
 | `slice(self) []const Interval` | View of the components. | View of the components. |
 | `deinit(self: *DynVec) void` | — | Frees the storage. Idempotent: a second call frees nothing. In a checked build it also panics, naming the mistake, if `comps` was replaced since construction. |
+| `takeFrom(self: *DynVec, source: *DynVec) void` | — | Replaces the destination, adopts the source allocation and allocator, and drains the source. No allocation or component copy. Self-transfer is a no-op. |
 | `eql(self, other) bool` | Same dimension and same components. | Same. |
 
-`DynVec` stores the allocator it was built with, so value-returning operations
-do not take one again: they allocate from `self.gpa`.
+`DynVec` stores its current allocation's allocator. Value-returning operations
+allocate from `self.gpa`. After `takeFrom`, this is the adopted source allocator.
 
 ### Operations
 
@@ -803,14 +804,14 @@ in-place form, which allocates nothing and so has nothing to free.
 for (others) |o| try acc.iadd(o); // in place, no allocation
 ```
 
-Or free the previous box before overwriting it, which is the only way to keep
-the value-returning form when you need the old box to survive the step:
+Or construct an allocated result, then transfer it into the accumulator.
+`takeFrom` releases the old allocation and drains the mutable source:
 
 ```zig
 for (others) |o| {
-    const next = try acc.add(o);
-    acc.deinit();
-    acc = next;
+    var next = try acc.add(o);
+    defer next.deinit();
+    acc.takeFrom(&next);
 }
 ```
 
@@ -818,10 +819,9 @@ The same trap applies to `sub`, `mul`, `div` and `hull`. For `intersect` there
 is nothing to free on the `null` arm, because no box was built:
 
 ```zig
-if (try acc.intersect(o)) |shared| {
-    acc.deinit();
-    acc = shared;
-}
+var shared = try acc.intersect(o);
+defer if (shared) |*box| box.deinit();
+if (shared) |*box| acc.takeFrom(box);
 // else: no box, and acc is unchanged
 ```
 
@@ -830,22 +830,42 @@ they check the widths before they touch anything, so they can report
 `error.DimensionMismatch` having changed nothing. `neg`, `recip`, `abs` and
 `sqr` take no operand and so return plain `void`.
 
-One rule underpins all of it: **one box, one owner.** A constructor hands the box
-to the caller, and so does every method that returns a `DynVec`; the receiver
-keeps whatever it held, and the new owner frees that box once, with `deinit`,
-using the allocator the box was built from.
+One rule underpins all of it: **one box, one owner.** Constructors and methods
+that return an owned `DynVec` give the caller cleanup duties. Value-returning
+arithmetic leaves the receiver unchanged. The current owner calls `deinit`
+through the stored allocator, which `takeFrom` adopts from the source.
 
 `deinit` is **idempotent** — calling it twice on one box is safe and frees
 nothing the second time, because the component slice is swapped for an empty one
 before the free and freeing an empty slice is a no-op. A deinited box is a
 zero-dimensional box: `dim()` is 0 and `slice()` is empty.
 
-What idempotence does **not** buy is safety for a copy. `var b = a;` is a second
-reference to the *same* slice, not a second box, so freeing both is a double
-free, and nothing in the type can catch it — Zig has no move qualifier to forbid
-the copy with, and the copy carries the recorded address along with it, so the
-check below does not fire for it either. The assignment that honours the rule
-is the free-then-overwrite form above.
+A raw copy, `var b = a;`, aliases the same allocation. Releasing both copies
+remains invalid in every optimize mode. `deinit` cannot detect that owning copy.
+Use `takeFrom` for transfer or `DynVec.fromArray(gpa, source.slice())` for an
+independent owned copy. The copy uses the allocator you supply and preserves
+the component representation without checking or normalizing it.
+
+`takeFrom` accepts valid owners or valid zero-dimensional objects, including
+already released sources. It can change the destination's dimension.
+The drained source has dimension 0, an empty slice, and `isEmpty() == false`.
+Its registered cleanup remains safe. Self-transfer changes nothing.
+
+In Debug and ReleaseSafe, `takeFrom` rejects distinct nonempty inputs with the
+same component address before releasing either allocation. Both lengths must
+be nonzero: an empty object can retain an address reused by a live allocation.
+ReleaseFast and ReleaseSmall omit the diagnostic. This is not general copy
+or liveness detection. The ownership precondition applies in every mode.
+
+The source allocator travels with its allocation. Its backing state must
+outlive the destination and any later allocated results. Transfer does not
+extend an arena's lifetime. The `DynVec` object itself needs no stable address.
+
+A source view survives transfer and cleanup of the drained source. It follows
+the allocation to the destination. Replacement invalidates the destination's
+old views. Release or replacement by the current owner ends the source view.
+Self-transfer preserves views, and component writes remain visible through a
+live view. Synchronize readers with mutation, transfer, and cleanup.
 
 There is one more mistake the type *can* catch, and it is caught by an
 assertion rather than by the type system: replacing `comps`. Both fields are
@@ -862,9 +882,9 @@ address it had in `own`, and `deinit` compares that record against `comps.ptr`:
 panic: DynVec.deinit: comps was replaced since construction: this box does not own the slice it holds, and freeing it hands the allocator memory it never allocated
 ```
 
-**A release build does not catch it.** The check is an assertion, so
-ReleaseFast and ReleaseSmall elide it and free the wrong slice exactly as
-before; the rule is the caller's to keep in every build mode. It is the same
+**ReleaseFast and ReleaseSmall do not catch replaced component addresses.**
+Debug and ReleaseSafe check them. The unchecked modes can free the wrong slice,
+so the caller must preserve the fields in every mode. It is the same
 trade every other check in this library makes, and the recorded address is also
 what makes idempotence hold — `deinit` swaps the slice for an empty one that
 keeps the address, so the comparison passes on every call after the first. It
