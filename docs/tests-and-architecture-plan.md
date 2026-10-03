@@ -1190,10 +1190,16 @@ reassigned a foreign slice of the SAME width is still caught. `mapResult`
 the box rather than a pointer to it, and its error union no longer carries
 `error.OutOfMemory` for a `Vec(n)`.
 
-**The half that remains.** This closes the free path. `deinit` still cannot
-make a COPY safe to free — two boxes over one slice are still two owners — and
-it says so in its own comment rather than pretending otherwise. That is the
-remaining ownership work, and it is a different item from this one.
+**The limit that remains.** The guard catches a replaced component address in
+checked builds. It does not enforce sole ownership, allocator identity or an
+unchanged slice length. Two owning copies can still release the same allocation.
+`DynVec.takeFrom`, implemented in `0ffccc03`, now replaces an owner and drains
+a mutable source. Its allocator and borrow contracts are recorded in
+[`next-work-plan.md` §6](next-work-plan.md#6-dynvec-ownership-specification-implemented).
+Valid cases pass in all four optimize modes. The checked-only copied-owner
+refusal runs in Debug and ReleaseSafe, not in unchecked modes. Both real
+package consumers pass after migration. This remains a unique-ownership
+protocol, not arbitrary-copy-safe release.
 
 ### A3 — DONE, and it verified a state the tree already had rather than changing one
 

@@ -1091,3 +1091,243 @@ that never terminated were resized to fit the row budget, with the achieved
 counts recorded in the file's own header so the next reader does not "restore"
 the values that used to hang. The `ulimit -v` recipe from an even earlier draft
 is wrong and was removed; do not reintroduce it.
+
+## 6. DynVec ownership specification (implemented)
+
+**Status:** implemented in `0ffccc03` and verified on 2026-10-04 with Zig 0.16.0.
+The design specified at `2edb6094` now provides `DynVec.takeFrom`.
+Arithmetic methods, storage layout, constructors and benchmark workloads stay unchanged.
+
+### Requirement and decision
+
+Keep `DynVec` as the sole owner of its component allocation. Add one explicit
+transfer operation that replaces a destination and drains the source. This
+reduces mistakes in the existing free-then-overwrite pattern without changing
+the arithmetic API, storage layout or allocation policy.
+
+**This is not an arbitrary-copy-safe representation.** `var b = a` makes an
+alias, not an independent owner. Releasing both remains invalid in every
+optimize mode. Borrowed by-value method arguments do not acquire cleanup duties.
+Explicit transfer closes the handoff gap, not that language-level limitation.
+
+| Operation | Contract |
+| --- | --- |
+| Construct | Existing `init` and `fromArray`; returned box has one owner. |
+| Deep copy | Existing `DynVec.fromArray(gpa, source.slice())`; caller chooses the copy's allocator. No `clone` alias. |
+| Borrow | Existing `slice()` and read-only by-value arguments; no ownership transfer. |
+| Transfer | `takeFrom(self: *DynVec, source: *DynVec) void`; source is mutable because the method drains it. |
+| Release | Existing `deinit()`; repeat cleanup of the same emptied object is safe, cleanup of an owning copy is not. |
+
+### Transfer contract
+
+1. Both objects must be valid owners or valid zero-dimensional objects.
+   Their allocator, component slice and ownership record must not have been
+   replaced by the caller. No stale owning alias is a valid input.
+2. `self == source` is an unconditional no-op, including for a nonempty box.
+   No allocation is freed, no field changes and no borrow ends.
+3. Otherwise, capture the source's allocator, components and `own` record.
+   Release the destination's previous allocation with its previous allocator.
+   Adopt the captured fields without changing any component.
+4. Leave the source with `source.comps = adopted_comps[0..0]`. Retain its
+   allocator and `own` record. This is the existing post-`deinit` state:
+   dimension 0, empty slice, `isEmpty() == false`, and repeat cleanup is safe.
+5. Transfer can change the destination's dimension. It compares no widths,
+   allocates no storage, copies no component data and returns no error union.
+   There is no partially committed OOM state.
+6. Carry `source.own` verbatim; do not reconstruct it from `comps.ptr`.
+   Transfer must not erase the existing replaced-address diagnostic.
+7. In Debug and ReleaseSafe, diagnose distinct inputs that both have nonzero
+   length and the same component address before freeing either allocation.
+   Check **both lengths**: independently created empty boxes can share a
+   sentinel, and a released empty object can retain an address that a new
+   allocation reuses. Neither case is an ownership conflict.
+8. The direct-alias diagnostic is omitted in ReleaseFast and ReleaseSmall,
+   like the existing `deinit` guard. It is not a liveness registry and cannot
+   detect all raw copies, stale slices, allocator replacement or field forgery.
+   Violating the ownership precondition can still cause a leak, use-after-free
+   or double free in unchecked builds.
+
+The source allocator travels with the allocation. After transfer, later
+allocating operations on the destination use that allocator. Its backing state
+must outlive the destination's allocation. Transfer from a short-lived arena
+does not extend the arena's lifetime. No stable address for the `DynVec` object
+itself is required; the method stores no pointer to either object.
+
+### Borrow lifetime
+
+- A view of the destination's old allocation ends at replacement.
+- A view of the source's allocation survives a successful transfer. It follows
+  the allocation to the destination and ends when that allocation is released
+  or replaced. Cleanup of the drained source does not release it.
+- Writes through the current owner remain visible through a live borrowed
+  slice. Borrowing does not permit racing mutation, transfer or teardown.
+- Self-transfer changes neither allocation nor view lifetime.
+
+The `slice` documentation states these rules.
+Do not read a released destination view in a test to prove that it is invalid.
+
+### Caller patterns and failure state
+
+Replacement pattern:
+
+```zig
+var next = try acc.add(other);
+defer next.deinit();
+acc.takeFrom(&next);
+```
+
+If `add` fails, `acc` still owns its old allocation and `next` was not built.
+Once `next` exists, transfer cannot fail. Its deferred cleanup sees an empty
+object; the destination's cleanup releases the adopted allocation.
+
+For an optional owned result, keep the payload mutable rather than taking the
+address of an immutable value capture:
+
+```zig
+var shared = try acc.intersect(other);
+defer if (shared) |*box| box.deinit();
+if (shared) |*box| acc.takeFrom(box);
+```
+
+The null arm leaves the destination unchanged. Generic `mapResult` continues to
+borrow its input by value and return an independently owned nonnull `DynVec`;
+its signatures, error set and partial-allocation cleanup do not change.
+
+For an owning container, reserve capacity before committing a transfer into a
+valid empty destination element. If reservation fails, the source must still
+own its allocation. Do not introduce a by-value consuming wrapper: it cannot
+drain a named source and makes a registered source cleanup unsafe.
+
+The deep-copy route remains failure-atomic: an allocation failure changes
+neither source nor its live views. It copies component data without checking
+or normalizing it, as `fromArray` already specifies. Copying zero components
+produces a valid zero-dimensional object without a heap allocation.
+
+### Alternatives and their costs
+
+| Model | When it wins | Reason not selected here |
+| --- | --- | --- |
+| Explicit owner, existing copy route, one `takeFrom` method | Existing allocated-result callers and generic `mapResult` retain their contracts. | Selected. Raw owning copies remain a caller error; no runtime copy-safety claim. |
+| Add `clone` and a value-returning `take` | Frequent copies or direct transfer expressions justify more names. | `fromArray` plus `slice` already copies. A value-returning take can drain before a fallible sink accepts ownership; replacement needs fewer steps with `takeFrom`. |
+| Caller-owned storage and output buffers | A kernel already owns a bounded buffer or arena and must not allocate. | Moves lifetime management to every caller, changes allocated-result and generic-map contracts, and changes the subject of allocator benchmark rows. |
+| Caller-owned store with slot/generation handles | The requirement is to reject duplicate release and stale handle access in all modes. | Requires a stable-lived store, slot-table storage, checked access and broad error/caller changes. Raw borrowed views still need a lifetime contract. |
+
+If copy-safe release becomes the requirement, use the checked-store design
+instead of claiming that this protocol meets it. Such a design must retire
+slots before generation wrap, prevent identity reuse after store teardown,
+define store synchronization and reject stale access before touching freed
+components. A copied handle is not an implicit retain. No global registry,
+refcount shim or unchecked public escape is part of that alternative.
+
+These are design costs, not measurements. No timing gain or new performance
+baseline is claimed.
+
+### Implementation boundary and migration — complete
+
+- `takeFrom` is the only new method in `src/vector.zig`. Symbol references and
+  all existing owning handoffs were checked before migration.
+- The type, `fromArray`, `deinit` and `slice` comments state the transfer and
+  borrow contracts. The raw-copy warning remains. Fields, constructors,
+  arithmetic methods and error sets are unchanged.
+- Published replacement examples in `README.md`, executable ownership blocks
+  in `fixture/src/readme.zig`, and the ownership test loop now drain mutable
+  sources. Deferred source cleanup remains valid. The leak counterexample
+  remains explicitly incorrect code.
+- `fixture/src/main.zig`, `bench/bench_vec.zig`, `Vec(n)`, `mapResult`, and the
+  root export are unchanged. No module, compatibility alias or deprecated path
+  was added. A2 links this implemented contract without claiming copy safety.
+
+### Acceptance and verified results
+
+Valid cases run in Debug, ReleaseSafe, ReleaseFast and ReleaseSmall:
+
+1. Replace a nonempty destination with a differently sized source. Destination
+   reads the source components, source is zero-dimensional, and all cleanup is
+   balanced with source cleanup registered both before and after transfer.
+2. Self-transfer of nonempty and empty objects preserves data and live views.
+3. Transfer nonempty-to-empty, empty-to-nonempty, empty-to-empty, and from an
+   already released source. A retained empty address reused by a new allocation
+   must not cause a false ownership-conflict diagnostic.
+4. Observe release of the old destination at transfer and release of the
+   adopted allocation at destination cleanup, through their respective
+   allocators. Transfer performs no allocation or component copy.
+5. A source view still reads the adopted components after source cleanup;
+   destination mutation is visible through it. Never read a freed old view.
+6. Independent `fromArray(gpa, source.slice())` copies survive source mutation
+   and cleanup. Nonzero-copy OOM preserves the source; zero-width copy needs no
+   allocation. Preserve the existing component representation.
+7. Repeated accumulator replacement and nullable intersection have balanced
+   cleanup. Forced failure before transfer retains the previous accumulator.
+8. Diagnose a direct nonempty copied-owner transfer in Debug and ReleaseSafe.
+   Test the refusal, not its exact wording. Do not execute this invalid
+   precondition in unchecked modes or claim general copied-owner detection.
+9. Run both real package consumers after migration. Keep behavior tests;
+   remove constructor-field wiring assertions rather than re-pin them.
+
+Native verification used `zig build test -Doptimize=<mode> -j1`, CPU affinity
+`0,1`, local build storage, and the real Zig 0.16.0 compiler:
+
+| Mode | Build steps | Tests |
+| --- | --- | --- |
+| Debug | 27/27 succeeded | 357/357 passed |
+| ReleaseSafe | 27/27 succeeded | 357/357 passed |
+| ReleaseFast | 27/27 succeeded | 356 passed, 1 checked-only refusal test skipped |
+| ReleaseSmall | 27/27 succeeded | 356 passed, 1 checked-only refusal test skipped |
+
+Both real external consumers pass after migration: 29 API checks and 31 README
+checks. The valid transfer cases cover every empty/nonempty combination,
+self-transfer, reused empty addresses, cross-allocator release, live source
+views, independent copies, signed-zero preservation, nullable replacement and
+failure before transfer. Checked children reject a copied-owner transfer and
+retain the replaced-address diagnostic. Constructor-field and panic-wording
+assertions were removed, not re-pinned. The initial test failed because the
+method was absent.
+
+The separate earlier DebugAllocator probe reported a double free when two raw
+owning copies were released. That remains a limitation, not a passing safety
+test. No new benchmark or speed claim accompanies this method.
+
+## 7. Cancellation pre-pass backlog correction (2026-10-03)
+
+**Status: already implemented at `2edb6094`.** The local handoff's proposed
+operand-level cancellation pre-pass was stale. It is not a new optimization
+candidate and does not need a second predicate.
+
+`src/lp_exact.zig` has the required order:
+
+1. `combinedColumn` handles structural zero columns first.
+2. It calls `cancelsExactly` on the operands **before** the general widened
+   `Interval.mul` / `Interval.sub` path.
+3. `cancelsExactly` first requires a point factor in each product, then declines
+   nonfinite endpoints. A rounded-f64 product-hull mismatch rejects the pair
+   before exact arithmetic.
+4. A rounded match is not a zero verdict. Exact f128 corner products must
+   collapse to the same point, checked by the cross-endpoint equalities.
+   Two equal nondegenerate hulls or two merely close products do not qualify.
+5. A declined pair keeps the existing widened result. No approximate-zero
+   tolerance is used to discard a coefficient.
+
+The pure arithmetic regressions are in `tests/lp_exact_test.zig`; solver
+consequences remain in `tests/lp_test.zig`. A native smoke also exercised
+`combinedColumn`: an exact cancelling column returned `[0, 0]`, a one-ULP
+perturbation retained a nonzero enclosing coefficient, and the predicate
+declined nonpoint hulls, unequal products that both underflow in f64, and
+nonfinite operands. The full installed gate passed on the pinned code;
+each of the four required Linux targets executed 351 tests. Windows was
+compile-only coverage.
+
+**Performance decision: no trial and no new speed claim.** The existing
+362-row baseline and the rejected 52-row RHS-first trial remain unchanged.
+Closing a duplicate backlog item is not a measurement, and it does not show
+that no other bottleneck exists.
+
+Reopen this area only for a distinct, profiled cost with a predeclared candidate
+and acceptance rule. Keep exact-zero behavior, nonfinite fallback, subnormal
+and near-cancellation soundness, row identities and counts, checksums, and
+balanced allocation accounting. Use the existing sequential paired-measurement
+protocol and benchmark row budget. Do not duplicate this pre-pass, replace
+exact equality with a tolerance, or rename the rejected RHS-first trial.
+
+The alternative scale-enclosure formulation in `scale-enclosure.md` is separate
+research. This correction neither implements it nor reopens the rejected
+rounded `M - W` shortcut.
