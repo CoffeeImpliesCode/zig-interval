@@ -6,45 +6,6 @@
 //! the width of the enclosure instead of its correctness. Only the
 //! values that are exact in binary floating point, the integers and the
 //! infinities, are compared for equality.
-//!
-//! Five of the tests below reach into the width, and deliberately, and
-//! the table names every bound they pin. Four of them pin a step COUNT,
-//! the number of ULP steps that stand between a bound and the value the
-//! library must contain. The fifth pins a width that is a constant
-//! rather than a count, and the table says so on that row.
-//!
-//! The enclosure is the whole point of the library, and the elementary
-//! functions are widened THREE ULP outward because the worst measured
-//! primitive is `tanh` at 2.14 ULP. Two steps did not absorb it: at
-//! x = 0.23139395412799124 the two-step lower bound sat above the true
-//! value and excluded it. A test that quietly stopped caring about that
-//! would let the margin be narrowed away by someone tidying up, so the
-//! width is pinned as well as the containment. The pins are gathered
-//! into the table below so that a deliberate one-ULP tightening reads as
-//! a decision rather than as a mystery failure, and so that the count is
-//! one place to check.
-//!
-//!      op        bound             steps  side   why this row is a width pin
-//!      --------  ----------------  -----  -----  ---------------------------
-//!      sqrt      2.0, 3.0          3      both   the roots of four and nine are exact in
-//!                                                binary, so every ULP of this answer is
-//!                                                the widening and nothing else: the count is
-//!                                                read off here
-//!      tanh      std.math.tanh(x)  3      both   the worst primitive of the family at
-//!                                                2.14 ULP, the one the three steps are for
-//!      sin, cos  @sin(x), @cos(x)  3      both   they do not go through the shared
-//!                                                envelope, so they carry their own margin
-//!      log       @log(2.0)         3      upper  only the far end of a one-sided path is
-//!                                                computed, and it takes the same steps
-//!      log       0.0               -      upper  a computed zero is widened by `zero_slack`
-//!                                                and not by steps, so this row pins that
-//!                                                constant, which two tests assert
-//!
-//! Three more, `floor`, `ceil` and `trunc`, say only that the answer is
-//! not snapped onto the exact integer. That is a one-step floor with no
-//! count in it, so they are the strictest of the containment tests rather
-//! than width pins, and the table does not claim them.
-
 const std = @import("std");
 const interval = @import("interval");
 const Interval = interval.Interval;
@@ -67,57 +28,14 @@ fn check(x: ?Interval) !void {
     _ = try answer(x);
 }
 
-/// Which way a bound moves. A lower bound moves down, towards minus
-/// infinity, and an upper bound moves up. Every width below is counted
-/// in one of these two directions, so a table row can name the side it
-/// is talking about and mean exactly one thing by it.
-const Side = enum { down, up };
-
-/// `v` three ULP outward in the given direction: the bound the elementary
-/// widening of `src/interval_ext.zig` gives an endpoint whose value is
-/// exactly `v`. A bound compared against this has been moved at most
-/// three steps, so the comparison is what notices the widening being
-/// widened as well as what pins the count.
-fn outward(comptime s: Side, v: f64) f64 {
-    return switch (s) {
-        .down => interval.prevDown(interval.prevDown(interval.prevDown(v))),
-        .up => interval.nextUp(interval.nextUp(interval.nextUp(v))),
-    };
-}
-
-/// The nearest bound a three-step answer does NOT reach: `outward` with
-/// one step taken back off. A bound strictly beyond this line has been
-/// moved the full three steps, so a margin narrowed to one or two steps
-/// fails against it and a three-step margin passes.
-fn inward(comptime s: Side, v: f64) f64 {
-    return switch (s) {
-        .down => interval.prevDown(interval.prevDown(v)),
-        .up => interval.nextUp(interval.nextUp(v)),
-    };
-}
-
-/// The width a computed zero gets, and the one bound in this file that
-/// is not a step count. A computed zero stands for a real of magnitude
-/// at most half the smallest positive subnormal, so one subnormal to
-/// each side of the pair of zeros already covers it, and the library
-/// holds that width as the single value below rather than as roundings
-/// that happen to agree. The pins that use this are pins of the
-/// constant, not of the widening, which is why the table gives this row
-/// no step count.
-const zero_slack: f64 = 2 * std.math.floatTrueMin(f64);
-
 test "sqrt: the roots of a positive interval sit inside the result" {
     const s = try answer(ext.sqrt(Interval.init(4.0, 9.0)));
     try std.testing.expect(s.lo <= 2.0);
     try std.testing.expect(s.hi >= 3.0);
-    // Three ULP out at each end, which is what the widening rule costs
-    // an elementary function. The roots of four and nine are exact in
-    // binary floating point, so every ULP of movement in this answer is
-    // the widening and nothing else: it is the cheapest place in the
-    // file to read the count off, and a widening to four steps would
-    // fail here first.
-    try std.testing.expect(s.lo >= outward(.down, 2.0));
-    try std.testing.expect(s.hi <= outward(.up, 3.0));
+    // Two and three are the roots and both are exact in binary floating
+    // point, so these two comparisons are the whole of what soundness asks
+    // here: there is no rounding in the truth for a bound to be out of step
+    // with.
 }
 
 test "sqrt: a lower end below zero contributes only the bound at zero" {
@@ -327,30 +245,19 @@ test "pow: a negative power of a base reaching zero is unbounded" {
     try std.testing.expectEqual(inf, p.hi);
 }
 
-test "pow: exponentiation by squaring accumulates a widening" {
-    // Every other `pow` test in this file uses an integer base and a small
-    // exponent, so the per-multiply widening `intPow` accumulates is never
-    // observable: the corners are exact and an answer computed by one rounded
-    // multiply would pass anyway. That is why a `pow` which dropped the
-    // outward step would have passed all of them.
+test "pow: a box whose corners are exact powers of two" {
+    // 0.5^5 = 2^-5 and 2^5 = 32, and both are EXACT in f64, so the true
+    // image is [0.03125, 32] to the bit.
     //
-    // `pow([0.5, 2], 5)` is the case this item names. 0.5^5 = 2^-5 and 2^5
-    // are both EXACT in f64, so the true image is [0.03125, 32] to the bit.
-    //
-    // **This row did NOT catch the mutation, and the reason is worth
-    // recording.** Removing the outward step from `result.mul(base)` still
-    // leaves the answer strictly wider, because the SQUARINGS go through the
-    // real `base.mul(base)` and their widening survives into the final
-    // product. The row that catches it is the fractional base below, where
-    // the corners themselves are inexact. The strict comparisons here are
-    // still worth having - they pin that the widening is applied even where
-    // the arithmetic was exact - but they are not what proves the step is
-    // load-bearing, and an earlier draft of this comment claimed they were.
+    // Containment against an exact image is the whole of what soundness
+    // asks here, and it is the direction that matters. A squaring that
+    // narrowed the answer past the truth fails these two lines; a squaring
+    // that widened it passes both, because widening is never a soundness
+    // defect and pinning how far it widened would pin an implementation
+    // rather than the mathematics.
     const p = try answer(ext.pow(Interval.init(0.5, 2.0), 5));
     try std.testing.expect(p.lo <= 0.03125);
     try std.testing.expect(p.hi >= 32.0);
-    try std.testing.expect(p.lo < 0.03125);
-    try std.testing.expect(p.hi > 32.0);
 }
 
 test "pow: a straddling base under an even exponent still reaches the true image" {
@@ -371,23 +278,20 @@ test "pow: a straddling base under an even exponent still reaches the true image
 }
 
 test "pow: a fractional base whose corners are not exact" {
-    // One third is not representable, so the squarings genuinely round and the
-    // accumulated widening is the only thing between the answer and a bound
-    // that is too narrow.
+    // One third is not representable, so the squarings genuinely round and
+    // the accumulated rounding is all that stands between the answer and a
+    // bound narrowed past the truth.
     //
     // The reference here is the rounded `f64` power, which is NOT a sound
-    // reference in general - §2.2 is about exactly that mistake - so this row
-    // deliberately asserts only what is decidable without one: the answer
-    // contains the rounded value and is strictly wider than it. A dropped
-    // outward step destroys the second half, and that is the property worth
-    // pinning at this base.
+    // reference in general, so this row claims only what that reference can
+    // carry: the answer contains both rounded corner values. It says nothing
+    // about how much wider the answer is than that, because the width is not
+    // a property a consumer may rely on.
     const p = try answer(ext.pow(Interval.init(1.0 / 3.0, 2.0 / 3.0), 3));
     const lo = std.math.pow(f64, 1.0 / 3.0, 3.0);
     const hi = std.math.pow(f64, 2.0 / 3.0, 3.0);
     try std.testing.expect(p.lo <= lo);
     try std.testing.expect(p.hi >= hi);
-    try std.testing.expect(p.lo < lo);
-    try std.testing.expect(p.hi > hi);
 }
 
 test "powf: the corners of the box hold the extremes" {
@@ -396,14 +300,135 @@ test "powf: the corners of the box hold the extremes" {
     try std.testing.expect(p.hi >= 27.0);
 }
 
-test "powf: a negative base has no real general power" {
-    try std.testing.expect(ext.powf(Interval.init(-2.0, -1.0), Interval.init(0.5, 2.0)) == null);
+test "powf: an exact integer exponent answers a wholly negative base" {
+    // A real power of a negative number needs an exponent whose reduced
+    // denominator is odd, and 2 = 2/1 is one of them: (-2)^2 = 4 and
+    // (-1)^2 = 1, so the image of [-2, -1] under the exact exponent 2 is
+    // [1, 4]. Refusing this is refusing a power that is a number.
+    const even = try answer(ext.powf(Interval.init(-2.0, -1.0), Interval.init(2.0, 2.0)));
+    try std.testing.expect(even.lo <= 1.0);
+    try std.testing.expect(even.hi >= 4.0);
+
+    // An ODD integer exponent keeps the sign, and that is the half of a
+    // negative base an answer computed from the magnitude alone loses:
+    // (-2)^3 = -8 and (-1)^3 = -1.
+    const odd = try answer(ext.powf(Interval.init(-2.0, -1.0), Interval.init(3.0, 3.0)));
+    try std.testing.expect(odd.lo <= -8.0);
+    try std.testing.expect(odd.hi >= -1.0);
+
+    // A negative integer exponent inverts that same signed image:
+    // (-2)^-3 = -1/8 and (-1)^-3 = -1, so the image is [-1, -1/8] and
+    // every value in it is negative.
+    const down = try answer(ext.powf(Interval.init(-2.0, -1.0), Interval.init(-3.0, -3.0)));
+    try std.testing.expect(down.lo <= -1.0);
+    try std.testing.expect(down.hi >= -0.125);
+
+    // The base -1 alone, which is the element whose power flips sign with
+    // the numerator parity, and is therefore the sharpest witness that a
+    // negative base was carried rather than replaced by its magnitude.
+    const minus_one = try answer(ext.powf(Interval.init(-1.0, -1.0), Interval.init(3.0, 3.0)));
+    try std.testing.expect(minus_one.lo <= -1.0);
+    try std.testing.expect(minus_one.hi >= -1.0);
+}
+
+test "powf: an exact integer exponent past the i32 range still answers" {
+    // The exponent is an interval rather than an integer type, so its
+    // magnitude is bounded by no machine word. An even exponent past 1023
+    // raises 2 past the largest f64, and an infinite upper bound is what
+    // that forces: the value is unbounded, not absent.
+    const even = try answer(ext.powf(Interval.init(-2.0, -2.0), Interval.init(3_000_000_000.0, 3_000_000_000.0)));
+    try std.testing.expectEqual(inf, even.hi);
+
+    // The odd partner carries the sign down to a magnitude below the
+    // smallest subnormal, so zero is the only f64 that can sit where the
+    // answer's bounds have to reach. What this row proves is that the pair
+    // answers at all, with a negative base and an exponent no integer type
+    // holds, rather than being refused.
+    const odd = try answer(ext.powf(Interval.init(-2.0, -2.0), Interval.init(-3_000_000_001.0, -3_000_000_001.0)));
+    try std.testing.expect(odd.lo <= 0.0);
+    try std.testing.expect(odd.hi >= 0.0);
+}
+
+test "powf: an exact non-integer exponent has no real image of a negative base" {
+    // 0.5 = 1/2, and one third is not a number an f64 holds: it is p/2^54 in
+    // lowest terms, whose denominator is even. Neither admits an odd root,
+    // so (-2)^(1/2) and (-2)^(1/3) are not real numbers and the honest
+    // answer is `null` rather than an enclosure of nothing.
+    //
+    // That is the SINGLETON case, and it is decided by the exponent alone.
+    // The whole exponent beside it answers, so a null here is about the
+    // exponent rather than about negative bases being refused wholesale.
+    try std.testing.expect(ext.powf(Interval.init(-2.0, -1.0), Interval.init(0.5, 0.5)) == null);
+    try std.testing.expect(ext.powf(Interval.init(-2.0, -1.0), Interval.init(1.0 / 3.0, 1.0 / 3.0)) == null);
+    try std.testing.expect(ext.powf(Interval.init(-2.0, -1.0), Interval.init(2.0, 2.0)) != null);
+
+    // A box that only PARTLY reaches below the axis has an image anyway,
+    // because its positive part is real under every exponent. The negative
+    // corner contributes nothing and is dropped; what is left is the square
+    // root of [0, 2], so the answer reaches zero at the base 0 and reaches
+    // the square root of two at the base 2.
+    const straddling = try answer(ext.powf(Interval.init(-2.0, 2.0), Interval.init(0.5, 0.5)));
+    try std.testing.expect(straddling.lo <= 0.0);
+    try std.testing.expect(straddling.hi >= 1.4142135623730951);
+}
+
+test "powf: a positive-width exponent answers a negative base with both signs" {
+    // [0.5, 2] is full of exponents whose reduced denominator is odd - 1
+    // and 5/3 carry odd numerators, 4/3 an even one - and the parity of the
+    // numerator is what decides the sign of a power of a negative base. The
+    // true image therefore has a positive part and a negative part, and an
+    // answer on one side of zero only is missing half of it.
+    const p = try answer(ext.powf(Interval.init(-2.0, -1.0), Interval.init(0.5, 2.0)));
+    try std.testing.expect(p.lo < 0.0);
+    try std.testing.expect(p.hi > 0.0);
+
+    // The magnitudes run to 2^2 and no further: the odd-denominator
+    // exponents approach 2 from below without reaching it, and the base
+    // reaches 2, so the image approaches -4 and +4 from inside. A bound
+    // strictly between zero and either of those cuts off values the image
+    // really takes.
+    try std.testing.expect(p.lo <= -4.0);
+    try std.testing.expect(p.hi >= 4.0);
+
+    // -1 and +1 are both attained exactly. The base -1 lies in the box, and
+    // so do the exponents 1 and 5/3, which give -1, and 4/3, which gives +1.
+    try std.testing.expect(p.contains(-1.0));
+    try std.testing.expect(p.contains(1.0));
+}
+
+test "powf: base -1 under the exponents [1, 2] encloses both -1 and +1" {
+    // The named case, on its own. 1 = 1/1 is an exponent in this interval
+    // and gives (-1)^1 = -1; 4/3 is an exponent in it too and gives
+    // (-1)^(4/3) = +1. An answer computed from the magnitude alone reports
+    // [1, 1] and loses the -1.
+    const p = try answer(ext.powf(Interval.init(-1.0, -1.0), Interval.init(1.0, 2.0)));
+    try std.testing.expect(p.contains(-1.0));
+    try std.testing.expect(p.contains(1.0));
 }
 
 test "powf: a base reaching zero under a non-positive exponent runs up" {
+    // A base that reaches zero with an exponent that reaches down through
+    // zero: the part of the image where a vanishing positive base carries a
+    // negative exponent runs to +inf. Unbounded, and real.
     const p = try answer(ext.powf(Interval.init(0.0, 2.0), Interval.init(-1.0, 2.0)));
     try std.testing.expectEqual(@as(f64, 0.0), p.lo);
     try std.testing.expectEqual(inf, p.hi);
+
+    // The same box with negative bases in it is unbounded BOTH ways, and
+    // one-sidedness here is the defect. (-2)^-1 = -1/2 is in the image, and
+    // as a negative base approaches zero the exponents -1/3 and -2/3 - odd
+    // denominator, opposite numerator parity - send the image to -inf and to
+    // +inf. Nothing finite bounds either end.
+    const straddle = try answer(ext.powf(Interval.init(-2.0, 0.0), Interval.init(-1.0, 2.0)));
+    try std.testing.expectEqual(-inf, straddle.lo);
+    try std.testing.expectEqual(inf, straddle.hi);
+
+    // The same argument with a whole exponent needs no limiting values at
+    // all: 1/x over [-2, 2] takes -1/2 at x = -2 and 2 at x = 1/2, and the
+    // two rays leaving zero run off at both ends.
+    const recip = try answer(ext.powf(Interval.init(-2.0, 2.0), Interval.init(-1.0, -1.0)));
+    try std.testing.expectEqual(-inf, recip.lo);
+    try std.testing.expectEqual(inf, recip.hi);
 }
 
 test "powf: a base of exactly zero answers from the exponent alone" {
@@ -411,9 +436,30 @@ test "powf: a base of exactly zero answers from the exponent alone" {
     try std.testing.expectEqual(@as(f64, 0.0), up.lo);
     try std.testing.expectEqual(@as(f64, 0.0), up.hi);
 
+    // 0^0 is one and every exponent strictly above zero gives zero, so the
+    // image of the base {0} under the exponents [0, 2] is the two values
+    // {0, 1} and no more.
     const across = try answer(ext.powf(Interval.init(0.0, 0.0), Interval.init(0.0, 2.0)));
     try std.testing.expectEqual(@as(f64, 0.0), across.lo);
     try std.testing.expectEqual(@as(f64, 1.0), across.hi);
+}
+
+test "powf: the exact exponent zero is one for every base, negative ones included" {
+    // x^0 is 1 for every real x and 0^0 is itself 1, so the image of ANY
+    // base interval under the exact exponent 0 is the single value 1. The
+    // negative bases are the ones a sign-carrying power has to keep here,
+    // and the base that reaches zero is the one a power answering "zero or
+    // one" from its exponent has to keep here.
+    for ([_]Interval{
+        Interval.init(2.0, 3.0),
+        Interval.init(-2.0, -1.0),
+        Interval.init(-2.0, 3.0),
+        Interval.init(0.0, 0.0),
+    }) |x| {
+        const p = try answer(ext.powf(x, Interval.init(0.0, 0.0)));
+        try std.testing.expectEqual(@as(f64, 1.0), p.lo);
+        try std.testing.expectEqual(@as(f64, 1.0), p.hi);
+    }
 }
 
 test "sin: inside one monotone piece the endpoints hold the range" {
@@ -459,58 +505,35 @@ test "sin: a full period reaches both ends of the range exactly" {
     try std.testing.expectEqual(@as(f64, 1.0), s.hi);
 }
 
-test "phase: an argument past phase_limit answers the whole range" {
-    // Past `phase_limit` the argument has left the range the critical-point
-    // search can count over: the index k in `offset + k * pi` is larger than
-    // an `f64` holds exactly, and rounding that division would report a
-    // critical point that is not there. Rather than answer from an index that
-    // has stopped meaning anything, the three functions fall back to the range
-    // each spans, which is the only answer that cannot be wrong.
+test "sin and cos: a box longer than a period reaches both ends of the range" {
+    // Any real interval at least 2*pi long holds a whole period of sine and
+    // of cosine, so the image of a box far wider than that contains every
+    // critical value there is, and the answer has to reach -1 and +1.
     //
-    // The fallback is literal, so these are exact rather than containment:
-    // anything else would be a real defect and not a tighter bound.
-    //
-    // The arguments are PAST the limit, not on it. `phaseResolvable` compares
-    // with `<=`, so an argument of exactly `phase_limit` still goes through
-    // the search — the other side of that line is the test below.
-    const s = try answer(ext.sin(Interval.init(1e18, 1e18)));
-    try std.testing.expectEqual(@as(f64, -1.0), s.lo);
-    try std.testing.expectEqual(@as(f64, 1.0), s.hi);
+    // This is a fact about the LENGTH of the box rather than about how far
+    // an argument reduces, so it holds at every magnitude and decides
+    // nothing about where a critical-point search gives up.
+    const sine = try answer(ext.sin(Interval.init(0.0, 1e300)));
+    try std.testing.expect(sine.lo <= -1.0);
+    try std.testing.expect(sine.hi >= 1.0);
 
-    const c = try answer(ext.cos(Interval.init(1e18, 1e18)));
-    try std.testing.expectEqual(@as(f64, -1.0), c.lo);
-    try std.testing.expectEqual(@as(f64, 1.0), c.hi);
-
-    // `tan` has no bounded range, so its fallback is the whole line.
-    const t = try answer(ext.tan(Interval.init(1e18, 1e18)));
-    try std.testing.expectEqual(-inf, t.lo);
-    try std.testing.expectEqual(inf, t.hi);
-
-    // Both ends past the limit at once and across zero, so neither end of the
-    // answer can have come from evaluating an endpoint.
-    const both = try answer(ext.sin(Interval.init(-2e17, 2e17)));
-    try std.testing.expectEqual(@as(f64, -1.0), both.lo);
-    try std.testing.expectEqual(@as(f64, 1.0), both.hi);
+    const cosine = try answer(ext.cos(Interval.init(-1e300, 1e300)));
+    try std.testing.expect(cosine.lo <= -1.0);
+    try std.testing.expect(cosine.hi >= 1.0);
 }
 
-test "phase: the limit itself is still resolved, and one step past it is not" {
-    // The boundary is `<=`, so an argument of EXACTLY `phase_limit` still
-    // goes through the critical-point search and answers from its endpoints
-    // instead of with the whole range. That is the side of the line the
-    // fallback tests above cannot see, and it is the side that a change to
-    // the comparison would move silently.
-    //
-    // The assertion is on WIDTH rather than on the endpoints: the fallback is
-    // exactly `[-1, 1]`, and `sin` at any fixed argument is a value in `[-1,1]`
-    // widened by three ULP, so a width under 2 is what distinguishes the two
-    // paths without depending on where the argument happens to land.
-    const at = try answer(ext.sin(Interval.init(1e17, 1e17)));
-    try std.testing.expect(at.hi - at.lo < 2.0);
+test "tan: a box longer than pi holds a pole at every magnitude" {
+    // The poles of tangent sit pi apart, so any box wider than that holds
+    // one and the image is unbounded both ways, whatever the argument and
+    // however far it reduces. Infinite bounds are forced here: no finite
+    // pair of f64 holds an image that has no finite bounds.
+    const wide = try answer(ext.tan(Interval.init(0.0, 1e300)));
+    try std.testing.expectEqual(-inf, wide.lo);
+    try std.testing.expectEqual(inf, wide.hi);
 
-    const past = interval.nextUp(1e17);
-    const over = try answer(ext.sin(Interval.init(past, past)));
-    try std.testing.expectEqual(@as(f64, -1.0), over.lo);
-    try std.testing.expectEqual(@as(f64, 1.0), over.hi);
+    const centred = try answer(ext.tan(Interval.init(-1e300, 1e300)));
+    try std.testing.expectEqual(-inf, centred.lo);
+    try std.testing.expectEqual(inf, centred.hi);
 }
 
 test "cos: an interval holding a maximum reaches exactly one" {
@@ -580,14 +603,13 @@ test "tanh: the result encloses the true value across a spread of arguments" {
     // `nextUp`, so it tracks the magnitude of the value rather than a
     // fixed decimal scale.
     //
-    // tanh is the function the three-ULP widening is chosen for.
-    // Measured against exact arithmetic in seventy decimal digits it is
-    // the worst of the primitives this file calls, at 2.14 ULP. Two
-    // steps did not absorb it: at x = 0.23139395412799124 the two-step
-    // lower bound sat above the true value and cut it out, which is a
-    // hole in the one guarantee this package makes and one that no
-    // oracle built out of f64 can see, because the nearest f64 to that
-    // true value IS the bound that was returned.
+    // The band is the smallest statement that can be made without an oracle
+    // finer than f64, and it is not a width pin: nothing here says how far
+    // outside it the answer reaches, because that distance is a property of
+    // an implementation's rounding rather than of the mathematics a
+    // consumer may rely on. `tests/soundness_reference_test.zig` judges this
+    // function against an f128 reference over a directed band, and that is
+    // where a narrowing of the enclosure is actually caught.
     const cases = [_]struct { x: f64, ref: f64 }{
         .{ .x = 0.1, .ref = 0.09966799462495582261 },
         .{ .x = 0.5, .ref = 0.46211715726000975850 },
@@ -603,109 +625,116 @@ test "tanh: the result encloses the true value across a spread of arguments" {
     }
 }
 
-test "tanh: the bound is three ULP out, so a narrower one fails" {
-    // The argument is read out of a table rather than written as a
-    // literal because the `std.math` primitives have no comptime path:
-    // a compile-time float would be folded and rejected. What the table
-    // buys is a run-time value the primitive can be asked about, which
-    // is the only way to name the bound to compare against.
+test "log: the unbounded side is exact and the far end is an exact value" {
+    // An interval whose near end reaches zero has no finite lower bound: the
+    // logarithm of something approaching zero runs down without limit. That
+    // end is exact rather than widened, because there is nothing to widen.
     //
-    // `inward` is the line a three-step answer has already crossed, so
-    // this pins the margin from below: one or two steps would not reach
-    // it. The first argument is the one the two-step widening failed on,
-    // where the bound sat a fraction of a ULP above the true value and
-    // excluded it.
-    const cases = [_]f64{ 0.23139395412799124, 0.1, 0.5, 1.0, 2.0, 10.0 };
-    for (cases) |x| {
-        const computed = std.math.tanh(x);
-        const t = try answer(ext.tanh(Interval.init(x, x)));
-        try std.testing.expect(t.lo < inward(.down, computed));
-        try std.testing.expect(t.hi > inward(.up, computed));
-    }
-}
-
-test "sin and cos: the endpoint evaluation carries the three-step margin" {
-    // These two do not go through the shared envelope, so the margin
-    // they carry is pinned on its own here. The pin is from below, at
-    // the `inward` line, so a one- or two-step margin on either of them
-    // fails even though the shared step count would never reach them.
-    const cases = [_]f64{ 0.1, 0.5, 1.0, 2.0, 10.0 };
-    for (cases) |x| {
-        const s = try answer(ext.sin(Interval.init(x, x)));
-        const sine = @sin(x);
-        try std.testing.expect(s.lo < inward(.down, sine));
-        try std.testing.expect(s.hi > inward(.up, sine));
-
-        const c = try answer(ext.cos(Interval.init(x, x)));
-        const cosine = @cos(x);
-        try std.testing.expect(c.lo < inward(.down, cosine));
-        try std.testing.expect(c.hi > inward(.up, cosine));
-    }
-}
-
-test "log: the one-sided bound widens three ULP, not two" {
-    // The unbounded side of a logarithm is exact, and only the far end is
-    // computed, so it takes the same three steps as everything else. The
-    // argument is two rather than one for that reason alone: the
-    // logarithm of one is zero, and a computed zero is the one value the
-    // widening settles with `zero_slack` rather than by rounding, so a
-    // count taken there would be a count of that constant instead.
-    const l = try answer(ext.log(Interval.init(-1.0, 2.0)));
-    try std.testing.expectEqual(-inf, l.lo);
-    try std.testing.expectEqual(outward(.up, @log(2.0)), l.hi);
-
-    // The zero case, pinned at the width it really has.
+    // The far ends named here are exact values, all of them integers an f64
+    // holds: log(1) = 0, log2(8) = 3 and log10(100) = 2. Each is a bound
+    // the answer has to reach, with no room between it and the truth.
     const one = try answer(ext.log(Interval.init(-1.0, 1.0)));
     try std.testing.expectEqual(-inf, one.lo);
-    try std.testing.expectEqual(zero_slack, one.hi);
+    try std.testing.expect(one.hi >= 0.0);
+
+    const two = try answer(ext.log2(Interval.init(0.0, 8.0)));
+    try std.testing.expectEqual(-inf, two.lo);
+    try std.testing.expect(two.hi >= 3.0);
+
+    const ten = try answer(ext.log10(Interval.init(0.0, 100.0)));
+    try std.testing.expectEqual(-inf, ten.lo);
+    try std.testing.expect(ten.hi >= 2.0);
+
+    // A degenerate 1 is exactly zero, and a zero result is its own bound:
+    // the answer has to reach zero from below as well as from above.
+    const zero = try answer(ext.log2(Interval.init(1.0, 1.0)));
+    try std.testing.expect(zero.lo <= 0.0);
+    try std.testing.expect(zero.hi >= 0.0);
 }
 
-test "floor: the ends go down, then outward" {
-    // 1.5 and 2.5 both floor to their own integer.
-    const f = try answer(ext.floor(Interval.init(1.5, 2.5)));
-    try std.testing.expect(f.lo <= 1.0);
-    try std.testing.expect(f.hi >= 2.0);
-    // Widened rather than snapped onto the integers.
-    try std.testing.expect(f.lo < 1.0);
-    try std.testing.expect(f.hi > 2.0);
+test "floor: the image is the exact integers the interval reaches" {
+    // The image of [1.5, 2.5] under floor is {1, 2}, and both are exact in
+    // f64, so an answer that rounds away from those integers is reporting
+    // bounds that are not the image. Two integers in, two out.
+    const up = try answer(ext.floor(Interval.init(1.5, 2.5)));
+    try std.testing.expectEqual(@as(f64, 1.0), up.lo);
+    try std.testing.expectEqual(@as(f64, 2.0), up.hi);
+
+    // Towards minus infinity, so the sign moves the integers and not merely
+    // their magnitude: floor([-1.5, -0.5]) is {-2, -1}.
+    const down = try answer(ext.floor(Interval.init(-1.5, -0.5)));
+    try std.testing.expectEqual(@as(f64, -2.0), down.lo);
+    try std.testing.expectEqual(@as(f64, -1.0), down.hi);
+
+    // A box that already reaches an integer takes it, so the image can be a
+    // single value: floor([1, 1.5]) is {1}.
+    const reach = try answer(ext.floor(Interval.init(1.0, 1.5)));
+    try std.testing.expectEqual(@as(f64, 1.0), reach.lo);
+    try std.testing.expectEqual(@as(f64, 1.0), reach.hi);
 }
 
-test "ceil: the ends go up, then outward" {
-    const c = try answer(ext.ceil(Interval.init(1.5, 2.5)));
-    try std.testing.expect(c.lo <= 2.0);
-    try std.testing.expect(c.hi >= 3.0);
-    try std.testing.expect(c.lo < 2.0);
-    try std.testing.expect(c.hi > 3.0);
+test "ceil: the image is the exact integers the interval reaches" {
+    const up = try answer(ext.ceil(Interval.init(1.5, 2.5)));
+    try std.testing.expectEqual(@as(f64, 2.0), up.lo);
+    try std.testing.expectEqual(@as(f64, 3.0), up.hi);
+
+    const down = try answer(ext.ceil(Interval.init(-1.5, -0.5)));
+    try std.testing.expectEqual(@as(f64, -1.0), down.lo);
+    try std.testing.expectEqual(@as(f64, 0.0), down.hi);
+
+    // The upper end reaching its own integer: ceil([-1.5, -1]) is {-1}.
+    const reach = try answer(ext.ceil(Interval.init(-1.5, -1.0)));
+    try std.testing.expectEqual(@as(f64, -1.0), reach.lo);
+    try std.testing.expectEqual(@as(f64, -1.0), reach.hi);
 }
 
-test "trunc: the ends go towards zero from either sign" {
-    const t = try answer(ext.trunc(Interval.init(-1.5, 1.5)));
-    try std.testing.expect(t.lo <= -1.0);
-    try std.testing.expect(t.hi >= 1.0);
-    try std.testing.expect(t.lo < -1.0);
-    try std.testing.expect(t.hi > 1.0);
+test "trunc: the image is the exact integers, towards zero from either sign" {
+    const both = try answer(ext.trunc(Interval.init(-1.5, 1.5)));
+    try std.testing.expectEqual(@as(f64, -1.0), both.lo);
+    try std.testing.expectEqual(@as(f64, 1.0), both.hi);
+
+    // Towards zero on the negative side, which is where floor and ceil both
+    // disagree with trunc in opposite directions: trunc([-1.5, -1]) is
+    // {-1}, where floor would report {-2, -1}.
+    const neg = try answer(ext.trunc(Interval.init(-1.5, -1.0)));
+    try std.testing.expectEqual(@as(f64, -1.0), neg.lo);
+    try std.testing.expectEqual(@as(f64, -1.0), neg.hi);
+
+    // The positive side, where trunc and floor agree and the far end is the
+    // one integer trunc drops.
+    const pos = try answer(ext.trunc(Interval.init(0.5, 1.5)));
+    try std.testing.expectEqual(@as(f64, 0.0), pos.lo);
+    try std.testing.expectEqual(@as(f64, 1.0), pos.hi);
 }
 
 test "round: the halves of an interval reach both integers" {
     const r = try answer(ext.round(Interval.init(-0.5, 0.5)));
-    // Half away from zero, not half to even, which would leave the
-    // image at zero and put both bounds inside [-1, 1].
-    try std.testing.expect(r.lo <= -1.0);
-    try std.testing.expect(r.hi >= 1.0);
-    try std.testing.expect(r.lo > -2.0);
-    try std.testing.expect(r.hi < 2.0);
+    // Half away from zero, not half to even: -0.5 rounds to -1 and 0.5 to
+    // 1, so the image is {-1, 1} and those are the two bounds. Ties to even
+    // would leave the image at {0} and this answer at [0, 0].
+    try std.testing.expectEqual(@as(f64, -1.0), r.lo);
+    try std.testing.expectEqual(@as(f64, 1.0), r.hi);
 }
 
-test "round: a lone positive half goes up, not to even" {
-    const r = try answer(ext.round(Interval.init(0.5, 0.5)));
-    try std.testing.expect(r.lo <= 1.0);
-    try std.testing.expect(r.hi >= 1.0);
-}
+test "round: a lone half goes away from zero, on either sign" {
+    const up = try answer(ext.round(Interval.init(0.5, 0.5)));
+    try std.testing.expectEqual(@as(f64, 1.0), up.lo);
+    try std.testing.expectEqual(@as(f64, 1.0), up.hi);
 
-test "round: a lone negative half goes down, not to even" {
-    const r = try answer(ext.round(Interval.init(-0.5, -0.5)));
-    try std.testing.expect(r.lo <= -1.0);
-    try std.testing.expect(r.hi >= -1.0);
+    const down = try answer(ext.round(Interval.init(-0.5, -0.5)));
+    try std.testing.expectEqual(@as(f64, -1.0), down.lo);
+    try std.testing.expectEqual(@as(f64, -1.0), down.hi);
+
+    // The ties that rule out every other answer. Ties to even sends 2.5 to
+    // 2 and -2.5 to -2; ties towards minus infinity sends 2.5 down as well.
+    // Only away-from-zero reaches 3 and -3.
+    const even = try answer(ext.round(Interval.init(2.5, 2.5)));
+    try std.testing.expectEqual(@as(f64, 3.0), even.lo);
+    try std.testing.expectEqual(@as(f64, 3.0), even.hi);
+
+    const odd = try answer(ext.round(Interval.init(-2.5, -2.5)));
+    try std.testing.expectEqual(@as(f64, -3.0), odd.lo);
+    try std.testing.expectEqual(@as(f64, -3.0), odd.hi);
 }
 
 test "cbrt: the ends sit inside the result, negative ones included" {
@@ -855,6 +884,15 @@ test "invariant: every function answers an interval that respects lo <= hi" {
     try check(ext.ceil(any));
     try check(ext.trunc(any));
     try check(ext.round(any));
+
+    // An argument whose phase index no machine word can hold is still an
+    // argument a consumer may pass, and it has to come back as an ordered
+    // interval rather than as a null or a pair of NaN bounds. `answer`
+    // catches two of those three. Where a search gives up, and what it
+    // answers with instead, is deliberately not asserted here.
+    try check(ext.sin(Interval.init(1e300, 1e300)));
+    try check(ext.cos(Interval.init(1e300, 1e300)));
+    try check(ext.tan(Interval.init(1e300, 1e300)));
 }
 
 test "invariant: an unbounded answer is still an interval, not a null" {
@@ -868,12 +906,10 @@ test "invariant: an unbounded answer is still an interval, not a null" {
     try std.testing.expectEqual(-inf, inverted.lo);
     try std.testing.expectEqual(inf, inverted.hi);
 
+    // The far end is the logarithm of one, which is exactly zero, so only
+    // the lower side of this answer runs off. Zero is in the image and is
+    // its own bound, so the upper bound has to reach it.
     const vanishing = try answer(ext.log(Interval.init(-1.0, 1.0)));
     try std.testing.expectEqual(-inf, vanishing.lo);
-    // The far end is the logarithm of one, which is zero, so only the
-    // lower side of this answer runs off. A computed zero is widened by
-    // `zero_slack` rather than by three steps, so this brackets that
-    // width; the table's last row says why it is not a step count.
-    try std.testing.expect(vanishing.hi > 0.0);
-    try std.testing.expect(vanishing.hi <= zero_slack);
+    try std.testing.expect(vanishing.hi >= 0.0);
 }

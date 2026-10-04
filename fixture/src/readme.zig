@@ -20,12 +20,19 @@
 //!     pair of names — the dependency key and the module name — and those are
 //!     the pair this binary was compiled with, which is the reason it runs at
 //!     all; so it carries no check of its own;
-//!   * the `build.zig` snippet is a build script and cannot be a `main`, so
-//!     it is checked by naming every declaration and every field it writes
-//!     down, at comptime. A rename upstream fails this file's build rather
-//!     than the reader's;
-//!   * the `mapResult` signature block is a declaration rather than a
-//!     statement, so it is checked the same way;
+//!   * the `build.zig` snippet is a build SCRIPT, so it cannot be a `main`
+//!     and nothing here runs it. It is compiled by the fixture's own
+//!     `build.zig`, which is wired the way the snippet wires it — module
+//!     created with `target` and `optimize`, import added afterwards through
+//!     `addImport` — and that is what catches the two lines the snippet
+//!     originally dropped. Asserting here that `std.Build` still has a
+//!     field by that name would only pin the build system's declarations,
+//!     which is a fact about Zig rather than about this package, so those
+//!     checks are gone rather than moved;
+//!   * the `mapResult` signature block is a DECLARATION rather than a
+//!     statement, so there is nothing in it to execute. Its call sites are
+//!     below, and they exercise the same shape end to end, which decides
+//!     more than a reflected type ever did;
 //!   * two blocks name locals the README leaves to the reader — the two
 //!     bounds in "Widening your own arithmetic", and `gpa`, `n`, `fill` and
 //!     `others` in "`iadd` versus `add" — and they are bound above each
@@ -75,7 +82,7 @@ pub const CheckError = error{
 };
 
 /// Number of checks below; the closing line reports this.
-const total_checks = 31;
+const total_checks = 29;
 
 /// How far outside the exact corner a bound may sit, as a fraction of that
 /// corner's magnitude. Widening composes about one step per operation and the
@@ -423,81 +430,6 @@ fn readmeUsage(report: *Report) CheckError!void {
     try expectEndpoint(report, "readme-usage-rooted-hi", printed.rooted_hi, 3.0);
 }
 
-/// The README's `build.zig` snippet, which cannot be a `main` because it is
-/// a build script. What can be checked from a Zig source file is every name
-/// it writes down: each declaration it calls and each field it passes, with
-/// the types, so a rename upstream or a field that changes shape fails this
-/// build rather than the reader's.
-///
-/// The one thing that cannot be checked here is the panic the README's prose
-/// warns about, which fires inside `Step.Compile.create` while a build script
-/// RUNS and has no comptime expression to fail. What this does catch is the
-/// cause: `target` and `optimize` are fields of `Module.CreateOptions` and
-/// the arguments of `standardTargetOptions` and `standardOptimizeOption`
-/// have the types the snippet assumes, so the two lines that were dropped
-/// when the snippet was written are named here.
-fn readmeBuildWiring(report: *Report) CheckError!void {
-    comptime {
-        const CompileOptions = std.Build.Step.Compile.Options;
-        const CreateOptions = std.Build.Module.CreateOptions;
-
-        // b.standardTargetOptions(.{}) / b.standardOptimizeOption(.{}): the
-        // pair the snippet takes once and passes to both the module and the
-        // dependency.
-        std.debug.assert(
-            @TypeOf(std.Build.standardTargetOptions) ==
-                fn (*std.Build, std.Build.StandardTargetOptionsArgs) std.Build.ResolvedTarget,
-        );
-        std.debug.assert(
-            @TypeOf(std.Build.standardOptimizeOption) ==
-                fn (*std.Build, std.Build.StandardOptimizeOptionOptions) std.builtin.OptimizeMode,
-        );
-
-        // b.addExecutable(.{ .name, .root_module }): the two fields the
-        // snippet passes, and the type it reaches through the second.
-        std.debug.assert(@hasField(CompileOptions, "name"));
-        std.debug.assert(@hasField(CompileOptions, "root_module"));
-        std.debug.assert(
-            @FieldType(CompileOptions, "root_module") == *std.Build.Module,
-        );
-
-        // b.createModule(.{ .root_source_file, .target, .optimize }): the
-        // three fields, with the types the snippet's three arguments have.
-        // `target` and `optimize` are the pair whose absence panics.
-        std.debug.assert(@hasField(CreateOptions, "root_source_file"));
-        std.debug.assert(@hasField(CreateOptions, "target"));
-        std.debug.assert(@hasField(CreateOptions, "optimize"));
-        std.debug.assert(
-            @FieldType(CreateOptions, "root_source_file") == ?std.Build.LazyPath,
-        );
-        std.debug.assert(
-            @FieldType(CreateOptions, "target") == ?std.Build.ResolvedTarget,
-        );
-        std.debug.assert(
-            @FieldType(CreateOptions, "optimize") == ?std.builtin.OptimizeMode,
-        );
-        std.debug.assert(
-            @TypeOf(std.Build.path) == fn (*std.Build, []const u8) std.Build.LazyPath,
-        );
-
-        // exe.root_module.addImport("interval", dep.module("interval")):
-        // the field, and the two functions either side of it. The module
-        // `addImport` is handed is the pointer `Dependency.module` returns.
-        std.debug.assert(
-            @TypeOf(std.Build.Dependency.module) ==
-                fn (*std.Build.Dependency, []const u8) *std.Build.Module,
-        );
-        std.debug.assert(
-            @TypeOf(std.Build.Module.addImport) ==
-                fn (*std.Build.Module, []const u8, *std.Build.Module) void,
-        );
-
-        // b.installArtifact(exe).
-        std.debug.assert(@hasDecl(std.Build, "installArtifact"));
-    }
-    try report.line("ok readme-build-wiring: every name the snippet writes down resolves\n", .{});
-}
-
 /// The README's "Empty, `null`, and unbounded": the two answers that are
 /// easy to conflate, and must not be.
 fn readmeEmptyAndUnbounded(report: *Report) CheckError!void {
@@ -786,29 +718,6 @@ fn readmeEmptyBoxFromArray(report: *Report) CheckError!void {
     try expectBool(report, "readme-fromArray-overlaps", empty.overlaps(empty), false);
 }
 
-/// The README's `mapResult` signature, which is a declaration rather than a
-/// statement and so cannot be run.
-///
-/// The return type the block prints, `MapResult(@TypeOf(v))`, is a private
-/// helper in the source, so it is deliberately not checkable from out here;
-/// what IS checkable is the pair of parameters, because those are what a
-/// caller writes at the call site, and the first of them is what the
-/// surrounding prose is about.
-fn readmeMapResultSignature(report: *Report) CheckError!void {
-    comptime {
-        const params = @typeInfo(@TypeOf(interval.mapResult)).@"fn".params;
-        std.debug.assert(params.len == 2);
-        std.debug.assert(params[0].is_generic);
-        // `type` is an optional, and it is null exactly when the parameter
-        // is generic — which the assertion above has already ruled out for
-        // the FIRST parameter, and which for the second is the answer being
-        // checked. So it is compared as the optional it is rather than
-        // forced open: a null fails the comparison rather than panicking.
-        std.debug.assert(params[1].type == @as(?type, *const fn (Interval) ?Interval));
-    }
-    try report.line("ok readme-mapResult-signature: anytype, *const fn (Interval) ?Interval\n", .{});
-}
-
 /// The README's `mapResult` call sites. Its block quotes the two locals the
 /// `Vec(n)` example built, so this one builds them again from that same
 /// block rather than borrowing them: the README states the two as fragments
@@ -1027,14 +936,12 @@ fn readmeUnsatisfiable(report: *Report) !void {
 fn run(report: *Report) !void {
     try readmeWidenYourOwnArithmetic(report);
     try readmeUsage(report);
-    try readmeBuildWiring(report);
     try readmeEmptyAndUnbounded(report);
 
     try readmeVectorForms(report);
 
     try readmeBoxOwnership(report);
     try readmeEmptyBoxFromArray(report);
-    try readmeMapResultSignature(report);
     try readmeMapResultCalls(report);
     try readmeEliminateAll(report);
     try readmeFourierMotzkinWorkedExample(report);

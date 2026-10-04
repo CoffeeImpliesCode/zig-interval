@@ -9,19 +9,32 @@
 //!
 //! So the reference here is MPFR at 256 bits, called with a declared rounding
 //! direction, by `scripts/gen_corpus.c`, and committed as
-//! `tests/corpus/elementary.txt`. It is 1886 rows over 24 operation labels, of
-//! which 21 are operations the in-tree oracle does not judge — `sqrt`, `cbrt`
-//! and `tanh` are already members of `Op`, so those rows corroborate rather than
-//! extend the oracle's coverage. 427 of the rows are exactly representable. The
-//! generator's reasoning, and the two ways an earlier version of it produced
-//! plausible rows that were not the image, are in that file's header.
+//! `tests/corpus/elementary.txt`. It is thousands of rows over 25 operation
+//! labels, of which 22 are operations the in-tree oracle does not judge —
+//! `sqrt`, `cbrt` and `tanh` are already members of `Op`, so those rows
+//! corroborate rather than extend the oracle's coverage. Neither the row count
+//! nor the exactness count is written down here on purpose: the file is
+//! regenerated whenever the generator's argument lists grow, and a count
+//! frozen in this header goes stale silently. The runner reports what it
+//! parsed. The generator's reasoning, and the two ways an earlier version of
+//! it produced plausible rows that were not the image, are in that file's
+//! header.
 //!
 //! **What is asserted, and what is not.** Containment, only: the library's
-//! answer must contain the certified bracket. Tightness is never asserted. A
-//! corpus bounds correctness, not width, and a width claim is exactly the sort
-//! of thing §2.2 is about — the library deliberately pays three ULP on the
-//! elementary functions, and a test that demanded tighter would be demanding a
-//! wrong thing.
+//! answer must contain the certified bracket. Tightness is never asserted and
+//! no width is pinned. A corpus bounds correctness, not width, and a width
+//! claim is exactly the sort of thing §2.2 is about: the reference is a
+//! BRACKET around the value, not the value, and a bound that matched it to
+//! the last bit would be asserting a coincidence rather than a property.
+//!
+//! **The `gamma` rows.** That label is this same generator in this same
+//! format, at arguments of its own: the real Gamma function has poles, and it
+//! leaves the `f64` range long before its argument does, so it cannot be
+//! swept with the elementary functions without rows that enclose nothing.
+//! MPFR answers NaN at a pole and the generator emits nothing for one, so a
+//! `null` from `ext.gamma` at a pole is a domain claim this corpus does not
+//! judge — there is no row to disagree with. A `null` on a row that IS here
+//! is still a failure, because that row's image is a real one.
 //!
 //! **What exactness buys.** The corpus carries MPFR's ternary return, so a row
 //! whose value is exactly representable is distinguishable from one that is
@@ -163,6 +176,11 @@ fn libraryAnswer(r: Row) ?Interval {
     if (std.mem.eql(u8, r.op, "atanh")) return ext.atanh(x);
     if (std.mem.eql(u8, r.op, "sqrt")) return ext.sqrt(x);
     if (std.mem.eql(u8, r.op, "cbrt")) return ext.cbrt(x);
+    // The Gamma rows are singletons, so the interval above is a one-point
+    // interval and nothing else about the row is needed. A pole is not a row:
+    // the generator drops what MPFR could not evaluate, so every `gamma` row
+    // here has an image and a refusal on one is a disagreement.
+    if (std.mem.eql(u8, r.op, "gamma")) return ext.gamma(x);
     return null;
 }
 
@@ -172,6 +190,7 @@ test "corpus: every operation's answers contain an independently certified brack
     var exact_rows: usize = 0;
     var failures: usize = 0;
     var shown: usize = 0;
+    var gamma_rows: usize = 0;
 
     while (lines.next()) |line| {
         const row = (try parseRow(line)) orelse continue;
@@ -204,17 +223,21 @@ test "corpus: every operation's answers contain an independently certified brack
             continue;
         }
         checked += 1;
+        // A tier that quietly lost its rows would leave the dispatch above
+        // checking nothing at all, and nothing in this file would say so.
+        if (std.mem.eql(u8, row.op, "gamma")) gamma_rows += 1;
         if (row.ternary == 0) exact_rows += 1;
     }
 
     reportErr(
-        "  corpus: {d} rows checked, {d} FAILED, {d} of them exactly representable\n",
-        .{ checked, failures, exact_rows },
+        "  corpus: {d} rows checked ({d} of them gamma), {d} FAILED, {d} of them exactly representable\n",
+        .{ checked, gamma_rows, failures, exact_rows },
     );
     if (checked == 0) return fail("corpus tier ran zero rows: a corpus that checks nothing proves nothing", .{});
     // Every operation the oracle did not already judge must be present, or the
     // corpus has silently lost the tier it was built for.
     if (checked < 100) return fail("corpus: only {d} rows parsed, expected the full corpus", .{checked});
+    if (gamma_rows == 0) return fail("corpus: no gamma rows parsed, so the gamma tier is checking nothing", .{});
     try std.testing.expectEqual(@as(usize, 0), failures);
 }
 

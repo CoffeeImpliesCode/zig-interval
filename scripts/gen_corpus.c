@@ -45,6 +45,14 @@
  * header removes the question entirely - and it turns out the header was what
  * the Python binding needed most.
  *
+ * The `gamma` rows are a SECOND KIND of row in the same format, and they are
+ * the only ones whose argument list is its own: the elementary sweep below
+ * draws one list of arguments for twenty-one functions that are all defined
+ * at every real, while the real Gamma function has poles, leaves the `f64`
+ * range long before its argument does, and is worth pointing at arguments
+ * that nothing else in the file reaches. Its emitter is separate for the same
+ * reason its arguments are, and both are documented where they are written.
+ *
  * Build:  see scripts/build_mpfr.sh
  * Usage:  ./gen_corpus > tests/corpus/elementary.txt
  */
@@ -197,6 +205,94 @@ static void emit_pow(double x, long n) {
     mpfr_clear(up);
 }
 
+/* The arguments the `gamma` rows are generated at, in the order they are
+ * emitted. Every one of them is a SINGLETON: the two endpoint fields of the
+ * row carry the same value twice, which is how a unary row is written above
+ * and is what lets the test runner build a one-point interval without a
+ * second format to agree on. */
+static const double GAMMA_ARGS[] = {
+    /* Positive. The half-integers, where the value is a rational multiple of
+     * sqrt(pi), the integers, where it is a factorial, and the quarters,
+     * which are the one shape here that is neither. */
+    0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 6.5,
+    10.0, 20.0, 30.0, 100.0,
+    /* Negative non-integers. The value is a quotient of pi by a sine, so the
+     * sign alternates with every pole crossed and a row that gets the sign
+     * wrong is wrong by an infinity rather than by an epsilon. */
+    -0.25, -0.5, -1.25, -1.5, -2.25, -2.5, -3.5, -4.5, -5.5, -10.5,
+    /* EITHER SIDE of the first two poles. Each pair is the row that catches a
+     * reflection formula that loses its sign, and the offsets are powers of
+     * two so that the argument is exact and no decimal is in the path. */
+    -1.0 + 0x1p-20, -1.0 - 0x1p-20,
+    -2.0 + 0x1p-20, -2.0 - 0x1p-20,
+    /* Just off zero, where the value is large again and, on the positive
+     * side, is Gamma(eps) ~ 1/eps rather than a pole. */
+    0x1p-20, 0x1p-40, -0x1p-20, -0x1p-40,
+    1.0 + 0x1p-20,
+    /* The high end. 170! is 7.2574e306 and is still a double; 171! is
+     * 1.2452e309 and is not, so these three arguments bracket the place
+     * where the function leaves the format and the last one emits nothing. */
+    170.0, 171.0, 172.0,
+    /* A value below the smallest positive double, and a POSITIVE one: it is
+     * 1/2 - 400, an even number of poles down, so the sign alternation puts
+     * it above zero. Its certified bracket is [0, 2^-1074], which is a real
+     * constraint - an answer of [0, 0] would exclude a positive value - and
+     * the negative counterpart is deliberately absent, because there the
+     * upper endpoint rounds toward zero to -0.0 and no enclosing answer that
+     * is one subnormal wide would meet a bound that is exactly -0.0. */
+    -399.5,
+    /* The poles themselves. MPFR answers NaN at each of these and NOTHING is
+     * emitted for any of them; they are in the table so that their absence is
+     * a property of this file and not of whichever sweep supplied the rest
+     * of the arguments. */
+    0.0, -1.0, -2.0, -3.0, -4.0,
+};
+static const int NGAMMA = (int)(sizeof GAMMA_ARGS / sizeof GAMMA_ARGS[0]);
+
+/* One `gamma` row, or none. The format is the unary format above, field for
+ * field, and the three ways to emit nothing here are three different pieces
+ * of mathematics rather than three versions of one guard:
+ *
+ *   * At a pole there is no real value at all, and MPFR says so with a NaN.
+ *   * A value that has left the `f64` range is a finite real that no double
+ *     can be an endpoint of. Saturating it is not a bracket either: under
+ *     RNDD an overflow becomes -floatMax, which is BELOW every real past the
+ *     end of the range, so emitting it would state a bound that excludes the
+ *     truth. This is checked on the MPFR value, before the conversion,
+ *     because afterwards the two cases are the same number.
+ *   * The directed endpoints can still come back inverted or non-finite, and
+ *     the same rule as everywhere else applies: drop the row rather than
+ *     publish a pair that is not a bracket.
+ */
+static void emit_gamma(double x) {
+    mpfr_t xi, down, up;
+    mpfr_init2(xi, PREC);
+    mpfr_init2(down, PREC);
+    mpfr_init2(up, PREC);
+    mpfr_set_d(xi, x, MPFR_RNDN);
+    int t1 = mpfr_gamma(down, xi, MPFR_RNDD);
+    int t2 = mpfr_gamma(up, xi, MPFR_RNDU);
+
+    int ok = !mpfr_nan_p(down) && !mpfr_nan_p(up) &&
+             !mpfr_inf_p(down) && !mpfr_inf_p(up);
+    double lo = 0.0, hi = 0.0;
+    if (ok) {
+        lo = mpfr_get_d(down, MPFR_RNDD);
+        hi = mpfr_get_d(up, MPFR_RNDU);
+        ok = (lo <= hi) && !isinf(lo) && !isinf(hi) && !isnan(lo) && !isnan(hi);
+    }
+    if (ok) {
+        printf("gamma %016" PRIx64 " %016" PRIx64 " %016" PRIx64 " %016" PRIx64 " %d\n",
+               bits(x), bits(x), bits(lo), bits(hi),
+               (t1 < t2) ? t1 : t2);
+        g_wrote++;
+    }
+
+    mpfr_clear(xi);
+    mpfr_clear(down);
+    mpfr_clear(up);
+}
+
 int main(void) {
     static const struct { const char *name; unary_fn f; } UNARY[] = {
         {"exp", mpfr_exp},     {"exp2", mpfr_exp2},   {"expm1", mpfr_expm1},
@@ -217,6 +313,11 @@ int main(void) {
     for (size_t u = 0; u < sizeof UNARY / sizeof UNARY[0]; u++)
         for (int i = 0; i < NARGS; i++)
             emit_unary(UNARY[u].name, UNARY[u].f, ARGS[i]);
+
+    /* The Gamma rows, which carry their own argument list and their own
+     * emitter, and whose rows are singletons like the unary ones above. */
+    for (int i = 0; i < NGAMMA; i++)
+        emit_gamma(GAMMA_ARGS[i]);
 
     for (int i = 0; i < NARGS; i++)
         for (size_t e = 0; e < sizeof EXPS / sizeof EXPS[0]; e++)

@@ -1,3 +1,24 @@
+//! An EXTERNAL consumer of this package: a separate Zig program in its own
+//! package, built against `interval` through the real dependency graph and
+//! never handed a source file. The repository's own tests are compiled with
+//! the module object in hand, so nothing in them can tell whether a name
+//! here reaches a real dependent package at all; this file can, because
+//! that is the only way it is built.
+//!
+//! It exercises four layers as MATH. The interval surface comes first, the
+//! way it always did, and then exact rationals, three-valued truth,
+//! tracked scalars, branch identity and the complex plane are each asked a
+//! question whose answer is decided by mathematics rather than by the
+//! library having written a name down: a cube root of a negative number
+//! that a float exponent cannot express, a rank that is not a rank, a
+//! square root that is partly defined, two rays with a gap between them
+//! where an interval answer says there is no gap, and `i * i` whose
+//! imaginary part is exactly zero.
+//!
+//! Nothing here asserts that a name EXISTS or that two spellings reach the
+//! same place. Such a check passes for a library that forwards every call
+//! to somewhere real and fails for one that computes, which is precisely
+//! backwards; the semantics below would all hold either way.
 const std = @import("std");
 const interval = @import("interval");
 
@@ -10,8 +31,11 @@ const DynVec = interval.DynVec;
 /// the process exit non-zero, failing the parent `consumer` step.
 pub const CheckError = error{ UnexpectedIntervalValue, WriteFailed };
 
-/// Number of behavioural checks; the summary line reports this.
-const total_checks = 29;
+/// Number of behavioural checks; the summary line reports this. It counts
+/// claims, not declarations: nothing here asserts that a name exists or
+/// that two spellings reach the same place, because a check like that
+/// passes for a library that forwards and fails for one that computes.
+const total_checks = 48;
 
 /// The program's own output: one line per claim, on stderr, with nothing in
 /// front of the bytes.
@@ -229,6 +253,106 @@ fn expectEnclosesFromZero(
         "ok {s}: [{d}, {d}] encloses [0, {d}] and is widened at the top\n",
         .{ what, got.lo, got.hi, exact_hi },
     );
+}
+
+/// Assert an enclosure against an EXACT witness that is representable in
+/// binary floating point, and nothing else.
+///
+/// The right assertion for a result whose true value is a small integer, a
+/// zero or a sign: the answer has to CONTAIN it, and how far outside it
+/// sits is a quality measure this fixture deliberately does not judge. A
+/// check that pinned the endpoints would pin the width, and the width is
+/// the one thing an enclosure library is free to change.
+fn expectContains(
+    report: *Report,
+    what: []const u8,
+    got: Interval,
+    exact: f64,
+) CheckError!void {
+    if (!got.contains(exact)) {
+        try report.line(
+            "FAIL {s}: [{d}, {d}] does not contain {d}\n",
+            .{ what, got.lo, got.hi, exact },
+        );
+        return CheckError.UnexpectedIntervalValue;
+    }
+    try report.line("ok {s}: [{d}, {d}] contains {d}\n", .{ what, got.lo, got.hi, exact });
+}
+
+/// Assert a `Truth` against the one the mathematics gives, by name.
+///
+/// The three states are printed rather than as a bool because the third
+/// one is the whole point of the type: `maybe` is what a caller sees when
+/// the outcomes are not pinned down, and a boolean would have thrown away
+/// the difference between "we know it is mixed" and "we do not know",
+/// which are different facts about different problems.
+fn expectTruth(
+    report: *Report,
+    what: []const u8,
+    got: interval.Truth,
+    want: interval.Truth,
+) CheckError!void {
+    if (got != want) {
+        try report.line(
+            "FAIL {s}: got {s}, want {s}\n",
+            .{ what, @tagName(got), @tagName(want) },
+        );
+        return CheckError.UnexpectedIntervalValue;
+    }
+    try report.line("ok {s}: {s}\n", .{ what, @tagName(got) });
+}
+
+/// Report the range a tracked value carries, insisting that it carries
+/// one. Reaching this with an absent range means something asked for a
+/// value the mathematics does not have, and the line says which.
+fn trackedRange(
+    report: *Report,
+    what: []const u8,
+    t: interval.Tracked,
+) CheckError!Interval {
+    return t.range orelse {
+        try report.line("FAIL {s}: the value is wholly undefined\n", .{what});
+        return CheckError.UnexpectedIntervalValue;
+    };
+}
+
+/// The complex box a tracked-free complex answer carries, under the same
+/// insistence as `trackedRange`: an absent box is a fact to report, not a
+/// box to work around.
+fn complexRange(
+    report: *Report,
+    what: []const u8,
+    c: interval.Complex,
+) CheckError!interval.complex.Bounds {
+    return c.range orelse {
+        try report.line("FAIL {s}: the complex value is wholly undefined\n", .{what});
+        return CheckError.UnexpectedIntervalValue;
+    };
+}
+
+/// Assert that a complex box contains an exact point, and that it does so
+/// in both coordinates at once.
+///
+/// A witness has to be exact in binary floating point for this to decide
+/// anything, which every witness below is: the integers, the zeroes, and
+/// the exact halves. A rounded transcendental is not a witness, and
+/// padding one to be a witness would be the implementation marking its
+/// own homework.
+fn expectComplexPoint(
+    report: *Report,
+    what: []const u8,
+    b: interval.complex.Bounds,
+    re: f64,
+    im: f64,
+) CheckError!void {
+    if (!b.re.contains(re) or !b.im.contains(im)) {
+        try report.line(
+            "FAIL {s}: re [{d}, {d}], im [{d}, {d}] does not contain ({d}, {d})\n",
+            .{ what, b.re.lo, b.re.hi, b.im.lo, b.im.hi, re, im },
+        );
+        return CheckError.UnexpectedIntervalValue;
+    }
+    try report.line("ok {s}: contains ({d}, {d})\n", .{ what, re, im });
 }
 
 /// Check a whole vector in one shot: the dimension, then every component.
@@ -599,6 +723,331 @@ fn run(report: *Report) !void {
         return CheckError.UnexpectedIntervalValue;
     }
     try report.line("ok div-straddling-zero: [-inf, inf]\n", .{});
+
+    // =======================================================================
+    // The layers above, exercised as MATH rather than as names.
+    // =======================================================================
+    //
+    // Everything to this point is the original surface: intervals, vectors,
+    // and the elementary functions. What follows is the four layers this
+    // package grew, and each one is asked a question whose answer is
+    // decided by mathematics rather than by the library having written a
+    // name down. A check that could pass on forwarding would pass for a
+    // forwarding bug, which is the one class of bug this file exists to be
+    // able to see.
+
+    // --- Layer one: exact rationals, and the root a float cannot ask for.
+
+    // (-8)^(1/3) is -2, and the interesting part is that the question is
+    // ANSWERABLE AT ALL. The f64 nearest to 1/3 is not 1/3, so `powf` with
+    // a base of -8 under an exponent of that value has to enclose the image
+    // of a slightly different exponent, and a negative base under a
+    // non-integer exponent is a question with no real answer. Passing the
+    // exponent as the exact pair (1, 3) is what makes it one.
+    const third = interval.Rational{ .numerator = 1, .denominator = 3 };
+    try expectContains(
+        report,
+        "powRational-cube-root-of-minus-eight",
+        interval.ext.powRational(Interval.init(-8.0, -8.0), third) orelse {
+            try report.line("FAIL powRational-cube-root-of-minus-eight: got null\n", .{});
+            return CheckError.UnexpectedIntervalValue;
+        },
+        -2.0,
+    );
+
+    // The exact pair normalizes: (4, 6) and (6, 4) are the same rational,
+    // and an unreduced one would be a different exponent to anyone reading
+    // the struct rather than dividing it.
+    const reduced = interval.Rational.init(4, 6) catch {
+        try report.line("FAIL rational-init: got an error\n", .{});
+        return CheckError.UnexpectedIntervalValue;
+    };
+    try expectFloat(
+        report,
+        "rational-reduced-numerator",
+        @floatFromInt(reduced.numerator),
+        2.0,
+    );
+    try expectFloat(
+        report,
+        "rational-reduced-denominator",
+        @floatFromInt(reduced.denominator),
+        3.0,
+    );
+
+    // A rank is ONE-BASED and integer-valued. Rank 2 of three ordered
+    // intervals is the middle one, and rank 3.5 is not a rank at all: it
+    // is a real number between two ranks, and the honest answer is that
+    // there is no such element. Both halves are checked, because an
+    // implementation that rounded 3.5 down to 3 would satisfy the first
+    // and fail the second.
+    const ordered = [_]Interval{
+        Interval.init(1.0, 1.0),
+        Interval.init(5.0, 5.0),
+        Interval.init(9.0, 9.0),
+    };
+    var scratch: [3]f64 = undefined;
+    try expectContains(
+        report,
+        "nthSmallest-rank-2",
+        try interval.ext.nthSmallest(&ordered, Interval.init(2.0, 2.0), scratch[0..]) orelse {
+            try report.line("FAIL nthSmallest-rank-2: got null\n", .{});
+            return CheckError.UnexpectedIntervalValue;
+        },
+        5.0,
+    );
+    try expectNullInterval(
+        report,
+        "nthSmallest-rank-3.5",
+        try interval.ext.nthSmallest(&ordered, Interval.init(3.5, 3.5), scratch[0..]),
+    );
+
+    // --- Layer two: three-valued truth about a partly off-domain root.
+
+    // The square root of [-1, 1] EXISTS for some points of the box and not
+    // for others. An `Interval` answer of [0, 1] is correct as an enclosure
+    // and says nothing about which; a `Tracked` answer says
+    // `defined = maybe`, and that is the reason the type exists. Neither
+    // `always` nor `never` would be true here, so the check that fails if
+    // the value is over-claimed is the one that matters.
+    const straddling = interval.Tracked.init(Interval.init(-1.0, 1.0)).sqrt();
+    try expectTruth(report, "sqrt-straddling-defined", straddling.defined, .maybe);
+    try expectContains(
+        report,
+        "sqrt-straddling-range",
+        try trackedRange(report, "sqrt-straddling-range", straddling),
+        0.0,
+    );
+
+    // The square root of [-4, -1] has NO real value at any point of the
+    // box. This is where a `Tracked` and an `?Interval` part company: the
+    // range is ABSENT rather than an interval standing in for nothing. An
+    // implementation that answered [-inf, inf] would pass every
+    // containment check above and would draw a picture of a value that is
+    // not there, so the absence is what this row asserts.
+    const off_domain = interval.Tracked.init(Interval.init(-4.0, -1.0)).sqrt();
+    try expectTruth(report, "sqrt-off-domain-defined", off_domain.defined, .never);
+    if (off_domain.range != null) {
+        try report.line("FAIL sqrt-off-domain-range: got a range, want none\n", .{});
+        return CheckError.UnexpectedIntervalValue;
+    }
+    try report.line("ok sqrt-off-domain-range: absent\n", .{});
+
+    // Strictness, which the interval layer cannot express at all. Two
+    // points are compared, and the answer is `always` or `never` because a
+    // point is either below another point or it is not. The two rows are
+    // opposites on purpose: an equality that were reported as `maybe` would
+    // be the classic bug, since the whole domain of x < x is empty and
+    // there is nothing to be unsure about.
+    try expectTruth(
+        report,
+        "tracked-lt-separated",
+        interval.Tracked.point(2.0).lt(interval.Tracked.point(4.0)),
+        .always,
+    );
+    try expectTruth(
+        report,
+        "tracked-lt-equal-points",
+        interval.Tracked.point(3.0).lt(interval.Tracked.point(3.0)),
+        .never,
+    );
+
+    // --- Layer three: branch identity, and the gap a hull would erase.
+
+    // floor([0.9, 1.1]) is the two values 0 and 1. The hull is [0, 1], and
+    // the hull is not a rounding of the answer: it contains 0.5, which is
+    // not the floor of anything in that box. Two pieces and two labels, and
+    // the label IS the integer the box floored to.
+    //
+    // The pieces are looked up BY LABEL rather than by position, because
+    // the order a producer emits them in is not a promise — only the
+    // pairing of value and label is, and a check that read `pieces[0]`
+    // would be asserting an implementation detail that could change for no
+    // reason a caller could see.
+    var floor_pieces: [4]interval.branches.Piece(interval.Tracked) = undefined;
+    var floor_pool: [8]interval.branches.Assignment = undefined;
+    var floor_in: [1]interval.branches.Piece(interval.Tracked) = undefined;
+    floor_in[0] = .{
+        .value = interval.Tracked.init(Interval.init(0.9, 1.1)),
+        .assignments = &.{},
+    };
+    var floor_writer = interval.branches.Writer(interval.Tracked).init(
+        floor_pieces[0..],
+        floor_pool[0..],
+    );
+    const floored = try interval.branches.floor(
+        &floor_writer,
+        .{ .pieces = floor_in[0..] },
+        7,
+    );
+    if (floored.pieces.len != 2) {
+        try report.line("FAIL floor-cells: got {d} pieces, want 2\n", .{floored.pieces.len});
+        return CheckError.UnexpectedIntervalValue;
+    }
+    for ([_]interval.branches.Choice{ 0, 1 }) |cell| {
+        var piece_with_cell: ?interval.branches.Piece(interval.Tracked) = null;
+        for (floored.pieces) |piece| {
+            for (piece.assignments) |a| {
+                if (a.site == 7 and a.choice == cell) piece_with_cell = piece;
+            }
+        }
+        const piece = piece_with_cell orelse {
+            try report.line(
+                "FAIL floor-cell-{d}: no piece is labelled with it\n",
+                .{cell},
+            );
+            return CheckError.UnexpectedIntervalValue;
+        };
+        // The image of a cell is the integer itself, exactly: a whole
+        // number, and a whole-number answer with a fractional endpoint
+        // would be a widening the mathematics does not call for.
+        try expectInterval(
+            report,
+            "floor-cell-value",
+            try trackedRange(report, "floor-cell-value", piece.value),
+            Interval.init(@floatFromInt(cell), @floatFromInt(cell)),
+        );
+        try report.line("ok floor-cell-{d}: labelled at site 7\n", .{cell});
+    }
+
+    // 1/x over [-1, 1] is two RAYS, and the gap between them is the point
+    // of the exercise: the images are (-inf, -1] and [1, inf), so zero is
+    // in neither, and nothing of magnitude below 1 is in either. The
+    // interval layer answers [-inf, inf] here, which is a real answer and
+    // is also a statement that 0 is reachable. It is not.
+    var recip_in: [1]interval.branches.Piece(interval.Tracked) = undefined;
+    var recip_pieces: [4]interval.branches.Piece(interval.Tracked) = undefined;
+    var recip_pool: [8]interval.branches.Assignment = undefined;
+    recip_in[0] = .{
+        .value = interval.Tracked.init(Interval.init(-1.0, 1.0)),
+        .assignments = &.{},
+    };
+    var recip_writer = interval.branches.Writer(interval.Tracked).init(
+        recip_pieces[0..],
+        recip_pool[0..],
+    );
+    const reciprocated = try interval.branches.recip(
+        &recip_writer,
+        .{ .pieces = recip_in[0..] },
+        8,
+    );
+    var gap_holds = reciprocated.pieces.len == 2;
+    for (reciprocated.pieces) |piece| {
+        const range = try trackedRange(report, "recip-gap", piece.value);
+        // Neither ray may reach zero, and neither may reach 0.5, which is
+        // in the gap between them.
+        if (range.contains(0.0)) gap_holds = false;
+        if (range.contains(0.5)) gap_holds = false;
+    }
+    if (!gap_holds) {
+        try report.line("FAIL recip-gap: a piece reaches into the gap\n", .{});
+        return CheckError.UnexpectedIntervalValue;
+    }
+    try report.line("ok recip-gap: 2 rays, neither reaches 0\n", .{});
+
+    // --- Layer four: the complex plane, where i*i is -1 and not a box.
+
+    // i*i = -1 exactly. This is the check a forwarding implementation
+    // cannot pass by accident: the imaginary coordinate is EXACTLY zero,
+    // and it is checked exactly because a complex multiply that widened
+    // the two coordinates independently would put that box somewhere
+    // around zero and might still contain 0.0 while being far too wide to
+    // be an answer. Containment alone would let it through.
+    const imaginary_unit = interval.Complex.point(0.0, 1.0);
+    const squared_box = try complexRange(report, "i*i", imaginary_unit.mul(imaginary_unit));
+    try expectComplexPoint(report, "i*i-contains-minus-one", squared_box, -1.0, 0.0);
+    if (squared_box.im.lo != 0.0 or squared_box.im.hi != 0.0) {
+        try report.line(
+            "FAIL i*i-imaginary-part: [{d}, {d}], want exactly [0, 0]\n",
+            .{ squared_box.im.lo, squared_box.im.hi },
+        );
+        return CheckError.UnexpectedIntervalValue;
+    }
+    try report.line("ok i*i-imaginary-part: exactly [0, 0]\n", .{});
+
+    // The logarithm of one is zero on the principal sheet, and every other
+    // sheet is that zero plus 2*pi*i*k. Sheets -1, 0 and 1 are selected
+    // EXPLICITLY, and the answer carries one piece per selected sheet with
+    // its own label, so a caller that asked for three can tell which is
+    // which. The exact value 2*pi is not an f64, so the off-zero sheets are
+    // checked by SIGN rather than by a pinned width: the negative sheet's
+    // imaginary box lies below zero and the positive one's above it, and
+    // that is the whole of what distinguishes k = -1 from k = +1.
+    var log_pieces: [4]interval.branches.Piece(interval.Complex) = undefined;
+    var log_pool: [16]interval.branches.Assignment = undefined;
+    var log_in: [1]interval.branches.Piece(interval.Complex) = undefined;
+    log_in[0] = .{
+        .value = interval.Complex.point(1.0, 0.0),
+        .assignments = &.{},
+    };
+    var log_writer = interval.branches.Writer(interval.Complex).init(
+        log_pieces[0..],
+        log_pool[0..],
+    );
+    const sheets = [_]i64{ -1, 0, 1 };
+    const logarithms = try interval.complex.logSheets(
+        &log_writer,
+        .{ .pieces = log_in[0..] },
+        11,
+        sheets[0..],
+    );
+    if (logarithms.pieces.len != sheets.len) {
+        try report.line(
+            "FAIL log-sheets: got {d} pieces, want {d}\n",
+            .{ logarithms.pieces.len, sheets.len },
+        );
+        return CheckError.UnexpectedIntervalValue;
+    }
+    // Each sheet's real part is 0: log(1) is 0 and adding 2*pi*i*k does
+    // not move the real part. That is checked on every sheet rather than
+    // on one, because a sheet-index bug that also moved the real part
+    // would otherwise be caught by nothing.
+    for (logarithms.pieces, 0..) |piece, idx| {
+        const sheet_box = try complexRange(report, "log-sheets", piece.value);
+        if (!sheet_box.re.contains(0.0)) {
+            try report.line(
+                "FAIL log-sheet-real-part: [{d}, {d}] does not contain 0\n",
+                .{ sheet_box.re.lo, sheet_box.re.hi },
+            );
+            return CheckError.UnexpectedIntervalValue;
+        }
+        switch (idx) {
+            0 => {
+                // k = -1: the imaginary part is -2*pi, so the box lies
+                // strictly below zero.
+                if (sheet_box.im.hi > 0.0) {
+                    try report.line(
+                        "FAIL log-sheet-minus-one: imaginary part reaches {d}, want negative\n",
+                        .{sheet_box.im.hi},
+                    );
+                    return CheckError.UnexpectedIntervalValue;
+                }
+                try report.line("ok log-sheet-minus-one: imaginary part below 0\n", .{});
+            },
+            1 => {
+                // k = 0: the principal sheet, and log(1) is EXACTLY zero.
+                if (sheet_box.im.lo != 0.0 or sheet_box.im.hi != 0.0) {
+                    try report.line(
+                        "FAIL log-sheet-zero: imaginary part [{d}, {d}], want [0, 0]\n",
+                        .{ sheet_box.im.lo, sheet_box.im.hi },
+                    );
+                    return CheckError.UnexpectedIntervalValue;
+                }
+                try report.line("ok log-sheet-zero: imaginary part exactly [0, 0]\n", .{});
+            },
+            else => {
+                // k = +1: the imaginary part is +2*pi, strictly above zero.
+                if (sheet_box.im.lo < 0.0) {
+                    try report.line(
+                        "FAIL log-sheet-plus-one: imaginary part reaches {d}, want positive\n",
+                        .{sheet_box.im.lo},
+                    );
+                    return CheckError.UnexpectedIntervalValue;
+                }
+                try report.line("ok log-sheet-plus-one: imaginary part above 0\n", .{});
+            },
+        }
+    }
 
     try report.line("consumer ok: {d} checks\n", .{total_checks});
 }

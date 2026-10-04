@@ -248,6 +248,90 @@ pub fn build(b: *std.Build) void {
     const run_soundness_reproducers_tests = b.addRunArtifact(soundness_reproducers_tests);
     test_step.dependOn(&run_soundness_reproducers_tests.step);
 
+    // The mathematical core's own tests: SIX binaries, one per source layer -
+    // real, special, trig, tracked, branches, complex - over the public
+    // `interval` module, and `test_step` runs all six. Each imports
+    // `interval` ALONE, and for the reason given at the top of this file: the
+    // root re-exports the whole surface, and a second registration of any
+    // file under `src/` is a hard "file exists in modules" error.
+    const real_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/real_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    real_tests.root_module.addImport("interval", interval);
+    const run_real_tests = b.addRunArtifact(real_tests);
+    test_step.dependOn(&run_real_tests.step);
+
+    const special_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/special_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    special_tests.root_module.addImport("interval", interval);
+    const run_special_tests = b.addRunArtifact(special_tests);
+    test_step.dependOn(&run_special_tests.step);
+
+    const trig_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/trig_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    trig_tests.root_module.addImport("interval", interval);
+    const run_trig_tests = b.addRunArtifact(trig_tests);
+    test_step.dependOn(&run_trig_tests.step);
+
+    const tracked_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/tracked_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    tracked_tests.root_module.addImport("interval", interval);
+    const run_tracked_tests = b.addRunArtifact(tracked_tests);
+    test_step.dependOn(&run_tracked_tests.step);
+
+    const branches_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/branches_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    branches_tests.root_module.addImport("interval", interval);
+    const run_branches_tests = b.addRunArtifact(branches_tests);
+    test_step.dependOn(&run_branches_tests.step);
+
+    const complex_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/complex_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    complex_tests.root_module.addImport("interval", interval);
+    const run_complex_tests = b.addRunArtifact(complex_tests);
+    test_step.dependOn(&run_complex_tests.step);
+
+    // `test-math` is a FOCUSED step over those six run steps, not a second
+    // copy of them: each run step above is built once and is a dependency of
+    // BOTH steps, so `zig build test-math` runs this layer on its own while
+    // `zig build test` still runs it alongside everything else.
+    const test_math_step = b.step("test-math", "Run the mathematical-core tests");
+    test_math_step.dependOn(&run_real_tests.step);
+    test_math_step.dependOn(&run_special_tests.step);
+    test_math_step.dependOn(&run_trig_tests.step);
+    test_math_step.dependOn(&run_tracked_tests.step);
+    test_math_step.dependOn(&run_branches_tests.step);
+    test_math_step.dependOn(&run_complex_tests.step);
+
     // Compile the same test artifacts without run steps or the host consumer.
     // The installed library is the cross-test artifact; the test dependencies
     // force analysis and code generation of the exercised public operations.
@@ -266,6 +350,12 @@ pub fn build(b: *std.Build) void {
         soundness_frontier_tests,
         soundness_reproducers_tests,
         nan_probe,
+        real_tests,
+        special_tests,
+        trig_tests,
+        tracked_tests,
+        branches_tests,
+        complex_tests,
     }) |artifact| compile_step.dependOn(&artifact.step);
 
     // The fixture is a real external package: it declares this one as a
@@ -299,28 +389,34 @@ pub fn build(b: *std.Build) void {
     // So: absolute paths, outside the repository wherever the machine has
     // local storage to put them, chosen by `consumerCacheRoot`. The
     // containment property is unchanged and now actually holds, because
-    // nothing the nested build writes to a CACHE lands in `fixture/` or in
-    // any other directory `build.zig.zon`'s `.paths` walks.
+    // nothing the nested build writes at all lands in `fixture/` or in any
+    // other directory `build.zig.zon`'s `.paths` walks.
     //
-    // Caches are what moved. The install output has always been relative:
-    // no `--prefix` is passed and this step's cwd is `fixture/`, so it is
-    // `fixture/zig-out` - two small binaries, ignored by git, and covered by
-    // the recursive `fixture` entry in `.paths` exactly as it was before.
-    // The bulk of the output that made that entry a problem, described
-    // above, was cache output, and cache output is what this moved.
+    // The caches moved first, and the install output moved with them. The
+    // nested build is given `--prefix` under the same root, so the two
+    // small consumer binaries it installs land beside its caches. It used
+    // to get no `--prefix` at all and to resolve the default one against
+    // this step's cwd, which is `fixture/`, so that output landed in
+    // `fixture/zig-out`: two small binaries, ignored by git, and covered by
+    // the recursive `fixture` entry in `.paths` exactly as the caches had
+    // been. The bulk of the output that made that entry a problem,
+    // described above, was cache output, and the prefix was the last of what
+    // this build still wrote in there.
     //
     // Set ZIG_INTERVAL_CONSUMER_CACHE to choose the location. Where that
     // is not set, the helper reuses the cache directory THIS build was
     // given, which on a plain CI runner with no --cache-dir is inside the
-    // tree. That is the point of it: the nested caches then land beside
-    // the parent's own output in a directory that is already ignored,
-    // instead of in a storage location this build invented for itself at
-    // the last moment.
+    // tree. That is the point of it: the nested caches and the install
+    // prefix then land beside the parent's own output in a directory that
+    // is already ignored, instead of in a storage location this build
+    // invented for itself at the last moment.
     const consumer_root = consumerCacheRoot(b);
     const run_consumer = b.addSystemCommand(&.{
         "zig",
         "build",
         "run",
+        "--prefix",
+        b.fmt("{s}/zig-interval-consumer-out", .{consumer_root}),
         "--cache-dir",
         b.fmt("{s}/zig-interval-consumer", .{consumer_root}),
         "--global-cache-dir",
@@ -467,9 +563,10 @@ pub fn build(b: *std.Build) void {
     bench_lp_step.dependOn(&run_bench_lp.step);
 }
 
-/// Root directory under which the nested consumer build may write its caches.
-/// Always absolute. The caller appends the two directory names, which is why
-/// this returns a root and not a complete path.
+/// Root directory under which the nested consumer build may write its caches
+/// and its install output. Always absolute. The caller appends the cache,
+/// global-cache and install-prefix directory names, which is why this returns
+/// a root and not a complete path.
 ///
 /// Two candidates, in order:
 ///
@@ -480,8 +577,9 @@ pub fn build(b: *std.Build) void {
 /// Either can be relative, and the absolute rule is why this function exists
 /// at all: the nested build runs with its working directory set to `fixture/`,
 /// so a relative root resolves against the fixture and not against the
-/// repository root, which puts both caches under `fixture/` - and
-/// `build.zig.zon`'s `.paths` includes that directory, recursively.
+/// repository root, which puts both caches and the install prefix under
+/// `fixture/` - and `build.zig.zon`'s `.paths` includes that directory,
+/// recursively.
 ///
 /// Nothing else is consulted. A directory is not a build cache because a
 /// plausible default names it: no environment variable is read as a decision,
