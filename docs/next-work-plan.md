@@ -1316,6 +1316,11 @@ nonfinite operands. The full installed gate passed on the pinned code;
 each of the four required Linux targets executed 351 tests. Windows was
 compile-only coverage.
 
+That checkpoint predates the ownership feature. On 2026-10-04, the ownership
+revision passed 53-target compile coverage and Wine runtime checks.
+The [verification record](performance-handover.md#10-ownership-revision-verification-and-exact-scale-trial--2026-10-04)
+separates compiled targets, Windows root tests and Windows consumer runs.
+
 **Performance decision: no trial and no new speed claim.** The existing
 362-row baseline and the rejected 52-row RHS-first trial remain unchanged.
 Closing a duplicate backlog item is not a measurement, and it does not show
@@ -1331,3 +1336,7 @@ exact equality with a tolerance, or rename the rejected RHS-first trial.
 The alternative scale-enclosure formulation in `scale-enclosure.md` is separate
 research. This correction neither implements it nor reopens the rejected
 rounded `M - W` shortcut.
+
+The later [exact-expansion trial](scale-enclosure.md#10-exact-expansion-trial--2026-10-04)
+passed its enclosure checks but ran 18.86× slower. The trial is rejected.
+Production `scale` is unchanged.

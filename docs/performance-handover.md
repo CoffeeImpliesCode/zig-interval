@@ -2197,11 +2197,11 @@ child probes. The x86-linux test parent ran under QEMU there, but
 direct child execution failed without a kernel binfmt handler. Both probes
 now use the explicit runner and keep their existing control and trap checks.
 
-There is no Windows or WASI runtime wired up for this project yet. A Wine and a
-wasmtime may be present on a given machine and are useful for a one-off
-probe, but no target of this project's own suite has been executed under either,
-so a row claiming Windows or WASI **runtime** evidence would be claiming
-something nobody has measured. Build-only evidence is build-only.
+Windows runtime coverage now exists for the ownership revision. On 2026-10-04,
+Wine 11.0 ran all 357 `x86_64-windows` root tests and both Windows consumer
+executables. [Section 10](#10-ownership-revision-verification-and-exact-scale-trial--2026-10-04)
+records the target, modes and limits. Wine is not a native Windows host.
+WASI runtime coverage is still unverified. Build-only evidence is build-only.
 
 Then commit, and move `main`.
 
@@ -2480,3 +2480,78 @@ is recorded so it does not have to be re-derived too.
 The rule underneath all of these is constraint 2: a faster path that computes
 something slightly different is a different function, and the guarantee is
 about the function as specified.
+
+## 10. Ownership revision verification and exact-scale trial — 2026-10-04
+
+### Published ownership revision
+
+`b9ed7e13281cfebaa67715e639ff85f5b491c1d3` contains the separate ownership
+feature and planning-document commits. A local snapshot matched all 81 tracked
+files before verification. The installed quality prefix was retained unchanged.
+
+The complete `cross-compile.profile.sh` run used Zig 0.16.0, two target jobs
+and one build job per target, pinned to CPUs 0–1. All **53 targets** built in
+Debug. Every target log was checked, not sampled: 11 test binaries, one NaN
+probe and one installed library per target. Totals: **583 test binaries,
+53 probes and 53 libraries**. Summary: `pass=0`, `fail=0`, `build_only=53`,
+`partial=0`. This is compilation coverage, not runtime evidence for 53 targets.
+
+The same revision also ran on **`x86_64-windows` under Wine 11.0**:
+**357/357 tests**, 27/27 build steps, no failed or skipped runtime step.
+`--require-runners` was set. The root build's nested consumers are host
+programs, so they were not counted as Windows consumers.
+
+Both actual package consumers were then built for Windows in ReleaseSafe and
+run with Zig's `-fwine` integration: **29 API checks and 31 README checks**,
+5/5 build steps. The ownership transfer and optional-intersection examples
+reported successful cleanup. These were Windows PE runs under Wine on Linux,
+not native-Windows-host runs.
+
+Wine and its harness utilities came through the approved Nix wrapper, with a
+dedicated local `WINEPREFIX` and no display. The resolved Nixpkgs revision was
+`c9fe7d12cd78d1adcd12dd15e24432dde5b155a0`. Wine's bootstrap reported missing
+Fontconfig defaults and an unavailable 32-bit `rundll32`; the required 64-bit
+runtime and both consumers completed. No site configuration was changed.
+
+The published ownership revision's [GitHub Actions](https://github.com/CoffeeImpliesCode/zig-interval/actions/runs/37160213307)
+completed all nine jobs successfully. That CI result is separate from the
+local 53-target and Wine receipts.
+
+Evidence root: `/tmp/scratch/zig-interval-six.vfU6fB0s`.
+The immutable compilation run is `compile53/runs/20261003-232459-5499-13273`;
+the Windows suite run is `windows-runtime/runs/20261003-233140-48464-16829`.
+`task4-source-identity.tsv`, `task4-compile53.json`,
+`task4-windows-runtime.json` and `task4-windows-consumers.json` bind the
+observations to the published source. No numerical source change was needed.
+
+### Exact-expansion `scale`: sound formulation, measured rejection
+
+The follow-on trial uses exact binary128 products, four-component expansions,
+`COMPRESS`, and zero-aware binary64 outward neighbors. It is not the rejected
+rounded `M-W` shortcut. The full finite-range, subnormal, factor and ray proof
+is in [scale-enclosure.md §10](scale-enclosure.md#10-exact-expansion-trial--2026-10-04).
+
+The compiled research candidate passed 219,172 cases in each optimize mode
+and 20,000 independent exact-rational comparisons. Nonfinite-input policy
+delegates to the existing implementation; checked NaN refusal was exercised.
+No permanent test or numerical API was added for this investigation.
+
+Three counterbalanced ReleaseFast pairs on the existing 256-case scalar
+workload gave medians **50.975 ns/op** for the composition and
+**961.631 ns/op** for the candidate: **18.86× slower**. The predeclared 5%
+improvement, three improving pairs and separated ranges in the improvement
+direction all failed. The output-bit witnesses are stable within each path,
+but are not equal across paths because the enclosures differ.
+
+**REJECTED. Production `src/interval.zig` is unchanged. No performance
+improvement is claimed.** All 42 timing samples, hashes, checks and the
+predeclaration are in the scoped run's `task5-*.json` receipts.
+
+### Deferred scratch cleanup
+
+The user explicitly selected **“Defer cleanup; continue 4–6.”**
+The earlier `zig-interval-gate.RXA5hj1K` run is retained at **936,886,272
+allocated bytes**. Its audit found no foreign owner, submount or visible live
+reference, but three owned services deny descriptor inspection and noninteractive
+sudo requires a password. No deletion or signal was performed.
+The installed quality prefix and verification evidence remain intact.
