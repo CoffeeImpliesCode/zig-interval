@@ -1340,3 +1340,30 @@ rounded `M - W` shortcut.
 The later [exact-expansion trial](scale-enclosure.md#10-exact-expansion-trial--2026-10-04)
 passed its enclosure checks but ran 18.86× slower. The trial is rejected.
 Production `scale` is unchanged.
+
+## 8. Derived-row coefficient batching (implemented, 2026-10-04)
+
+The distinct LP trial targeted per-coefficient list bookkeeping in
+`appendCombined`. A capacity-checked row slice now batches those writes.
+The original growth path remains when one row does not fit.
+Arithmetic, row order, exact cancellation, contradiction scans and allocator
+behavior remain unchanged.
+
+The predeclared primary row's median decreased **12.006%** across three paired
+runs. All three improved, and the ranges do not overlap.
+All four native optimize modes, both package consumers, and differential state
+and OOM consumers passed. Allocation accounting matched for all 13 LP bodies
+on both heaps.
+
+The accepted source also compiled on all **53 targets**.
+The four required Linux suites and the x86_64 Windows suite passed **357/357**
+each. Windows ran under Wine, not on a native Windows host.
+Separately targeted Windows consumers passed **29 API** and **31 README checks**.
+Compile-only coverage does not establish runtime coverage for the other targets.
+
+The [accepted trial record](performance-handover.md#11-derived-row-coefficient-batching--2026-10-04)
+contains the profile, rules, all three pairs, correctness checks and limits.
+This trial does not reopen the rejected RHS-first guard or the completed
+exact-cancellation backlog item. Further performance work still needs a
+distinct measured cost and a predeclared correctness-preserving trial.
+

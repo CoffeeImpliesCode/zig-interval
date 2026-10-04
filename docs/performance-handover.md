@@ -2555,3 +2555,145 @@ allocated bytes**. Its audit found no foreign owner, submount or visible live
 reference, but three owned services deny descriptor inspection and noninteractive
 sudo requires a password. No deletion or signal was performed.
 The installed quality prefix and verification evidence remain intact.
+
+## 11. Derived-row coefficient batching — 2026-10-04
+
+**ACCEPTED.** The primary LP row's median time decreased **12.006%**.
+All three pairs improved. The measured ranges do not overlap.
+This result applies to the named workload on this shared host, not every solver input.
+
+### Profile and implementation
+
+The baseline is `b9ed7e13281cfebaa67715e639ff85f5b491c1d3`.
+A fresh ReleaseFast profile ran all 13 bounded LP bodies through the public
+benchmark entry point with the SMP allocator. That entry point prints a fixed
+`dbg` label. The profile driver explicitly reported the actual SMP allocator.
+
+`perf record` sampled `cycles:u` at 199 Hz with 4,096-byte DWARF stacks.
+It recorded **399 samples**, with **zero lost samples**.
+`System.eliminate` accounted for **53.56%** of whole-process sampled cycles.
+The profile includes geometry, measurement, allocation accounting and output.
+It does not isolate the primary row or predict a precise removable cost.
+
+The sampled assembly includes inlined coefficient appends.
+Each append checks capacity and updates the list length.
+The trial targets that work, not arithmetic or contradiction detection.
+
+`appendCombined` now checks whether existing spare capacity holds one full row.
+If it does, `addManyAsSliceAssumeCapacity(vc)` exposes that row once.
+The loop writes each column in its original order with the same arithmetic.
+If the row does not fit, the original per-coefficient append loop runs.
+The RHS append is unchanged.
+
+The capacity check preserves the existing geometric growth and OOM order.
+An unallocatable expanded output does not prove its input was unallocatable.
+The candidate therefore retains the original reservation-overflow fallback.
+This refinement preceded every variant build and timing capture.
+
+No public API, layout, allocator policy, row identity, validation or arithmetic changed.
+The exact-cancellation pre-pass and full contradiction rescan remain.
+The rejected RHS-first guard remains rejected.
+The benchmark's **20,000-row per-round limit** remains.
+
+### Correctness evidence
+
+The accepted source passed the complete native suite and both package consumers
+in Debug, ReleaseSafe, ReleaseFast and ReleaseSmall:
+
+| Mode | Build steps | Tests | API / README consumer checks |
+| --- | --- | --- | --- |
+| Debug | 27/27 | 357/357 passed | 29 / 31 |
+| ReleaseSafe | 27/27 | 357/357 passed | 29 / 31 |
+| ReleaseFast | 27/27 | 356 passed, 1 checked-only test skipped | 29 / 31 |
+| ReleaseSmall | 27/27 | 356 passed, 1 checked-only test skipped | 29 / 31 |
+
+A separate differential consumer ran **362 cases in each mode**:
+42 explicit cases and all 320 deterministic seeds.
+Each run made **3,023,124 comparisons** across **1,644 elimination rounds**.
+It compared endpoint bits, rows, flags, buckets, predictions, order, bounds,
+boxes and error names. The peak was **4,096 rows**, below the unchanged limit.
+Both state digests were `d186d7cdec60cceb`. Every cleanup balanced.
+
+The fault consumer compared allocation calls, counters, capacities, endpoint bits
+and flags in each mode. It covered four elimination variables, **32 normal OOM
+boundaries**, and **192 unchanged-state OOM checks**, including refusal-plus-OOM
+combinations. It observed **16 injected growth refusals** and four beyond-threshold
+controls. Each run completed **256/256 balanced cleanups**.
+Natural allocator refusals were counted separately, not reported as injected faults.
+The product-overflow fallback was preserved, but these small inputs did not exercise it.
+
+### Predeclared measurement and decision
+
+The rule was fixed before variant timing: at least **5%** lower median time,
+**3/3** faster pairs, and disjoint ranges in the improvement direction.
+Correctness and allocation equivalence were required independently.
+
+The primary row was **`eliminateAll chosen, mixed 14x2`**, on **SMP**, with
+**200 iterations**, one warmup and the unchanged minimum over seven repetitions.
+All 13 bodies still ran on both DebugAllocator and SMP in every capture.
+The six processes ran serially on CPU 0 in **AB, BA, AB** order.
+No project build, test or profile overlapped them. CPU affinity was not exclusivity.
+
+| Pair | Order | Baseline ns/op | Candidate ns/op | Improvement |
+| --- | --- | ---: | ---: | ---: |
+| 1 | baseline, candidate | 66,327.060 | 58,295.065 | 12.110% |
+| 2 | candidate, baseline | 61,719.715 | 58,363.730 | 5.437% |
+| 3 | baseline, candidate | 76,684.750 | 58,502.630 | 23.710% |
+| Median | | **66,327.060** | **58,363.730** | **12.006%** |
+
+The baseline range was **61,719.715–76,684.750 ns/op**.
+The candidate range was **58,295.065–58,502.630 ns/op**.
+All predeclared criteria passed. No extra pairs or revised threshold were used.
+
+Geometry, checksums and allocation accounting matched across all six captures
+for every body on each heap. Each heap's accounting sweep totaled **494,632
+allocations and frees**, and **306,958,852 allocated and freed bytes**.
+The result is less list bookkeeping, not less solver work or fewer allocations.
+
+All 26 secondary heap/operation rows were retained and checked.
+None showed a separated three-run regression range.
+Their medians do not establish a speed guarantee for other workloads.
+
+### Reproduction evidence
+
+The scoped evidence root remains `/tmp/scratch/zig-interval-six.vfU6fB0s`.
+Its frozen `tree/` holds the baseline. `lp-trial-tree/` holds the accepted source.
+`task6-predeclared.json` records the rule and capacity-only refinement.
+`task6-profile.json` and the complete profile reports record the sampled cost.
+`task6-four-mode-tests.json` and `task6-differential.json` record all mode checks.
+`task6-trial.json` preserves all **156 timing-table rows**, invariant witnesses,
+binary hashes and six complete capture logs. `task6-verdict.json` records the decision.
+Cleanup remains user-deferred. The installed tools and verification evidence remain intact.
+
+### Final-source platform coverage
+
+The accepted source compiled on all **53** published targets.
+The immutable run was `20261004-015543-5055-11737` under `task6-compile53`.
+Every target completed **18/18 steps**: the library, **11 test binaries**
+and the NaN probe. All 53 logs were checked and hashed.
+The summary reported **build_only=53, fail=0, partial=0**, with exit 0.
+This run executed no tests; compilation is not runtime coverage.
+`task6-final-compile53.json` binds these results to the accepted source hash.
+
+The required Linux runtime run was `20261004-022738-49561-5121`.
+All four suites passed **357/357 tests**: x86_64 natively, and AArch64,
+RISC-V and big-endian s390x through QEMU. Each completed **27/27 steps**.
+The summary reported **pass=4, fail=0, build_only=0, partial=0**.
+`task6-final-linux-runtime.json` records every checked log and execution witness.
+
+The Windows run was `20261004-023631-4496-26436`.
+Its x86_64 suite passed **357/357 tests**, **27/27 steps**, under Wine 11.0.
+The root build does not forward its target to the fixture consumer step.
+The fixture was therefore built and run separately with
+`-Dtarget=x86_64-windows -Doptimize=ReleaseSafe -fwine`.
+Both actual PE32+ executables passed: **29 API checks** and **31 README
+checks**, with **5/5 steps**. Transfer cleanup and LP examples passed.
+Missing Fontconfig defaults produced warnings, not failed checks.
+`task6-final-windows-runtime.json` and `task6-final-windows-consumers.json`
+record the suite, target, binary hashes and observed consumer results.
+
+These checks cover **53 compile targets and five runtime targets**.
+Wine is not a native Windows-host run. WASI runtime remains unverified.
+All checked source files outside `docs/` match the canonical accepted tree;
+`task6-accepted-source.json` records their hashes.
+

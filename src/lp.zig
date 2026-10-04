@@ -1378,12 +1378,19 @@ fn appendCombined(
 ) !void {
     const l = sideOf(lower);
     const u = sideOf(upper);
-    for (0..vc) |j| {
-        if (j == k) {
-            try coeffs.append(gpa, zero);
-            continue;
+    if (coeffs.capacity - coeffs.items.len >= vc) {
+        const row = coeffs.addManyAsSliceAssumeCapacity(vc);
+        for (row, 0..) |*a, j| {
+            a.* = if (j == k) zero else exact.combinedColumn(l, u, j);
         }
-        try coeffs.append(gpa, exact.combinedColumn(l, u, j));
+    } else {
+        for (0..vc) |j| {
+            if (j == k) {
+                try coeffs.append(gpa, zero);
+                continue;
+            }
+            try coeffs.append(gpa, exact.combinedColumn(l, u, j));
+        }
     }
     try rhs.append(gpa, exact.combinedBound(l, u));
 }
