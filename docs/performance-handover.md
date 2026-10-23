@@ -208,7 +208,7 @@ it bought, what was measured away, and what was tried and thrown out.
 | `zig build bench` completes; `bench-lp` is bounded by the 20,000-row budget and its run reports 18.5 s. Both numbers are the 2026-09-30 capture and **neither has been re-measured since**; what has been re-run is the step, one benchmark at a time, and each exits 0 — and all three ran to completion nine more times on 2026-10-02, which produced the current three-run baseline in its own section below and left both numbers above exactly as they are | run |
 | `zig fmt --check` clean | run |
 | `zig build docs` green | run |
-| All 20 Linux targets with a local runner build **and run** the whole test step — corpus tier included, 0 FAILED — under QEMU user-mode (native for `x86_64-linux`), **348/348 on each, 6,960 tests total**: `x86_64-linux`, `x86_64` 32-bit, `aarch64` and big-endian `aarch64_be`, 32-bit `arm` both endians, `hexagon`, `loongarch64`, `mips` 32/64-bit both endians, `powerpc` 32/64-bit both endians plus little-endian 64-bit, `riscv32`, `riscv64`, big-endian `s390x`, and `thumb` both endians. Byte-order coverage is therefore four targets wide (`s390x-linux`, `aarch64_be-linux`, `armeb-linux`, `thumbeb-linux`), not one: the oracle's `u64` bit-pattern stepping in `src/rounding.zig` and the NaN contract trap's pattern reads run green on all four. Reproduce with `cross-test --targets '<the 20 names>' --jobs 4 --build-jobs 1 --timeout 900 --build-timeout 900 --output <dir>` (see the release-sweep recipe in `cross-test.profile.sh`) |
+| All 20 Linux targets with a local runner build **and run** the whole test step — corpus tier included, 0 FAILED — under QEMU user-mode (native for `x86_64-linux`), **348/348 on each, 6,960 tests total**: `x86_64-linux`, `x86_64` 32-bit, `aarch64` and big-endian `aarch64_be`, 32-bit `arm` both endians, `hexagon`, `loongarch64`, `mips` 32/64-bit both endians, `powerpc` 32/64-bit both endians plus little-endian 64-bit, `riscv32`, `riscv64`, big-endian `s390x`, and `thumb` both endians. Byte-order coverage is therefore four targets wide (`s390x-linux`, `aarch64_be-linux`, `armeb-linux`, `thumbeb-linux`), not one: the oracle's `u64` bit-pattern stepping in `src/rounding.zig` and the NaN contract trap's pattern reads run green on all four. Reproduce with `cross-test --targets '<the 20 names>' --jobs 4 --build-jobs 1 --timeout 900 --build-timeout 900 --output <dir>` (see the release-sweep recipe in `cross-test.profile.sh`) | run, `cross-test --targets '<the 20 names>'` at `--timeout 900 --build-timeout 900` (see the release-sweep recipe in `cross-test.profile.sh:200-203`); the per-target table for the sweep is the gate cross-target table below plus the four big-endian rows named in this row |
 | `x86_64-windows` builds and is **not run**: there is no wine available, so the test step's binaries cannot execute there, and `cross-test` records the target `build_only`, `runtime_unavailable`. "Builds" is the whole of the claim. The suite is **not** evidenced on Windows and this row must not be read as "the tests pass there" | run, `cross-test` |
 | `bench-lp`'s geometry report is byte-identical to the capture from before the optimisations, and predicted == achieved on every branch | run |
 | Everything this document records is committed, not left uncommitted — and the tip is a query rather than an id written here, because an id in this file goes stale at the next commit and this file is in the next commit. `jj status` names the working-copy commit and anything uncommitted in front of it, `jj log -r main` and `jj log -r main@origin` say whether the bookmark and its remote agree, and `jj diff --stat` says what is in that commit. A working-copy commit sitting above `main` is work in flight, not lost work. The `ns/op` figures below carry the 2026-09-30 capture date this file dates them with, not a commit id | `jj status`, `jj log -r main` |
@@ -331,14 +331,10 @@ local root itself, and anywhere else they must be named explicitly. Only
 `.github/workflows/ci.yml` sets those four, per job. `ZIG_GATE_PREFIX` is set
 *inside* `suite-cmd` rather than through an `env:` key, deliberately — the
 command does not depend on the runner supporting one.
-per job. `ZIG_GATE_PREFIX` is set *inside* `suite-cmd` rather than through an
-`env:` key, deliberately — the command does not depend on the runner supporting
-one.
 
 **One assumption, stated rather than hidden: both keys are POSIX shell.** There
 is no `vf` binary to confirm that, so whether the runner executes these values
 through a shell is unverified. They are written as shell because
-these values through a shell is unverified. They are written as shell because
 that is what a shell-executing runner needs. If a runner splits the value on
 whitespace without a shell, neither key can work — and that is a runner-side
 finding to report, not something to paper over by shortening the command.
@@ -2201,11 +2197,11 @@ child probes. The x86-linux test parent ran under QEMU there, but
 direct child execution failed without a kernel binfmt handler. Both probes
 now use the explicit runner and keep their existing control and trap checks.
 
-There is no Windows or WASI runtime wired up for this project yet. A Wine and a
-wasmtime may be present on a given machine and are useful for a one-off
-probe, but no target of this project's own suite has been executed under either,
-so a row claiming Windows or WASI **runtime** evidence would be claiming
-something nobody has measured. Build-only evidence is build-only.
+Windows runtime coverage now exists for the ownership revision. On 2026-10-04,
+Wine 11.0 ran all 357 `x86_64-windows` root tests and both Windows consumer
+executables. [Section 10](#10-ownership-revision-verification-and-exact-scale-trial--2026-10-04)
+records the target, modes and limits. Wine is not a native Windows host.
+WASI runtime coverage is still unverified. Build-only evidence is build-only.
 
 Then commit, and move `main`.
 
@@ -2484,3 +2480,220 @@ is recorded so it does not have to be re-derived too.
 The rule underneath all of these is constraint 2: a faster path that computes
 something slightly different is a different function, and the guarantee is
 about the function as specified.
+
+## 10. Ownership revision verification and exact-scale trial — 2026-10-04
+
+### Published ownership revision
+
+`b9ed7e13281cfebaa67715e639ff85f5b491c1d3` contains the separate ownership
+feature and planning-document commits. A local snapshot matched all 81 tracked
+files before verification. The installed quality prefix was retained unchanged.
+
+The complete `cross-compile.profile.sh` run used Zig 0.16.0, two target jobs
+and one build job per target, pinned to CPUs 0–1. All **53 targets** built in
+Debug. Every target log was checked, not sampled: 11 test binaries, one NaN
+probe and one installed library per target. Totals: **583 test binaries,
+53 probes and 53 libraries**. Summary: `pass=0`, `fail=0`, `build_only=53`,
+`partial=0`. This is compilation coverage, not runtime evidence for 53 targets.
+
+The same revision also ran on **`x86_64-windows` under Wine 11.0**:
+**357/357 tests**, 27/27 build steps, no failed or skipped runtime step.
+`--require-runners` was set. The root build's nested consumers are host
+programs, so they were not counted as Windows consumers.
+
+Both actual package consumers were then built for Windows in ReleaseSafe and
+run with Zig's `-fwine` integration: **29 API checks and 31 README checks**,
+5/5 build steps. The ownership transfer and optional-intersection examples
+reported successful cleanup. These were Windows PE runs under Wine on Linux,
+not native-Windows-host runs.
+
+Wine and its harness utilities came through the approved Nix wrapper, with a
+dedicated local `WINEPREFIX` and no display. The resolved Nixpkgs revision was
+`c9fe7d12cd78d1adcd12dd15e24432dde5b155a0`. Wine's bootstrap reported missing
+Fontconfig defaults and an unavailable 32-bit `rundll32`; the required 64-bit
+runtime and both consumers completed. No site configuration was changed.
+
+The published ownership revision's [GitHub Actions](https://github.com/CoffeeImpliesCode/zig-interval/actions/runs/37160213307)
+completed all nine jobs successfully. That CI result is separate from the
+local 53-target and Wine receipts.
+
+Evidence root: `/tmp/scratch/zig-interval-six.vfU6fB0s`.
+The immutable compilation run is `compile53/runs/20261003-232459-5499-13273`;
+the Windows suite run is `windows-runtime/runs/20261003-233140-48464-16829`.
+`task4-source-identity.tsv`, `task4-compile53.json`,
+`task4-windows-runtime.json` and `task4-windows-consumers.json` bind the
+observations to the published source. No numerical source change was needed.
+
+### Exact-expansion `scale`: sound formulation, measured rejection
+
+The follow-on trial uses exact binary128 products, four-component expansions,
+`COMPRESS`, and zero-aware binary64 outward neighbors. It is not the rejected
+rounded `M-W` shortcut. The full finite-range, subnormal, factor and ray proof
+is in [scale-enclosure.md §10](scale-enclosure.md#10-exact-expansion-trial--2026-10-04).
+
+The compiled research candidate passed 219,172 cases in each optimize mode
+and 20,000 independent exact-rational comparisons. Nonfinite-input policy
+delegates to the existing implementation; checked NaN refusal was exercised.
+No permanent test or numerical API was added for this investigation.
+
+Three counterbalanced ReleaseFast pairs on the existing 256-case scalar
+workload gave medians **50.975 ns/op** for the composition and
+**961.631 ns/op** for the candidate: **18.86× slower**. The predeclared 5%
+improvement, three improving pairs and separated ranges in the improvement
+direction all failed. The output-bit witnesses are stable within each path,
+but are not equal across paths because the enclosures differ.
+
+**REJECTED. Production `src/interval.zig` is unchanged. No performance
+improvement is claimed.** All 42 timing samples, hashes, checks and the
+predeclaration are in the scoped run's `task5-*.json` receipts.
+
+### Deferred scratch cleanup
+
+The user explicitly selected **“Defer cleanup; continue 4–6.”**
+The earlier `zig-interval-gate.RXA5hj1K` run is retained at **936,886,272
+allocated bytes**. Its audit found no foreign owner, submount or visible live
+reference, but three owned services deny descriptor inspection and noninteractive
+sudo requires a password. No deletion or signal was performed.
+The installed quality prefix and verification evidence remain intact.
+
+## 11. Derived-row coefficient batching — 2026-10-04
+
+**ACCEPTED.** The primary LP row's median time decreased **12.006%**.
+All three pairs improved. The measured ranges do not overlap.
+This result applies to the named workload on this shared host, not every solver input.
+
+### Profile and implementation
+
+The baseline is `b9ed7e13281cfebaa67715e639ff85f5b491c1d3`.
+A fresh ReleaseFast profile ran all 13 bounded LP bodies through the public
+benchmark entry point with the SMP allocator. That entry point prints a fixed
+`dbg` label. The profile driver explicitly reported the actual SMP allocator.
+
+`perf record` sampled `cycles:u` at 199 Hz with 4,096-byte DWARF stacks.
+It recorded **399 samples**, with **zero lost samples**.
+`System.eliminate` accounted for **53.56%** of whole-process sampled cycles.
+The profile includes geometry, measurement, allocation accounting and output.
+It does not isolate the primary row or predict a precise removable cost.
+
+The sampled assembly includes inlined coefficient appends.
+Each append checks capacity and updates the list length.
+The trial targets that work, not arithmetic or contradiction detection.
+
+`appendCombined` now checks whether existing spare capacity holds one full row.
+If it does, `addManyAsSliceAssumeCapacity(vc)` exposes that row once.
+The loop writes each column in its original order with the same arithmetic.
+If the row does not fit, the original per-coefficient append loop runs.
+The RHS append is unchanged.
+
+The capacity check preserves the existing geometric growth and OOM order.
+An unallocatable expanded output does not prove its input was unallocatable.
+The candidate therefore retains the original reservation-overflow fallback.
+This refinement preceded every variant build and timing capture.
+
+No public API, layout, allocator policy, row identity, validation or arithmetic changed.
+The exact-cancellation pre-pass and full contradiction rescan remain.
+The rejected RHS-first guard remains rejected.
+The benchmark's **20,000-row per-round limit** remains.
+
+### Correctness evidence
+
+The accepted source passed the complete native suite and both package consumers
+in Debug, ReleaseSafe, ReleaseFast and ReleaseSmall:
+
+| Mode | Build steps | Tests | API / README consumer checks |
+| --- | --- | --- | --- |
+| Debug | 27/27 | 357/357 passed | 29 / 31 |
+| ReleaseSafe | 27/27 | 357/357 passed | 29 / 31 |
+| ReleaseFast | 27/27 | 356 passed, 1 checked-only test skipped | 29 / 31 |
+| ReleaseSmall | 27/27 | 356 passed, 1 checked-only test skipped | 29 / 31 |
+
+A separate differential consumer ran **362 cases in each mode**:
+42 explicit cases and all 320 deterministic seeds.
+Each run made **3,023,124 comparisons** across **1,644 elimination rounds**.
+It compared endpoint bits, rows, flags, buckets, predictions, order, bounds,
+boxes and error names. The peak was **4,096 rows**, below the unchanged limit.
+Both state digests were `d186d7cdec60cceb`. Every cleanup balanced.
+
+The fault consumer compared allocation calls, counters, capacities, endpoint bits
+and flags in each mode. It covered four elimination variables, **32 normal OOM
+boundaries**, and **192 unchanged-state OOM checks**, including refusal-plus-OOM
+combinations. It observed **16 injected growth refusals** and four beyond-threshold
+controls. Each run completed **256/256 balanced cleanups**.
+Natural allocator refusals were counted separately, not reported as injected faults.
+The product-overflow fallback was preserved, but these small inputs did not exercise it.
+
+### Predeclared measurement and decision
+
+The rule was fixed before variant timing: at least **5%** lower median time,
+**3/3** faster pairs, and disjoint ranges in the improvement direction.
+Correctness and allocation equivalence were required independently.
+
+The primary row was **`eliminateAll chosen, mixed 14x2`**, on **SMP**, with
+**200 iterations**, one warmup and the unchanged minimum over seven repetitions.
+All 13 bodies still ran on both DebugAllocator and SMP in every capture.
+The six processes ran serially on CPU 0 in **AB, BA, AB** order.
+No project build, test or profile overlapped them. CPU affinity was not exclusivity.
+
+| Pair | Order | Baseline ns/op | Candidate ns/op | Improvement |
+| --- | --- | ---: | ---: | ---: |
+| 1 | baseline, candidate | 66,327.060 | 58,295.065 | 12.110% |
+| 2 | candidate, baseline | 61,719.715 | 58,363.730 | 5.437% |
+| 3 | baseline, candidate | 76,684.750 | 58,502.630 | 23.710% |
+| Median | | **66,327.060** | **58,363.730** | **12.006%** |
+
+The baseline range was **61,719.715–76,684.750 ns/op**.
+The candidate range was **58,295.065–58,502.630 ns/op**.
+All predeclared criteria passed. No extra pairs or revised threshold were used.
+
+Geometry, checksums and allocation accounting matched across all six captures
+for every body on each heap. Each heap's accounting sweep totaled **494,632
+allocations and frees**, and **306,958,852 allocated and freed bytes**.
+The result is less list bookkeeping, not less solver work or fewer allocations.
+
+All 26 secondary heap/operation rows were retained and checked.
+None showed a separated three-run regression range.
+Their medians do not establish a speed guarantee for other workloads.
+
+### Reproduction evidence
+
+The scoped evidence root remains `/tmp/scratch/zig-interval-six.vfU6fB0s`.
+Its frozen `tree/` holds the baseline. `lp-trial-tree/` holds the accepted source.
+`task6-predeclared.json` records the rule and capacity-only refinement.
+`task6-profile.json` and the complete profile reports record the sampled cost.
+`task6-four-mode-tests.json` and `task6-differential.json` record all mode checks.
+`task6-trial.json` preserves all **156 timing-table rows**, invariant witnesses,
+binary hashes and six complete capture logs. `task6-verdict.json` records the decision.
+Cleanup remains user-deferred. The installed tools and verification evidence remain intact.
+
+### Final-source platform coverage
+
+The accepted source compiled on all **53** published targets.
+The immutable run was `20261004-015543-5055-11737` under `task6-compile53`.
+Every target completed **18/18 steps**: the library, **11 test binaries**
+and the NaN probe. All 53 logs were checked and hashed.
+The summary reported **build_only=53, fail=0, partial=0**, with exit 0.
+This run executed no tests; compilation is not runtime coverage.
+`task6-final-compile53.json` binds these results to the accepted source hash.
+
+The required Linux runtime run was `20261004-022738-49561-5121`.
+All four suites passed **357/357 tests**: x86_64 natively, and AArch64,
+RISC-V and big-endian s390x through QEMU. Each completed **27/27 steps**.
+The summary reported **pass=4, fail=0, build_only=0, partial=0**.
+`task6-final-linux-runtime.json` records every checked log and execution witness.
+
+The Windows run was `20261004-023631-4496-26436`.
+Its x86_64 suite passed **357/357 tests**, **27/27 steps**, under Wine 11.0.
+The root build does not forward its target to the fixture consumer step.
+The fixture was therefore built and run separately with
+`-Dtarget=x86_64-windows -Doptimize=ReleaseSafe -fwine`.
+Both actual PE32+ executables passed: **29 API checks** and **31 README
+checks**, with **5/5 steps**. Transfer cleanup and LP examples passed.
+Missing Fontconfig defaults produced warnings, not failed checks.
+`task6-final-windows-runtime.json` and `task6-final-windows-consumers.json`
+record the suite, target, binary hashes and observed consumer results.
+
+These checks cover **53 compile targets and five runtime targets**.
+Wine is not a native Windows-host run. WASI runtime remains unverified.
+All checked source files outside `docs/` match the canonical accepted tree;
+`task6-accepted-source.json` records their hashes.
+

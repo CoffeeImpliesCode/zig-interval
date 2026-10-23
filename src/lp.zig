@@ -82,8 +82,22 @@ const exact = @import("lp_exact.zig");
 /// `combinedColumn` writes it into a column no row mentions.
 const zero = exact.zero;
 
-/// Comparison requested by the caller. See the module comment for how each
-/// variant is stored.
+/// Comparison requested by the caller. The shape a tag is STORED in is not
+/// the shape it was asked for, and a caller that counts rows has to know
+/// which, so the mapping is written out per tag here rather than left to the
+/// module comment:
+///
+///   * `le` is stored as asked: ONE row, `(a, .le, r)`.
+///   * `lt` is RELAXED to `le` on insert and stored as asked, so it is also
+///     one row, `(a, .le, r)`. A closed interval cannot represent a strict
+///     inequality, and relaxing is the only direction that keeps the
+///     promise of a superset.
+///   * `ge` is stored FLIPPED, one row, `(-a, .le, -r)`.
+///   * `gt` takes both normalisations and is stored exactly as `ge` is:
+///     relaxed, then flipped, one row, `(-a, .le, -r)`.
+///   * `eq` is stored as TWO rows, `(a, .le, r)` and `(-a, .le, -r)`, so
+///     `add` moves `rowCount` by two for it. It is the only tag that
+///     duplicates, and the only one whose `add` is not atomic.
 pub const Cmp = enum { le, lt, ge, gt, eq };
 
 /// One linear constraint row, borrowed from a `System`.
@@ -160,12 +174,23 @@ fn sideOf(part: Part) exact.Side {
 /// `Lin` inside them is BORROWED from the system the partition came from,
 /// so that system has to outlive the partition.
 pub const Partition = struct {
+    /// The allocator `deinit` frees the three lists through, and it has to
+    /// be the allocator they were built with. The `DynVec` pattern, for the
+    /// same reason it is one there: a value that stores the allocator it
+    /// owns memory with frees through that field, so a `Partition` whose
+    /// `gpa` is not the one its slices came from hands another allocator a
+    /// pointer it never returned.
     gpa: std.mem.Allocator,
     carried: []Lin,
     lower: []Part,
     upper: []Part,
 
     /// Release the three lists. The borrowed rows are untouched.
+    ///
+    /// NOT IDEMPOTENT, AND NOT SAFE ON A COPY (L14). A `Partition` copied by
+    /// value is two owners of one set of slices, and the second `deinit` is
+    /// a double free. The value moves, it does not copy; nothing here can
+    /// detect the mistake, so it is stated instead.
     pub fn deinit(self: Partition) void {
         self.gpa.free(self.carried);
         self.gpa.free(self.lower);
@@ -425,10 +450,38 @@ const CandWriter = struct {
 /// lifetime. Coefficients live in one row-major array, `var_count` entries
 /// per row.
 pub const System = struct {
+    /// Everything a fallible method on this type can report, published as
+    /// one named set rather than an inferred union per method, so a caller
+    /// writes the name once and has one place to look.
+    ///
+    /// THE TRADEOFF IS THAT THE SET IS SHARED. `add` cannot report
+    /// `error.BadRow` and `at` cannot report `error.OutOfMemory`, so every
+    /// signature below is wider than the arms its own body can reach, and an
+    /// exhaustive `switch` on the error of a call carries one arm that
+    /// cannot fire. That is the price of the one name; what it buys is a
+    /// caller that never has to spell an inferred union, and a tree in which
+    /// the set of failures is written down once.
+    pub const Error = error{ OutOfMemory, BadRow, BadVariableCount, BadVariable, VariableEliminated };
+
+    /// The allocator every buffer is taken from and freed through, and it
+    /// has to be the allocator `init` was given. The `DynVec` pattern, for
+    /// the reason it is one there: a value that stores the allocator it owns
+    /// memory with frees through that field, so a system whose `gpa` is not
+    /// the one its buffers came from hands another allocator pointers it
+    /// never returned.
     gpa: std.mem.Allocator,
     var_count: usize,
     coeffs: std.ArrayList(Interval),
     rhs: std.ArrayList(Interval),
+    /// One liveness flag per variable, allocated by `init` and cleared by
+    /// `eliminate` as it takes each variable away. It is the only gate on
+    /// `error.VariableEliminated`: a second elimination of the same variable
+    /// finds its flag false and is refused, rather than running a round that
+    /// pairs every remaining row against a variable that is not there. The
+    /// rest of the file reads the same slice rather than asking `eliminate`,
+    /// so a variable that is not live is invisible to the arithmetic and not
+    /// merely unusable: `chooseNext` skips it, `bounds` does not sweep it,
+    /// and `box` answers null for a system that has lost one.
     alive: []bool,
     unsat: bool,
 
@@ -439,7 +492,7 @@ pub const System = struct {
     /// rather than panicked. It used to be the only allocator call here that
     /// could not fail visibly, which meant a program that wanted to handle
     /// exhaustion instead of dying had no way to ask for that.
-    pub fn init(gpa: std.mem.Allocator, var_count: usize) !System {
+    pub fn init(gpa: std.mem.Allocator, var_count: usize) Error!System {
         const flags = try gpa.alloc(bool, var_count);
         errdefer gpa.free(flags);
         @memset(flags, true);
@@ -454,6 +507,12 @@ pub const System = struct {
     }
 
     /// Release every buffer. The system is unusable afterwards.
+    ///
+    /// NOT IDEMPOTENT, AND NOT SAFE ON A COPY (L14). A system copied out by
+    /// value shares every buffer with the original, so a `deinit` on each of
+    /// them frees the same memory twice. The system moves, it does not copy;
+    /// passing it by value to a method that only reads it is fine, and
+    /// storing a second owner of it is not.
     pub fn deinit(self: *System) void {
         self.coeffs.deinit(self.gpa);
         self.rhs.deinit(self.gpa);
@@ -484,11 +543,12 @@ pub const System = struct {
     /// `i` must be below `rowCount()`, and anything else is `error.BadRow`. The
     /// check is not decoration: the slice below is built by arithmetic, so an
     /// unchecked `i` reads whatever the allocator left past the rows, and
-    /// ReleaseFast elides the slicing assertion that would otherwise stop it.
+    /// ReleaseFast and ReleaseSmall both elide the slicing assertion that
+    /// would otherwise stop it.
     ///
     /// The view is `const`. Writing to `row.coeffs` does not compile, and
     /// there is no `.op` to write to at all.
-    pub fn at(self: System, i: usize) !Lin {
+    pub fn at(self: System, i: usize) Error!Lin {
         if (i >= self.rhs.items.len) return error.BadRow;
         const start = i * self.var_count;
         return .{
@@ -497,15 +557,50 @@ pub const System = struct {
         };
     }
 
-    /// True once a row with an all-zero coefficient vector has been derived
-    /// whose right-hand side cannot be met.
+    /// True once a row with an all-zero coefficient vector has been ADDED OR
+    /// DERIVED whose right-hand side cannot be met. Both count, and they are
+    /// the same check on the same row: `checkRowForContradiction` reads
+    /// `rhs.hi < 0` on an all-zero row, and what differs is only the scan.
+    /// `pushRow` runs it on the one row `add` has just inserted, so a
+    /// constraint a caller wrote as all zeros with a negative right-hand
+    /// side latches the flag before a single variable has been eliminated,
+    /// and `eliminate` rescans the whole finished round through the same
+    /// function. A system whose rows only conflict in COMBINATION still
+    /// answers false here until the elimination that combines them.
+    ///
+    /// The flag is LATCHED. Nothing clears it, so once it is set `bounds`
+    /// answers null for every variable and `eliminateInOrderOfChoice`
+    /// answers false, and the answer does not depend on what the caller does
+    /// to the rows afterwards.
     pub fn isUnsat(self: System) bool {
         return self.unsat;
     }
 
     /// Add a constraint. `coeffs` is copied, so the caller keeps its slice.
     /// `coeffs.len` must equal `varCount()`.
-    pub fn add(self: *System, coeffs: []const Interval, op: Cmp, rhs: Interval) !void {
+    ///
+    /// THE FLIP IS ALLOCATED BEFORE EITHER ROW IS STORED, WHICH IS WHAT
+    /// MAKES A REFUSED `eq` LEAVE NOTHING BEHIND. The `ge` arm has always
+    /// allocated its flipped copy first; the `eq` arm stored `(a, .le, r)`
+    /// and flipped afterwards, so the one allocation that could fail failed
+    /// with half a constraint already in the system. Both arms allocate
+    /// first now, and a heap that refuses the flip refuses the whole `add`:
+    /// the caller sees `error.OutOfMemory` and a system whose `rowCount` and
+    /// `isUnsat` are exactly what they were.
+    ///
+    /// WHAT IS LEFT IS THE SECOND `pushRow`, AND A CALLER HAS TO KNOW IT. Its
+    /// own allocations can fail with the first row of the equality already
+    /// stored, so an `eq` that answers `error.OutOfMemory` may have committed
+    /// one row: `rowCount` has risen by one rather than by two, the system
+    /// holds one half of a constraint, and because `pushRow` latches `unsat`
+    /// on insert that half can have latched it too — a system reporting
+    /// unsatisfiable on the strength of a row the caller was just told had
+    /// not been added. There is no all-or-nothing `add` here and the residue
+    /// is named rather than smoothed over: a caller that cannot tolerate
+    /// either rebuilds the system and replays what it had, and one that can
+    /// reads `rowCount` after a failed `add` instead of assuming the row set
+    /// is untouched.
+    pub fn add(self: *System, coeffs: []const Interval, op: Cmp, rhs: Interval) Error!void {
         if (coeffs.len != self.var_count) return error.BadVariableCount;
         switch (op) {
             .le, .lt => try self.pushRow(coeffs, rhs),
@@ -515,9 +610,9 @@ pub const System = struct {
                 try self.pushRow(flipped, rhs.neg());
             },
             .eq => {
-                try self.pushRow(coeffs, rhs);
                 const flipped = try self.flip(coeffs);
                 defer self.gpa.free(flipped);
+                try self.pushRow(coeffs, rhs);
                 try self.pushRow(flipped, rhs.neg());
             },
         }
@@ -628,7 +723,7 @@ pub const System = struct {
     /// caller that needs the rows themselves rather than their count. Every
     /// `Lin` inside is borrowed from `self`, which has to outlive the
     /// `Partition`; `deinit` frees the three lists and nothing else.
-    pub fn partition(self: System, k: usize) !Partition {
+    pub fn partition(self: System, k: usize) Error!Partition {
         if (k >= self.var_count) return error.BadVariable;
         var buckets = try Buckets.init(self.gpa, self.rowCount());
         errdefer buckets.deinit();
@@ -647,7 +742,7 @@ pub const System = struct {
     /// lists `partition` returns, so the check costs no allocation and no
     /// copy of the rows; the rule it reads is that same rule either way,
     /// which is the only part the gate was ever for.
-    pub fn rowsAfterEliminating(self: System, k: usize) !usize {
+    pub fn rowsAfterEliminating(self: System, k: usize) Error!usize {
         var tally: Tally = .{};
         try self.partitionInto(k, &tally);
         return tally.rows();
@@ -671,7 +766,7 @@ pub const System = struct {
     /// every row that says nothing about the variable, and the row sets
     /// here reach tens of thousands. The rule read is the same one, out of
     /// the same function.
-    pub fn eliminate(self: *System, k: usize) !void {
+    pub fn eliminate(self: *System, k: usize) Error!void {
         if (k >= self.var_count) return error.BadVariable;
         if (!self.alive[k]) return error.VariableEliminated;
 
@@ -738,7 +833,7 @@ pub const System = struct {
     /// rows. So the greedy minimum discards the dangerous variables first,
     /// and the score is recomputed after every elimination because the row
     /// set, and with it every count, changes.
-    pub fn eliminationOrder(self: System) ![]usize {
+    pub fn eliminationOrder(self: System) Error![]usize {
         var scratch = try self.clone();
         defer scratch.deinit();
 
@@ -764,7 +859,7 @@ pub const System = struct {
     /// proof it already had, eliminate whatever variables were still alive,
     /// and then report `true`. The wrapper this replaced carried the same
     /// check, so this preserves its behaviour exactly.
-    pub fn eliminateInOrderOfChoice(self: *System) !bool {
+    pub fn eliminateInOrderOfChoice(self: *System) Error!bool {
         if (self.unsat) return false;
         while (try self.chooseNext()) |k| {
             try self.eliminate(k);
@@ -790,7 +885,7 @@ pub const System = struct {
     /// infeasible. Both are needed, and neither subsumes the other: the
     /// disjoint test needs a readable bound on each side, and the
     /// contradiction test sees rows the reader ignores.
-    pub fn bounds(self: System, k: usize) !?Interval {
+    pub fn bounds(self: System, k: usize) Error!?Interval {
         if (k >= self.var_count) return error.BadVariable;
         if (self.unsat) return null;
 
@@ -1099,7 +1194,7 @@ pub const System = struct {
     /// `v_m` as well would buy nothing even if it were read, since its round
     /// pairs exactly the rows `derivesContradiction` already asks about and
     /// the last projection is about to ask that question anyway.
-    pub fn box(self: System) !?[]Interval {
+    pub fn box(self: System) Error!?[]Interval {
         if (self.unsat) return null;
         const out = try self.gpa.alloc(Interval, self.var_count);
         errdefer self.gpa.free(out);
@@ -1283,12 +1378,19 @@ fn appendCombined(
 ) !void {
     const l = sideOf(lower);
     const u = sideOf(upper);
-    for (0..vc) |j| {
-        if (j == k) {
-            try coeffs.append(gpa, zero);
-            continue;
+    if (coeffs.capacity - coeffs.items.len >= vc) {
+        const row = coeffs.addManyAsSliceAssumeCapacity(vc);
+        for (row, 0..) |*a, j| {
+            a.* = if (j == k) zero else exact.combinedColumn(l, u, j);
         }
-        try coeffs.append(gpa, exact.combinedColumn(l, u, j));
+    } else {
+        for (0..vc) |j| {
+            if (j == k) {
+                try coeffs.append(gpa, zero);
+                continue;
+            }
+            try coeffs.append(gpa, exact.combinedColumn(l, u, j));
+        }
     }
     try rhs.append(gpa, exact.combinedBound(l, u));
 }

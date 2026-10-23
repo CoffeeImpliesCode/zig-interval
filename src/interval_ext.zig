@@ -23,13 +23,18 @@
 //! tightness on every call.
 //!
 //! Two kinds of "no answer" are kept apart. `null` means the result is
-//! empty in the reals, which happens only when the whole interval lies
-//! outside the domain, as a square root of negative numbers or the
-//! hyperbolics past their endpoints do. An `Interval` with an infinite
-//! endpoint means the result is unbounded but real, as tangent is
-//! across a pole, or a power with a negative exponent of a base
-//! reaching zero. Collapsing the two would either throw away a real
-//! answer or invent an empty one.
+//! empty in the reals, and nine of the ten functions that can return it
+//! report an empty image and nothing else, because each of them answers an
+//! argument that leaves its domain only in part rather than refusing it: a
+//! square root of negative numbers, an `asin` of an interval wholly outside
+//! `[-1, 1]`, the hyperbolics past their endpoints. `powf` is the one
+//! refusal, and it refuses on the base rather than on the domain, so any
+//! negative part is `null` whatever the exponent, `powf([-1, 2])` included,
+//! where the positive half of that base has a real image all the same. An
+//! `Interval` with an infinite endpoint means the result is unbounded but
+//! real, as tangent is across a pole, or a power with a negative exponent
+//! of a base reaching zero. Collapsing the two would either throw away a
+//! real answer or invent an empty one.
 //!
 //! Every function here reads the canonical bounds of `Interval`, so the two
 //! overflow rays arrive as the rays they are: an endpoint at `floatMax` or
@@ -51,10 +56,13 @@
 //! whole `[-1, 1]`, their `phaseResolvable` guard rejecting an argument
 //! that large before any endpoint is read.
 //!
-//! `asin`, `acos` and `atanh` reject an argument that leaves their domain
-//! rather than only one that leaves it entirely, so a `null` from those
-//! three is not a claim that the image is empty in the reals. Nothing here
-//! is clipped or widened to suit the rays, and no domain changes with them.
+//! `asin`, `acos` and `atanh` were the last three that refused an argument
+//! leaving their domain by any amount instead of clipping it, so a `null`
+//! from those three once did not mean what `null` means everywhere else in
+//! this file. They clip on the rule `sqrt`, `log*` and `acosh` already
+//! followed, and a clipped end is a bound the image really has rather than
+//! a refusal of it. Nothing here is widened to suit the rays, and no domain
+//! changes with them.
 //!
 //! The trigonometric functions read their range off the endpoints and
 //! the critical points instead of reducing the argument, because the
@@ -195,11 +203,9 @@ const zero_slack: f64 = 2 * rounding.min_subnormal;
 /// `acosh`, `atanh`, `cbrt`, `expm1` and `sqrt` are not in the table,
 /// and `std.math.pow`, which `powf` no longer calls, measured 1.52 ULP
 /// with an error proportional to the integer part of the exponent and so
-/// growing without limit there. Establishing the bound would take a
-/// correctly rounded or formally verified implementation of every
-/// elementary function, which this library neither provides nor claims
-/// to. `rounding.zig` still quotes the superseded 1.1 ULP figure of its
-/// own and should be brought into line with this table.
+/// growing without limit there. No correctly rounded or formally verified
+/// implementation of every elementary function is available to this library,
+/// so the margin above stands on measurement rather than proof.
 fn lower(v: f64) f64 {
     if (v == 0.0) return -zero_slack;
     return rounding.roundDown(rounding.roundDown(rounding.roundDown(v)));
@@ -295,6 +301,11 @@ pub fn cbrt(x: Interval) Interval {
 /// of log n multiplications is what accumulates rather than the error
 /// of n of them at once. A negative exponent inverts the positive one,
 /// which a base reaching zero makes impossible in finite bounds.
+///
+/// Two of the answers are settled by the body rather than by the
+/// squaring: an exponent of zero is `[1, 1]` for any base at all, and a
+/// negative exponent of a base that reaches zero is `[-inf, +inf]`,
+/// because the inversion it asks for has no finite bound to give.
 pub fn pow(x: Interval, n: i32) Interval {
     if (n == 0) return Interval.init(1.0, 1.0);
     if (n < 0 and x.contains(0.0)) return Interval.init(-inf, inf);
@@ -443,14 +454,20 @@ pub fn log(x: Interval) ?Interval {
     return envelope(@log(x.lo), @log(x.hi));
 }
 
-/// The logarithm to base two, or null outside the positive reals.
+/// The logarithm to base two, or null when the interval reaches no
+/// positive number. A lower end at or below zero is not merely small:
+/// the argument then runs arbitrarily close to zero, and the logarithm
+/// of that is arbitrarily far down, which no finite bound would hold.
 pub fn log2(x: Interval) ?Interval {
     if (x.hi <= 0.0) return null;
     if (x.lo <= 0.0) return Interval.init(-inf, upper(@log2(x.hi)));
     return envelope(@log2(x.lo), @log2(x.hi));
 }
 
-/// The logarithm to base ten, or null outside the positive reals.
+/// The logarithm to base ten, or null when the interval reaches no
+/// positive number. A lower end at or below zero is not merely small:
+/// the argument then runs arbitrarily close to zero, and the logarithm
+/// of that is arbitrarily far down, which no finite bound would hold.
 pub fn log10(x: Interval) ?Interval {
     if (x.hi <= 0.0) return null;
     if (x.lo <= 0.0) return Interval.init(-inf, upper(@log10(x.hi)));
@@ -471,6 +488,10 @@ pub fn log1p(x: Interval) ?Interval {
 /// range, and a narrower one is read off its endpoints and the
 /// critical points it covers, which stand at pi/2 + k*pi and are worth
 /// +1 for even k and -1 for odd k.
+///
+/// An argument past `phase_limit` is answered with the whole `[-1, 1]`
+/// before either endpoint is read, which is sound because that range
+/// holds every value sine can take.
 pub fn sin(x: Interval) Interval {
     if (!phaseResolvable(x)) return Interval.init(-1.0, 1.0);
     if (x.width() >= 2.0 * rounding.piUp()) return Interval.init(-1.0, 1.0);
@@ -498,6 +519,9 @@ pub fn sin(x: Interval) Interval {
 /// Cosine over the interval, read off the endpoints and the critical
 /// points at k*pi, worth +1 for even k and -1 for odd k. The argument
 /// is never reduced.
+///
+/// An argument past `phase_limit` is answered with the whole `[-1, 1]` on
+/// the rule `sin` states, and for the same reason.
 pub fn cos(x: Interval) Interval {
     if (!phaseResolvable(x)) return Interval.init(-1.0, 1.0);
     if (x.width() >= 2.0 * rounding.piUp()) return Interval.init(-1.0, 1.0);
@@ -533,6 +557,10 @@ fn insideUnitRange(lo: f64, hi: f64) Interval {
 /// poles stand pi apart at pi/2 + k*pi, the same places where sine
 /// turns. Without one the function is continuous and rising across
 /// the whole interval, so the endpoints hold the range.
+///
+/// An argument past `phase_limit` is answered with the whole line before
+/// either endpoint is read — `[-inf, +inf]`, which holds every value
+/// tangent can take.
 pub fn tan(x: Interval) Interval {
     if (!phaseResolvable(x)) return Interval.init(-inf, inf);
     if (x.width() >= 2.0 * rounding.piUp()) return Interval.init(-inf, inf);

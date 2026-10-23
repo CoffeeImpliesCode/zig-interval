@@ -9,7 +9,6 @@ pub fn build(b: *std.Build) void {
     // unless the parent registers a public module, which is exactly what
     // this fixture exists to prove.
     const dep = b.dependency("zig_interval", .{ .target = target, .optimize = optimize });
-
     const exe = b.addExecutable(.{
         .name = "consumer",
         .root_module = b.createModule(.{
@@ -60,4 +59,14 @@ pub fn build(b: *std.Build) void {
     readme_step.dependOn(&run_readme.step);
     // `run` is what the parent build invokes, and it runs both consumers.
     run_step.dependOn(&run_readme.step);
+
+    // The second published name, resolved for the same reason `dep.module`
+    // above is called at all: this is what proves `build.zig`'s
+    // `b.installArtifact` still registers a library a dependent can reach as
+    // `dep.artifact("interval")`. The lookup turns a missing artifact into a
+    // configure-time panic ("unable to find artifact 'interval'"), so binding
+    // the result to `_` is the whole check. Nothing links it and no step
+    // depends on it: a Compile nothing depends on is never built, so the
+    // fixture's build graph is exactly what it was.
+    _ = dep.artifact("interval");
 }

@@ -14,26 +14,32 @@
 //! everywhere, and the two are not equally established. The algebraic
 //! operations rest on the operations IEEE 754 defines as correctly
 //! rounded, so the computed endpoint is within half a ULP of the true
-//! one and a single outward step is a guarantee. The elementary
-//! functions rest on primitives with no documented error bound; all of
-//! them measured within about 1.1 ULP, so those results are widened by
-//! two steps. That second figure is a margin taken from measurement, not
-//! a proof of it — a rigorous guarantee there would need a correctly
+//! one and a single outward step is a guarantee. `sqrt` is in that
+//! position too — it is `@sqrt`, so the half-ULP bound is a proof —
+//! and the free function is widened by three anyway, the same three as
+//! every other answer in `interval.ext`, so that the namespace answers
+//! under one rule. The remaining elementary functions rest on
+//! primitives with no documented error bound, and the worst of them
+//! measured is `tanh` at 2.14 ULP, so those results are widened by
+//! three steps. That figure is a margin taken from measurement, not a
+//! proof of it — a rigorous guarantee there would need a correctly
 //! rounded or verified implementation of each function, which this
 //! library does not provide. `rounding.zig` and `interval_ext.zig` spell
-//! both cases out.
+//! all of it out.
 //!
 //! An elementary function whose domain is a proper part of the reals —
 //! `sqrt`, `log`, `log2`, `log10`, `log1p`, `asin`, `acos`, `atanh`,
-//! `acosh`, `powf` — returns `?Interval`, and null is its answer when the
-//! argument reaches outside that domain. What null MEANS is not the same
-//! for all of them, and the difference is deliberate. `sqrt`, `log`,
-//! `log2`, `log10`, `log1p` and `acosh` clip a partly off-domain argument
-//! and refuse only a wholly invalid one, so null there is the strong
-//! claim: the true image is empty in the reals. `asin`, `acos`, `atanh`
-//! and `powf` refuse as soon as ANY part of the argument leaves the
-//! domain, so their null is a refusal to bound a partly valid image
-//! rather than a statement that the image is empty.
+//! `acosh`, `powf` — returns `?Interval`, and can answer `null` when
+//! the argument reaches outside that domain. Nine of the ten clip a
+//! partly off-domain argument and refuse only a wholly invalid one, so
+//! for them null is the strong and exact claim: the true image is
+//! empty in the reals. `sqrt([-4, 1])` is `[0, 1]` and `asin([-4, 0.5])`
+//! is `[-pi/2, asin(0.5)]` rather than either refused, and an `atanh`
+//! whose clipped end lands on the pole answers with an infinity.
+//! `powf` is the one refusal, and it is about the mathematics rather
+//! than convenience: a negative base raised to a general exponent has
+//! no real value at any part of the argument, so it answers null as
+//! soon as `x.lo` is negative.
 //!
 //! The functions defined over every real keep a plain `Interval` return,
 //! so a caller that has established its argument is in the domain never

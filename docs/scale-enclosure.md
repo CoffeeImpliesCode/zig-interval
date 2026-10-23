@@ -1,6 +1,8 @@
 # O1 — an enclosure argument for a one-step fused `scale`
 
-**Verdict: the proof does not close. `scale` is unchanged.**
+**Verdict: rounded fusion remains rejected. The exact-expansion trial in §10
+is sound under the stated IEEE assumptions but is 18.86× slower. Production
+`scale` is unchanged.**
 
 Item **O1** in `docs/next-work-plan.md` §4 asks for the prerequisite rather than
 for the optimisation. A direct formulation of `scale` would need one outward
@@ -86,29 +88,27 @@ protective in one direction only.
 This is the part that decides everything else, so it is stated as a lemma and
 proved.
 
-**Lemma.** Let `E` be the exact real value of the fused chain's final
-expression and let `e = fl(E)` be what the machine produced, finite and
-normal. Then `roundDown(e)` is at or below `L = M - W` **if and only if**
+**Lemma.** Let `E` be the exact real value of the rounded chain's final
+expression, `e = fl(E)` its finite normal result, and `L` the true endpoint.
+Write `d = e - prevDown(e)`, `delta = E - L`, and `epsilon = e - E`.
+The exact condition for a sound lower bound is
 
 ```
-delta := E - L   <=   u / 2 ,        u = ulp(e)
+prevDown(e) <= L   iff   delta + epsilon <= d.
 ```
 
-*Proof.* `roundDown(e) = prevDown(e) = e - u`. The requirement is
-`e - u <= L`, i.e. `e <= L + u`. Since `e` is the nearest `f64` to `E`,
-`e >= E - u/2`, so the requirement can fail only if `E - u/2 > L + u`, i.e.
-`delta > 3u/2`; and it can fail for real only when `e` lands on the `+u/2`
-side, which happens whenever `E` sits just above a midpoint. In that case
-`e = E + u/2` and `e - u = E - u/2`, so the requirement is exactly
-`delta <= u/2`. For `delta <= u/2` the worst case gives `e - u = E + u/2 - u
-<= E - u/2 <= L`. ∎
+*Proof.* Substitute `prevDown(e) = e - d` and `e = E + epsilon`.
+For round-to-nearest, a positive rounding error is at most `d/2`, including
+at a binade boundary. Thus `delta <= d/2` is a worst-case sufficient budget,
+not a necessary condition for a particular rounding phase. For example,
+`E = 1 + 2^-54`, `L = 1 - 2^-55`, and `e = 1` give `delta = 3d/4`,
+yet the predecessor of `e` is below `L`.
 
-Two things follow, and they are the whole of this document.
-
-1. **The budget for a one-step fused form is half a ULP of the value the form
-   produced** — that is, of `L`, the endpoint, *not* of the intermediates.
-2. With **N** steps instead of one, the budget becomes `(N - 1/2) ulp(L)`
-   rather than half a ULP. No fixed `N` repairs what follows.
+For `N` steps, replace `d` by the actual distance from `e` to its `N`th
+predecessor. Within one binade the sufficient budget is `(N - 1/2)d`.
+Do not use a constant binade spacing across a format boundary. The explicit
+cancellation examples below reject the proposed one-step chain independently
+of the sufficient-budget argument.
 
 ---
 
@@ -397,22 +397,20 @@ repository keeps, not in this section. A count of that shape is not a promise
 of a win; it is a reason to think the win O1 is after is not in this
 direction.
 
-It would also be a different function, not a faster one: it would lose the
-`lo <= hi` check by composition that
-`src/interval.zig:556-563` calls the one place in the file where an assertion
-still has something to catch, and it would have to re-derive the unbounded
-branch, the `|factor|` convention and the subnormal repair for itself.
+An exact expansion returns a different enclosure, not bit-identical bounds.
+It still needs the checked `lo <= hi` invariant, the unbounded-input policy,
+the `|factor|` convention and a sound subnormal conversion. The complete
+research trial in §10 supplies those arguments and measures the cost.
 
 ---
 
 ## 9. Verdict
 
-- **The proof does not close, and it closes in the negative direction.** The
-  error budget for one outward step per endpoint is half a ULP of the endpoint
-  (§2, exact, both directions). The fused form's chain delivers up to one ULP
-  of the midpoint (§3). The gap between the two is `ulp(M) / ulp(L)`, which is
-  **unbounded** on the family `[-1, 2^k]` at `G = 1 - 2^-53` and is `2^39` at
-  `k = 40`.
+- **The rounded-fusion proof closes in the negative direction.** Half a
+  predecessor gap is a worst-case sufficient budget (§2), not an exact
+  necessary condition. The explicit family `[-1, 2^k]` at
+  `G = 1 - 2^-53` has a gap that grows with exponent separation and is
+  `2^39` at `k = 40`.
 - **The term that breaks the one-step bound is the rounding of the product
   `fl((hi - lo) * g)`** (§4, row 2 of the chain table). It contributes
   essentially `ulp(M)` to `delta`, against a budget of `ulp(L)/2 = 2^-54`.
@@ -461,16 +459,159 @@ g = (2**53 - 1) / 2**53          # 1 - 2^-53, exactly an f64
 lo, hi = -1.0, 2.0**40
 M = (F(lo) + F(hi)) / 2
 W = (F(hi) - F(lo)) * F(g) / 2
-L = M - W                       # -0.99993896484375, a perfectly normal f64
+L = M - W                       # -1 + (2^40 + 1)/2^54, not exactly binary64
 
 m = (lo + hi) / 2.0             # 549755813887.5, exact
 w = ((hi - lo) * g) / 2.0       # 549755813888.4999, one rounding short
 e = m - w                       # exact by Sterbenz
 import math
 b = math.nextafter(e, -math.inf)    # what roundDown returns for e < 0
-assert b > float(L)                  # the bound excludes a point of the image
-print(b, float(L), "cut =", (b - float(L)) / 2.0**-53, "ULP")
-# -0.9998779296875001 -0.99993896484375 cut = 549755813887.0 ULP
-# (the exact cut is 2^39 - 3/2 = 549755813886.5; the last term of the print
-#  divides in binary64, and 2^39 - 3/2 is not representable)
+assert F(b) > L                      # the bound excludes the exact real image
+cut = (F(b) - L) / F(2)**-53
+print(b, float(L), "exact cut =", float(cut), "ULP")
+# -0.9998779296875001 -0.99993896484375 exact cut = 549755813886.5 ULP
+# Using float(L) in the subtraction loses its +2^-54 residual.
 ```
+
+## 10. Exact-expansion trial — 2026-10-04
+
+**REJECTED as an optimization.** The tested formulation is sound under the
+IEEE assumptions below, but its median cost is **961.631 ns/op**, against
+**50.975 ns/op** for the unchanged composition: **18.86× slower**.
+All three pairs regressed. No numerical source or public API was changed.
+The rounded midpoint/half-width shortcut remains rejected.
+
+### Formulation
+
+For finite ordered endpoints `A <= B` and finite `G = |factor|`, form these
+four terms in binary128:
+
+```
+a = A/2, b = B/2, p = G*A/2, q = G*B/2
+L = a + b + p - q
+H = a + b - p + q
+```
+
+The products are shared. Grow one prefix expansion for `a+b`, copy only its
+initialized components, and add `p,-q` or `-p,q`. Each endpoint needs at most
+four components. The research prototype reuses the existing test oracle's
+`Expansion.add` and `twoSumExact`; it does not add production infrastructure.
+
+Compress each expansion before converting its leading component to binary64.
+This step matters: plain nonoverlap guarantees the sign of the total, not a
+small relative error in the raw leading component. Sparse components can make
+that component a poor approximation. The prototype uses the in-place
+`COMPRESS` algorithm and its magnitude-ordered `FastTwoSum` operations.
+The checked run also asserts each `FastTwoSum` magnitude precondition.
+
+Primary source: Shewchuk,
+[Adaptive Precision Floating-Point Arithmetic and Fast Robust Geometric
+Predicates](https://people.eecs.berkeley.edu/~jrs/papers/robustr.pdf),
+Theorems 7, 10 and 23, and
+[the author's `compress` implementation](https://www.cs.cmu.edu/afs/cs/project/quake/public/code/predicates.c).
+The paper's §2.7 explicitly distinguishes an uncompressed expansion from a
+leading component that approximates the total.
+
+### Full finite-range proof
+
+1. A binary64 value widens exactly to binary128. Each product needs at most
+   `53+53 = 106` significand bits; binary128 has 113. Each product is exact.
+   Halving is an exact exponent shift in this range.
+2. Every term is a multiple of `2^-2149`. The least nonzero product before
+   halving is `2^-2148`. Each exact sum or difference stays on that lattice.
+   A binary128 rounding either retains a lattice point or, where its grid is
+   finer than the lattice, is exact. A nonzero residual is therefore at least
+   `2^-2149`, far above binary128's minimum normal `2^-16382`.
+3. The sum of the four absolute terms is below `2^2050`. A conservative bound
+   of `2^2052` covers transform intermediates. Binary128's finite range extends
+   to almost `2^16384`. No product, sum, residual or compression step can
+   overflow or underflow binary128.
+4. Strict round-to-nearest-even `TwoSum` is error-free in that range.
+   `GROW-EXPANSION` preserves the exact total and ascending nonoverlap.
+   Zero elimination bounds the length by the number of inserted terms.
+   `COMPRESS` preserves the total and gives a leading component `h` whose
+   omitted tail is less than one binary128 ULP of `h`.
+5. Let `r = RN64(h)`. For finite nonzero `r`, `h` lies in `r`'s nearest-rounding
+   cell. Its distance from each neighboring binary64 value is at least half
+   the respective gap. The binary128 tail is smaller than that margin by
+   more than 50 binary digits, including at binade boundaries. Thus the
+   predecessor of `r` is below the exact total and its successor is above it.
+6. If `r` is zero, `|h| <= 2^-1075`. The tail cannot bring the total to
+   `2^-1074`. The two neighbors `-2^-1074` and `+2^-1074` enclose it.
+   A bit-pattern neighbor routine must step from zero to the minimum
+   **subnormal**, not use the library's deliberate exact-zero no-step rule.
+   An empty expansion is exactly zero and returns zero without a step.
+7. If `r` is positive infinity, `h` reached the binary64 overflow threshold
+   `2^1024 - 2^970`. The binary128 relative tail is below `2^-112`; the exact
+   total still exceeds `floatMax`. The lower neighbor is `floatMax`, and the
+   upper bound is infinity. Negation supplies the negative case.
+8. `H-L = G(B-A) >= 0`. With outward endpoint bounds, `lo <= L <= H <= hi`.
+   The result goes through `Interval.init`; its checked ordering assertion
+   remains present, and neither infinity normalization can narrow the result.
+
+This proof assumes IEEE binary64/binary128 arithmetic, correctly rounded
+conversion, and strict transforms without reassociation or excess precision.
+It does not treat a rounded binary128 sum as an exact reference. The lattice
+keeps all binary128 arithmetic out of its subnormal range.
+
+### Factors, rays and exceptional inputs
+
+- Finite factors use `@abs`, including both signed zeros and negative factors.
+  The sign of the factor cannot change the image.
+- Nonfinite endpoints or nonfinite factor magnitudes call the original
+  `scale` unchanged. This preserves the unbounded-input identity at
+  `|factor| == 1` and the whole-line answer otherwise.
+- An infinite factor still denotes the existing magnitude overflow ray.
+  Width-positive finite boxes have a whole-line image over that ray; a
+  zero-width box has a point image. Delegation preserves the original
+  enclosure in both cases.
+- NaN remains a violated factor precondition, diagnosed by the original
+  constructor before any unbounded-input answer in checked modes.
+  No invalid unchecked-mode NaN call was executed.
+- The finite enclosure bits need not match the old composition. A tighter
+  answer is not assumed, and a checksum difference is not called equality.
+  There is no bounded unit-factor identity guarantee in the existing code.
+
+### Executed checks
+
+The compiled prototype ran **219,172 cases in each of all four optimize
+modes**, with no containment, ordering, factor-sign or delegated-policy
+failure. Cases include format endpoints, both signed zeros, subnormals,
+neighboring factors around one, infinite factors, canonical rays, 200,000
+deterministic full-exponent random cases, and the 1,024-binade cancellation
+family. Debug and ReleaseSafe also refused a NaN factor by `SIGABRT`.
+
+An independent Python `Fraction` reference checked **20,000 emitted binary64
+input/output rows** against the exact four-term real endpoints: zero misses.
+It shares no binary128 arithmetic or expansion implementation with the
+prototype. Explicit rows include `[0,2^-1074]` at zero, `[-floatMax,floatMax]`
+at zero, and `[-1,2^40]` at `1-2^-53`.
+These samples support the proof; they are not a substitute for it.
+
+### Measurement and decision
+
+The workload is exactly the 256 `pairs[i].a` and `scalars[i]` from
+`bench/bench.zig`. Both paths run from one ReleaseFast executable on CPU 0.
+Each process uses one warmup call, then seven samples of 1,000,000 iterations;
+the minimum is the existing harness's statistic. The liveness witness adds
+both output bit patterns, so an infinite width cannot collapse the checksum.
+No project build, test, profile or benchmark overlaps a timing run.
+The shared host is not an exclusive reservation.
+
+| Pair / order | Composition ns/op | Exact expansion ns/op |
+| --- | ---: | ---: |
+| 1, composition then exact | 62.629 | 961.631 |
+| 2, exact then composition | 50.975 | 966.493 |
+| 3, composition then exact | 49.148 | 945.485 |
+| **Median** | **50.975** | **961.631** |
+
+The predeclared bar required at least 5% lower median cost, improvement in
+all three pairs, and nonoverlapping ranges in the improvement direction.
+All three conditions failed. Both paths have stable per-path checksums;
+the two checksums differ because the enclosures differ.
+
+Evidence: the scoped scratch run's `task5-predeclared.json`,
+`task5-four-modes.json`, `task5-fraction-verification.json`,
+`task5-nan-refusal.json`, `task5-trial.json` and `task5-verdict.json`.
+The two research source hashes and all 42 timing samples are recorded there.
+`src/interval.zig` remains the measured baseline at `b9ed7e13`.

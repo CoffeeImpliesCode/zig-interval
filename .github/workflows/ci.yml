@@ -10,11 +10,11 @@
 # beside `bench_step` says so) and because nothing ran automatically. The
 # `bench` job below is the fix for that regression.
 #
-# The benchmarks matter more than a step name suggests: build.zig.zon:73-81
-# lists the files a published copy of this package carries, and the `bench/`
-# directory is not among them. A consumer never compiles a benchmark, so
-# nothing downstream of this repository will ever report a benchmark that
-# stopped building. It has to be a job.
+# The benchmarks matter more than a step name suggests: build.zig.zon:73-82
+# ships `bench/` in a published copy, so a consumer can run `zig build bench`,
+# and nothing in the default gate does. `zig build test` does not reach
+# `bench_step` and the package tests compile no benchmark file, so a benchmark
+# that stopped building would be caught nowhere else. It has to be a job.
 #
 # The rest of this file is the gate that was already true by hand, plus the two
 # parts this repository now owns outright: the pinned analyzers (`analyze`) and
@@ -78,11 +78,15 @@ concurrency:
 
 env:
   # The pin. build.zig.zon:28 declares `.minimum_zig_version = "0.16.0"`, and
-  # the source is written against 0.16 APIs, so this is a floor and a
-  # requirement at once. It is a literal and not `master` or `latest`: a moving
-  # toolchain turns this gate red for reasons that have nothing to do with the
-  # code, and a red gate nobody trusts is the same as no gate. Stated once,
-  # here, and read by the install step and by the cache key below.
+  # that field names the MINIMUM, not the supported compiler: it is the floor
+  # below which the package manager refuses this package, and nothing more. The
+  # source is written against 0.16 APIs, so this workflow pins that exact
+  # release as ITS OWN configuration; whether it passes is what the jobs below
+  # report, not what this comment promises. It is a literal and not `master`
+  # or `latest`: a moving toolchain turns this gate red for reasons that have
+  # nothing to do with the code, and a red gate nobody trusts is the same as no
+  # gate. Stated once, here, and read by the install step and by the cache key
+  # below.
   ZIG_VERSION: "0.16.0"
   # sha256 of zig-x86_64-linux-0.16.0.tar.xz, from
   # https://ziglang.org/download/index.json under "0.16.0"."x86_64-linux".

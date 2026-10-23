@@ -93,9 +93,9 @@ environment
                           free. In portable mode any absolute path is accepted
                           when it is a real, non-symlink directory this user
                           can write, has at least 1 GiB free, and is not on NFS.
-                          System temp volumes and NFS exports are refused in
-                          managed mode. Defaults to TMPDIR, then to a verified
-                          candidate.
+                          System temp volumes are refused in managed mode;
+                          NFS is refused in both modes. Defaults to TMPDIR,
+                          then to a verified candidate.
   GATE_CROSS_OUTPUT       cross-test --output directory (default
                           $GATE_SCRATCH/zig-gate-cross). Kept after the run —
                           section 9 reads its per-target logs back — and never

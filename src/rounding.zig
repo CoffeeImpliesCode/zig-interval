@@ -57,11 +57,13 @@
 //!
 //! For the elementary functions the premise fails: the `std.math`
 //! primitives behind them carry no documented error bound. Measured
-//! against exact arithmetic, a sample of the point primitives landed
-//! within roughly 1.1 ULP, with `tanh` the worst at 1.07, which is past
-//! what one step absorbs. Those results are widened by two steps
-//! instead, so a primitive would have to be more than a full ULP out to
-//! escape the bound.
+//! against exact arithmetic, the worst of them sampled is `tanh` at
+//! 2.14 ULP, past what one step absorbs and past what two absorbs
+//! besides. Those results are widened by three steps instead, so a
+//! primitive would have to be more than two ULPs out to escape the
+//! bound. `sqrt` is the exception: it is `@sqrt`, correctly rounded and
+//! so proven at half a ULP, and is widened by three anyway, so that the
+//! whole namespace answers under one rule.
 //!
 //! That sample is not a bound on the family, and one primitive is a
 //! standing counterexample: `std.math.pow` reaches the integer part of
@@ -71,7 +73,7 @@
 //! evaluates its corners through this file's own rigor instead. See
 //! `interval_ext.zig`.
 //!
-//! That second figure is a margin chosen from measurement, not a proof of
+//! That figure is a margin chosen from measurement, not a proof of
 //! it. A rigorous guarantee for the elementary functions would need a
 //! correctly rounded or formally verified implementation of each one,
 //! which this library does not provide. `interval_ext.zig` records the
