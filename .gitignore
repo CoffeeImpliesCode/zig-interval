@@ -17,3 +17,15 @@ fixture/zig-out/
 qemu_*.core
 core
 core.*
+.zig-global-cache/
+.devenv/
+.direnv/
+result
+result-*
+__pycache__/
+*.pyc
+.ruff_cache/
+node_modules/
+target/
+*.o
+*.log
