@@ -441,8 +441,7 @@ pub fn build(b: *std.Build) void {
     // no such limit, and there never was in this file: the `ulimit -v` recipe
     // was removed as actively wrong, because the compiler inherits the limit
     // and dies with OutOfMemory while COMPILING, before a benchmark row runs.
-    // docs/performance-handover.md records that and says not to reintroduce
-    // it. The one real guard is the row budget inside bench/bench_lp.zig, and
+    // The row budget inside bench/bench_lp.zig limits the benchmark work, and
     // it is already a step of the combined `bench` step. These three steps
     // add isolation, not protection.
     //

@@ -19,9 +19,7 @@
 //! zero when the exact coefficient is zero. Deciding it on the widened
 //! products would compare two approximations of a zero, which can only ever
 //! report a straddle where the mathematics says there is nothing to report.
-//! That is D4 in `docs/next-work-plan.md`; its full argument, including the
-//! bit count that makes `f128` the right width, is on `cancelsExactly`
-//! below, in the place where the arithmetic is.
+//! `cancelsExactly` below gives the bit count required for exact products.
 //!
 //! WHAT IS HERE AND WHAT IS NOT. `Lin` and `Part` stayed in `lp.zig`. They
 //! are the solver's vocabulary - `System.partition` hands a `Part` out
