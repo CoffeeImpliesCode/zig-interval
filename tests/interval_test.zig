@@ -908,7 +908,7 @@ test "div: infinite operands on both sides give the whole line, not a NaN" {
     // abort itself is watched from a child process in every mode, by
     // tests/soundness_test.zig; what is pinned here is the pair of endpoints
     // the elided build hands back, which is the same NaN either way.
-    const checked = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
+    const checked = builtin.mode == .debug or builtin.mode == .safe;
     if (!checked) {
         const nan = std.math.nan(f64);
         // inf / nan and nan / inf are here beside the other two on purpose:
@@ -1635,15 +1635,15 @@ fn expectExactDecls(
     comptime what: []const u8,
     comptime expected: anytype,
 ) !void {
-    const published = @typeInfo(namespace).@"struct".decls.len;
+    const published = @typeInfo(namespace).@"struct".decl_names.len;
     if (published != expected.len) {
         try reportFailure("{s} publishes {d} names, expected {d}:\n", .{
             what,
             published,
             expected.len,
         });
-        for (@typeInfo(namespace).@"struct".decls) |d| {
-            try reportFailure("  {s}\n", .{d.name});
+        for (@typeInfo(namespace).@"struct".decl_names) |name| {
+            try reportFailure("  {s}\n", .{name});
         }
         return error.UnexpectedPublicNames;
     }

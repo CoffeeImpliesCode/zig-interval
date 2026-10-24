@@ -77,23 +77,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # The pin. build.zig.zon:28 declares `.minimum_zig_version = "0.16.0"`, and
-  # that field names the MINIMUM, not the supported compiler: it is the floor
-  # below which the package manager refuses this package, and nothing more. The
-  # source is written against 0.16 APIs, so this workflow pins that exact
-  # release as ITS OWN configuration; whether it passes is what the jobs below
-  # report, not what this comment promises. It is a literal and not `master`
-  # or `latest`: a moving toolchain turns this gate red for reasons that have
-  # nothing to do with the code, and a red gate nobody trusts is the same as no
-  # gate. Stated once, here, and read by the install step and by the cache key
-  # below.
-  ZIG_VERSION: "0.16.0"
-  # sha256 of zig-x86_64-linux-0.16.0.tar.xz, from
-  # https://ziglang.org/download/index.json under "0.16.0"."x86_64-linux".
-  # Changing ZIG_VERSION without changing this fails the install loudly, which
-  # is the correct failure: a toolchain whose digest is unknown is a toolchain
-  # nobody pinned.
-  ZIG_SHA256: "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
+  ZIG_VERSION: "0.17.0"
+  # ziglang.org/download/index.json: 0.17.0, x86_64-linux.
+  ZIG_SHA256: "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026"
 
 jobs:
   # ---------------------------------------------------------------- library --
@@ -892,8 +878,8 @@ jobs:
 
           if doc["schema"] != 2:
               problems.append("summary schema is %r, not 2" % (doc["schema"],))
-          if doc["zig_version"] != "0.16.0":
-              problems.append("cross-test used Zig %r, not the pinned 0.16.0" % (doc["zig_version"],))
+          if doc["zig_version"] != "0.17.0":
+              problems.append("cross-test used Zig %r, not the pinned 0.17.0" % (doc["zig_version"],))
           if doc["run_timeout_seconds"] != 900:
               problems.append("run_timeout_seconds=%r, not the profile's CROSS_TIMEOUT=900"
                               % (doc["run_timeout_seconds"],))

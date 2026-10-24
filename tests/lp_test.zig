@@ -818,7 +818,7 @@ test "eliminationOrder is a permutation with no repeats" {
     defer gpa.free(order);
 
     try std.testing.expectEqual(sys.varCount(), order.len);
-    var seen = [_]bool{false} ** 3;
+    var seen: [3]bool = @splat(false);
     for (order) |k| {
         try std.testing.expect(k < sys.varCount());
         try std.testing.expect(!seen[k]);

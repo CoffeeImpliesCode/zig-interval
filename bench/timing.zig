@@ -143,7 +143,7 @@ pub const Report = struct {
         try out.print("\n{s:>34}  {s:>12}  {s:>16}  {s:>10}\n", .{
             "operation", "ns/op", "ops/sec", "iters",
         });
-        try out.print("{s}\n", .{"-" ** 78});
+        try out.print("{s}\n", .{@as([78]u8, @splat('-'))});
         for (self.rows.items) |r| {
             try out.print("{s:>34}  {d:>12.3}  {d:>16.1}  {d:>10}\n", .{
                 r.name,

@@ -317,16 +317,9 @@ pub fn build(b: *std.Build) void {
     // instead of in a storage location this build invented for itself at
     // the last moment.
     const consumer_root = consumerCacheRoot(b);
-    const run_consumer = b.addSystemCommand(&.{
-        "zig",
-        "build",
-        "run",
-        "--cache-dir",
-        b.fmt("{s}/zig-interval-consumer", .{consumer_root}),
-        "--global-cache-dir",
-        b.fmt("{s}/zig-interval-consumer-global", .{consumer_root}),
-        "-Doptimize=ReleaseSafe",
-    });
+    const run_consumer = b.addSystemCommand(&.{ "zig", "build", "run", "--cache-dir" });
+    run_consumer.addDirectoryArg2(consumer_root.path(b, "zig-interval-consumer"), .{ .make_absolute = true });
+    run_consumer.addArg("-Doptimize=safe");
     // Required, and easy to lose: it is what makes the nested build find
     // fixture/build.zig rather than this one. Without it the child runs in the
     // repository root, picks up the root build script, and fails with
@@ -467,62 +460,10 @@ pub fn build(b: *std.Build) void {
     bench_lp_step.dependOn(&run_bench_lp.step);
 }
 
-/// Root directory under which the nested consumer build may write its caches.
-/// Always absolute. The caller appends the two directory names, which is why
-/// this returns a root and not a complete path.
-///
-/// Two candidates, in order:
-///
-/// 1. `ZIG_INTERVAL_CONSUMER_CACHE`, if it is set to something.
-/// 2. The cache directory THIS build was itself given - `--cache-dir`, or
-///    `.zig-cache` - resolved to an absolute path.
-///
-/// Either can be relative, and the absolute rule is why this function exists
-/// at all: the nested build runs with its working directory set to `fixture/`,
-/// so a relative root resolves against the fixture and not against the
-/// repository root, which puts both caches under `fixture/` - and
-/// `build.zig.zon`'s `.paths` includes that directory, recursively.
-///
-/// Nothing else is consulted. A directory is not a build cache because a
-/// plausible default names it: no environment variable is read as a decision,
-/// and no well-known path is invented at the last moment for a machine
-/// somebody did not configure. The parent's own cache directory is the one
-/// location here that somebody did choose, and it is the one that travels to
-/// a machine with none of this project's storage laid out.
-///
-/// A network filesystem is not a candidate either, however convenient it
-/// looks: this project's builds fail on one with `renameat2 EINVAL` - the same
-/// `programmer bug caused syscall error` a cache hint warns about - so
-/// falling back to one would be a slower copy of the same failure while
-/// appearing to comply.
-///
-/// Candidate 2 can therefore point inside the repository - `.zig-cache` on a
-/// runner that passes no `--cache-dir` - and nothing here promises otherwise.
-/// It does not have to: that output lands beside the parent's own output in a
-/// directory git already ignores, which is a location this build chose rather
-/// than one it invented at the last moment.
-fn consumerCacheRoot(b: *std.Build) []const u8 {
-    const env = &b.graph.environ_map;
-    const usable = struct {
-        fn check(v: ?[]const u8) ?[]const u8 {
-            const s = v orelse return null;
-            return if (s.len == 0) null else s;
-        }
-    };
-
-    if (usable.check(env.get("ZIG_INTERVAL_CONSUMER_CACHE"))) |d| {
-        return absolutePath(b, d);
+/// Root for the nested consumer's caches, resolved at make time.
+fn consumerCacheRoot(b: *std.Build) std.Build.LazyPath {
+    if (b.graph.environ_map.get("ZIG_INTERVAL_CONSUMER_CACHE")) |path| {
+        if (path.len != 0) return b.graph.cwdRelativePath(path);
     }
-
-    // build_runner always passes a cache root string, so `path` is set; `null`
-    // means the working directory, and a build's working directory is the
-    // repository root, which is the same answer.
-    return absolutePath(b, b.cache_root.path orelse b.graph.cache.cwd);
-}
-
-/// A path the nested build can be given without ambiguity: its working
-/// directory is `fixture/`, so a relative one resolves against the fixture.
-fn absolutePath(b: *std.Build, path: []const u8) []const u8 {
-    if (std.fs.path.isAbsolute(path)) return path;
-    return std.fs.path.resolve(b.allocator, &.{ b.graph.cache.cwd, path }) catch @panic("OOM");
+    return .cache_root;
 }

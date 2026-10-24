@@ -796,15 +796,10 @@ fn readmeEmptyBoxFromArray(report: *Report) CheckError!void {
 /// surrounding prose is about.
 fn readmeMapResultSignature(report: *Report) CheckError!void {
     comptime {
-        const params = @typeInfo(@TypeOf(interval.mapResult)).@"fn".params;
+        const params = @typeInfo(@TypeOf(interval.mapResult)).@"fn".param_types;
         std.debug.assert(params.len == 2);
-        std.debug.assert(params[0].is_generic);
-        // `type` is an optional, and it is null exactly when the parameter
-        // is generic — which the assertion above has already ruled out for
-        // the FIRST parameter, and which for the second is the answer being
-        // checked. So it is compared as the optional it is rather than
-        // forced open: a null fails the comparison rather than panicking.
-        std.debug.assert(params[1].type == @as(?type, *const fn (Interval) ?Interval));
+        std.debug.assert(params[0] == null);
+        std.debug.assert(params[1] == @as(?type, *const fn (Interval) ?Interval));
     }
     try report.line("ok readme-mapResult-signature: anytype, *const fn (Interval) ?Interval\n", .{});
 }
