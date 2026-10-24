@@ -494,7 +494,7 @@ echo "gate: cache=$GATE_CACHE_DIR global=$GATE_GLOBAL_CACHE_DIR"
 BUILD_ARGS=""
 if [ -n "$GATE_CACHE_DIR" ]; then BUILD_ARGS="--cache-dir $GATE_CACHE_DIR"; fi
 if [ -n "$GATE_GLOBAL_CACHE_DIR" ]; then
-    BUILD_ARGS="$BUILD_ARGS --global-cache-dir $GATE_GLOBAL_CACHE_DIR"
+    export ZIG_GLOBAL_CACHE_DIR="$GATE_GLOBAL_CACHE_DIR"
 fi
 
 zig_build() {

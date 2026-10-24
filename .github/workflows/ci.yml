@@ -97,7 +97,7 @@ jobs:
       # should not hide them behind a cancelled matrix.
       fail-fast: false
       matrix:
-        optimize: [Debug, ReleaseSafe, ReleaseFast, ReleaseSmall]
+        optimize: [debug, safe, fast, small]
     steps:
       - name: Check out the repository
         # Pinned to a COMMIT, not to the moving `v4` tag, for the same reason
@@ -139,33 +139,10 @@ jobs:
           # emitted path to that test in `nan_probe_options` as `probe_path`),
           # and a SIGABRT otherwise leaves a core file in the workspace. The
           # limit is `-c`, core-dump size, and it is set in THIS shell because
-          # that is where the child inherits it from. It is deliberately not
-          # `-v`, and docs/performance-handover.md records why under "What not
-          # to do": a `ulimit -v` around `zig build` is wrong, because the
-          # compiler inherits it and dies with error:OutOfMemory before a
-          # single benchmark row runs.
+          # that is where the child inherits it from.
+          # Avoid address-space limits: the compiler inherits them too.
           ulimit -c 0
-          # The nested consumer build is not parameterised by this flag:
-          # `run_consumer` in build.zig passes -Doptimize=ReleaseSafe itself
-          # and `test_step` depends on that step, so all four modes build the
-          # fixture the same way. That is left as it is: the fixture is a real
-          # external package under fixture/ and still runs with setCwd on that
-          # directory, and what keeps its caches out of the machine-wide global
-          # cache is that it gets two cache directories of its own, both
-          # ABSOLUTE, named by `consumerCacheRoot`. They are a parent local-cache
-          # root with two CHILD names appended - never the parent's own cache or
-          # global-cache directory - so flattening them into the parent's would
-          # delete the containment those flags exist for. Which root that is
-          # comes down to TWO candidates and nothing else: 1, what
-          # ZIG_INTERVAL_CONSUMER_CACHE names, if that variable is set to
-          # something, and 2, the cache directory this job's own `zig build` was
-          # given - --cache-dir, or .zig-cache when no flag is passed. Both are
-          # resolved to an absolute path. This job passes no --cache-dir and
-          # sets no such variable, so candidate 2 applies: the .zig-cache the
-          # restore step above keeps. The only thing this step still writes
-          # inside fixture/ is fixture/zig-out, where the child installs - it
-          # gets no --prefix - and the recursive `fixture` entry in `.paths`
-          # covers that directory as well, which is why `.gitignore` lists it.
+          # The nested consumer fixture runs in safe mode with its own local cache.
           zig build test -Doptimize=${{ matrix.optimize }}
 
   # ------------------------------------------------------------- benchmarks --
@@ -412,6 +389,17 @@ jobs:
           # this job's product, not an input to it.
           key: quality-tools-${{ env.ZIG_VERSION }}-${{ runner.os }}-${{ runner.arch }}-analyzers-${{ hashFiles('tools/quality/manifest.tsv', 'tools/quality/SHA256SUMS', 'tools/quality/harness/**', 'tools/quality/patches/**') }}
 
+      - name: Install the analyzer compiler
+        run: |
+          set -euo pipefail
+          tgz=zig-x86_64-linux-0.16.0.tar.xz
+          curl -fsSL --retry 3 --retry-delay 2 -o "/tmp/${tgz}" \
+            "https://ziglang.org/download/0.16.0/${tgz}"
+          echo "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  /tmp/${tgz}" | sha256sum --check -
+          mkdir -p /tmp/zig-analyzers
+          tar -xf "/tmp/${tgz}" --strip-components=1 -C /tmp/zig-analyzers
+          echo "ANALYZER_ZIG=/tmp/zig-analyzers/zig" >> "$GITHUB_ENV"
+
       - name: Install the pinned analyzers and the gate
         run: |
           set -euo pipefail
@@ -427,7 +415,7 @@ jobs:
           bash scripts/install-quality-tools.sh \
             --prefix "$QUALITY_TOOLS_PREFIX" \
             --work-root "$QUALITY_TOOLS_WORK_ROOT" \
-            --zig "$ZIG" \
+            --zig "$ANALYZER_ZIG" \
             --only analyzers,zig-gate
 
       - name: the installed prefix matches the install manifest, and the tree matches SHA256SUMS
@@ -446,7 +434,7 @@ jobs:
           bash scripts/install-quality-tools.sh \
             --prefix "$QUALITY_TOOLS_PREFIX" \
             --work-root "$QUALITY_TOOLS_WORK_ROOT" \
-            --zig "$ZIG" \
+            --zig "$ANALYZER_ZIG" \
             --verify-only
 
           # All four analyzers must be present AND executable. Present but not

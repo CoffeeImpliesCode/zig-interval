@@ -90,7 +90,7 @@ required
                     stamp written by
                     an older installer costs one fetch rather than a build from
                     a tree nobody hashed.
-  --zig ABS         path to a real Zig. Must report exactly 0.16.0.
+  --zig ABS         path to Zig 0.16.0 for analyzers; harness-only installs also accept 0.17.0.
 
 optional
   --only LIST       comma-separated subset of:
@@ -329,8 +329,13 @@ fi
     die "bash 4.4 or newer is required, found ${BASH_VERSION}"
 [[ -x $ZIG ]] || die "--zig is not an executable file: $ZIG"
 ZIG_VERSION=$("$ZIG" version 2>/dev/null) || die "cannot run --zig: $ZIG"
-[[ $ZIG_VERSION == 0.16.0 ]] ||
-    die "--zig reports $ZIG_VERSION; this harness is pinned to 0.16.0 (got $ZIG)"
+if ((${#WANT_ANALYZERS[@]})); then
+    [[ $ZIG_VERSION == 0.16.0 ]] ||
+        die "--zig reports $ZIG_VERSION; analyzer sources require 0.16.0 (got $ZIG)"
+else
+    [[ $ZIG_VERSION == 0.16.0 || $ZIG_VERSION == 0.17.0 ]] ||
+        die "--zig reports $ZIG_VERSION; harness supports 0.16.0 and 0.17.0"
+fi
 
 # --prefix and --work-root are held to the SAME contract the harness uses. On a
 # managed host that means the approved physical volumes, and it is checked here
