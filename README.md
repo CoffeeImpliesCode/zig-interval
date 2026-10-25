@@ -108,4 +108,4 @@ only the final rounded result is insufficient.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).
