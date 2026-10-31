@@ -1,5 +1,5 @@
 # Sourced by cross-test. Published platforms, not an architecture/OS product.
-# Tier table: https://ziglang.org/download/0.16.0/release-notes.html#Support-Table
+# Tier tables: https://ziglang.org/download/{0.16.0,0.17.0}/release-notes.html#Support-Table
 
 cross_tz_find_exec() {
   local path
@@ -34,9 +34,10 @@ cross_tz_normalize_host_os() {
 }
 
 cross_default_matrix() {
+  local native target
   CROSS_MATRIX=(); CROSS_MATRIX_SOURCE=; CROSS_MATRIX_VERSION=
-  if [[ ${1:-} != 0.16.0 ]]; then
-    printf 'cross-test: no verified tier table for Zig %s (supported: 0.16.0)\n' "${1:-unknown}" >&2
+  if [[ ${1:-} != 0.16.0 && ${1:-} != 0.17.0 ]]; then
+    printf 'cross-test: no verified tier table for Zig %s (supported: 0.16.0, 0.17.0)\n' "${1:-unknown}" >&2
     return 2
   fi
   local targets=(
@@ -54,7 +55,15 @@ cross_default_matrix() {
     x86-linux x86-netbsd x86-openbsd x86-windows
     x86_64-freebsd x86_64-maccatalyst x86_64-macos x86_64-netbsd x86_64-openbsd x86_64-windows
   )
-  local native target
+  if [[ $1 == 0.17.0 ]]; then
+    # Verified against the 0.17.0 published Support Table, 2026-10-31.
+    # Four platforms enter Tier 2; thumb-windows moves to Tier 3.
+    local -a current=()
+    for target in "${targets[@]}"; do
+      [[ $target == thumb-windows ]] || current+=("$target")
+    done
+    targets=("${current[@]}" loongarch32-linux riscv32-netbsd riscv64-netbsd sparc64-linux)
+  fi
   native=$(cross_tz_normalize_host_arch "${CROSS_HOST_ARCH:-}")-$(cross_tz_normalize_host_os "${CROSS_HOST_OS:-}")
   for target in "${targets[@]}"; do
     [[ $target != "$native" ]] || CROSS_MATRIX+=("$target|auto")
@@ -62,8 +71,8 @@ cross_default_matrix() {
   for target in "${targets[@]}"; do
     [[ $target == "$native" ]] || CROSS_MATRIX+=("$target|auto")
   done
-  CROSS_MATRIX_SOURCE='https://ziglang.org/download/0.16.0/release-notes.html#Support-Table'
-  CROSS_MATRIX_VERSION=0.16.0
+  CROSS_MATRIX_SOURCE="https://ziglang.org/download/$1/release-notes.html#Support-Table"
+  CROSS_MATRIX_VERSION=$1
 }
 
 cross_detect_runner() {

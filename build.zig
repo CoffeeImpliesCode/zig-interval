@@ -407,6 +407,18 @@ pub fn build(b: *std.Build) void {
     });
     bench_lp.root_module.addImport("interval", interval);
 
+    const accounting_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/bench_lp.zig"),
+            .target = target,
+            .optimize = .debug,
+        }),
+    });
+    accounting_tests.root_module.addImport("interval", interval);
+    b.step("bench-accounting-test", "Check allocator-state-independent accounting").dependOn(
+        &b.addRunArtifact(accounting_tests).step,
+    );
+
     // The step depends on RUNNING all three, not merely on building
     // them: a benchmark nobody runs has measured nothing. Three
     // `addRunArtifact` calls and three dependencies, rather than a

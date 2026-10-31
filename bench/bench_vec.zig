@@ -30,21 +30,21 @@
 //! `DynVec` is simply wrong. Every value-returning body is therefore
 //! measured TWICE, on two environments built side by side for each
 //! dimension: one on `smp_allocator`, the general purpose allocator a
-//! caller reaches for by default, and one on a `DebugAllocator`. The rows
+//! caller reaches for by default, and one on a `SafeAllocator`. The rows
 //! are named `...value.smp` and `...value.dbg` and every table below
 //! prints both, because a cross-over quoted against only one of them is a
 //! measurement of the allocator.
 //!
 //! Allocators: the hot path uses `std.heap.smp_allocator`, because a
-//! `DebugAllocator` turns an allocation benchmark into a measurement of
-//! the `DebugAllocator` — its own bookkeeping, its own leak-detection
+//! `SafeAllocator` turns an allocation benchmark into a measurement of
+//! the `SafeAllocator` — its own bookkeeping, its own leak-detection
 //! state — rather than of the library. That claim is checked rather than
 //! asserted: the last section times a bare `alloc`/`free` round trip under
 //! both allocators at every box size measured here, and prints what share
 //! of a value-returning call that round trip accounts for.
 //!
-//! What the two come to, measured on this machine in ReleaseFast over
-//! several runs: the round trip runs at 17 to 29 ns under `smp_allocator`
+//! Historical DebugAllocator figures (before the Zig 0.17 SafeAllocator port):
+//! over several runs, the round trip ran at 17 to 29 ns under `smp_allocator`
 //! and 5,400 to 10,100 ns under the `DebugAllocator`, a factor of roughly
 //! 240 to 500. The figures move by half between runs on a loaded host, so
 //! read the last two tables of the output rather than this paragraph for
@@ -373,7 +373,7 @@ fn dimSlot(comptime n: usize) usize {
 }
 
 fn envOf(comptime a: Alloc, comptime n: usize) *DynEnv {
-    return &dyn_envs[@intFromEnum(a)][dimSlot(n)];
+    return &dyn_envs[@backingInt(a)][dimSlot(n)];
 }
 
 fn setupEnv(comptime n: usize, gpa: std.mem.Allocator, env: *DynEnv) !void {
@@ -628,7 +628,7 @@ fn DynBench(comptime n: usize, comptime a: Alloc) type {
 // The gap between a value-returning `DynVec` call and an in-place one is an
 // allocator round trip plus a little. This measures the round trip
 // directly, at every box size the `DynVec` sections use, under the
-// allocator the hot path uses and under a `DebugAllocator`, so the share of
+// allocator the hot path uses and under a `SafeAllocator`, so the share of
 // the `DynVec` figures that belongs to the allocator rather than to the
 // library is visible rather than assumed.
 //
@@ -657,18 +657,18 @@ fn allocLabel(comptime n: usize) []const u8 {
     return std.fmt.comptimePrint("{d} components ({d} B)", .{ n, n * @sizeOf(Interval) });
 }
 
-/// A `DebugAllocator` of this file's own, for the allocation-only rows.
+/// A `SafeAllocator` of this file's own, for the allocation-only rows.
 ///
 /// It is deliberately not one of the `DynVec` environments' allocators: a
 /// round trip is the cost of one `alloc`/`free` pair and nothing else, and
 /// these rows are the reference the `DynVec` figures are divided by, so they
 /// are measured on allocators that serve no other purpose.
 ///
-/// `.init` is a comptime constant, so this is a definite value rather than a
+/// `.init` is evaluated at comptime, so this is a definite value rather than a
 /// lazy one: the instance exists before the first body runs, which is when
 /// the equivalent assignment in `main` used to create it, and it is the
 /// only file-scope state these two rows need.
-var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+var debug_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
 
 /// One allocator round trip at one size, under the allocator named by the
 /// body: `smp` is `std.heap.smp_allocator` itself, the allocator the hot
@@ -715,8 +715,8 @@ fn AllocBench(comptime bytes: usize) type {
 // ---------------------------------------------------------------------------
 
 pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer std.debug.assert(gpa.deinit() == .ok);
+    var gpa: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.debug.assert(gpa.deinit() == 0);
 
     var runner = try timing.Runner.init(gpa.allocator());
     defer runner.deinit();
@@ -726,9 +726,9 @@ pub fn main() !void {
     // inputs, so a value-returning figure under one can be set against the
     // same figure under the other. The `defer` for the teardown is
     // registered after the `dyn_gpa` teardown and so runs before it, which
-    // is what keeps the DebugAllocator's leak report empty.
-    var dyn_gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer std.debug.assert(dyn_gpa.deinit() == .ok);
+    // is what keeps the SafeAllocator's leak report empty.
+    var dyn_gpa: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.debug.assert(dyn_gpa.deinit() == 0);
     inline for (dims) |d| {
         try setupEnv(d.n, std.heap.smp_allocator, envOf(.smp, d.n));
         try setupEnv(d.n, dyn_gpa.allocator(), envOf(.dbg, d.n));
@@ -1017,8 +1017,8 @@ fn crossOver(
             const v = if (pr.vec) |k| nsFor(runner, k) else null;
             const d: ?f64 = switch (form) {
                 .inpl_net => dynInPlaceNet(runner, di, pr.inpl),
-                .value_smp => if (pr.val[@intFromEnum(Alloc.smp)]) |k| nsFor(runner, k) else null,
-                .value_dbg => if (pr.val[@intFromEnum(Alloc.dbg)]) |k| nsFor(runner, k) else null,
+                .value_smp => if (pr.val[@backingInt(Alloc.smp)]) |k| nsFor(runner, k) else null,
+                .value_dbg => if (pr.val[@backingInt(Alloc.dbg)]) |k| nsFor(runner, k) else null,
             };
             if (v != null and d != null) {
                 try out.print("  {d:>6.2}/{d:>5.2}", .{ v.?, d.? / v.? });
@@ -1105,15 +1105,15 @@ fn report(runner: *timing.Runner) !void {
             try out.print("{s:>34}{s:>5}", .{ ops[oi].name, dims[di].s });
             try cell(&out, dynInPlaceNet(runner, di, pr.inpl));
             try cell(&out, if (pr.noalloc) |k| nsFor(runner, k) else null);
-            try cell(&out, if (pr.val[@intFromEnum(Alloc.smp)]) |k| nsFor(runner, k) else null);
-            try cell(&out, if (pr.val[@intFromEnum(Alloc.dbg)]) |k| nsFor(runner, k) else null);
+            try cell(&out, if (pr.val[@backingInt(Alloc.smp)]) |k| nsFor(runner, k) else null);
+            try cell(&out, if (pr.val[@backingInt(Alloc.dbg)]) |k| nsFor(runner, k) else null);
             try out.print("\n", .{});
         }
     }
     try out.print("\n  inpl(net) allocates nothing; it is the in-place body minus its re-seed copy\n", .{});
     try out.print("  no-alloc returns a scalar rather than a box, so it has nothing to allocate\n", .{});
     try out.print("  value/smp and value/dbg are the same body allocating and freeing on every\n", .{});
-    try out.print("  call, once under smp_allocator and once under a DebugAllocator. The gap\n", .{});
+    try out.print("  call, once under smp_allocator and once under a SafeAllocator. The gap\n", .{});
     try out.print("  between those two columns is the allocator, not the library.\n", .{});
     try out.print("  A dash is an operation that has no such form, never a dropped measurement.\n", .{});
 
@@ -1154,7 +1154,7 @@ fn report(runner: *timing.Runner) !void {
         .value_dbg,
         &out,
         runner,
-        "cross-over: DynVec value-returning under DebugAllocator / Vec(n)",
+        "cross-over: DynVec value-returning under SafeAllocator / Vec(n)",
         ratio_note,
     );
 
@@ -1168,7 +1168,7 @@ fn report(runner: *timing.Runner) !void {
         try out.print("\n", .{});
     }
     try out.print("\n  'smp' is std.heap.smp_allocator, which the hot path uses, and 'Debug' is a\n", .{});
-    try out.print("  DebugAllocator. One row per box size, so a share can be divided by the round\n", .{});
+    try out.print("  SafeAllocator. One row per box size, so a share can be divided by the round\n", .{});
     try out.print("  trip that box actually pays rather than by one measured at another size.\n", .{});
 
     try out.print("\n=== how much of a value-returning add is the allocator ===\n", .{});
@@ -1180,8 +1180,8 @@ fn report(runner: *timing.Runner) !void {
         const pr = plan[dimSlot(d.n)][add_op];
         const rt_smp = nsFor(runner, allocName(d.s, "smp"));
         const rt_dbg = nsFor(runner, allocName(d.s, "debug"));
-        const val_smp = if (pr.val[@intFromEnum(Alloc.smp)]) |k| nsFor(runner, k) else null;
-        const val_dbg = if (pr.val[@intFromEnum(Alloc.dbg)]) |k| nsFor(runner, k) else null;
+        const val_smp = if (pr.val[@backingInt(Alloc.smp)]) |k| nsFor(runner, k) else null;
+        const val_dbg = if (pr.val[@backingInt(Alloc.dbg)]) |k| nsFor(runner, k) else null;
         try out.print("{s:>34}", .{allocLabel(d.n)});
         try cell(&out, rt_smp);
         try cell(&out, rt_dbg);

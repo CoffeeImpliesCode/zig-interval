@@ -4,6 +4,8 @@ const Run = Step.Run;
 
 // The build graph keeps its compile dependencies when a foreign run is skipped.
 pub fn configure(b: *std.Build) !void {
+    // Runner selection is environment-driven, outside the configure cache key.
+    if (@hasDecl(std.Build.Graph, "poisonCache")) b.graph.poisonCache();
     const environment = &b.graph.environ_map;
     const kind_text = environment.get("CROSS_TEST_RUNNER_KIND") orelse return error.MissingRunnerKind;
     const kind = std.meta.stringToEnum(RunnerKind, kind_text) orelse return error.InvalidRunnerPolicy;
@@ -53,7 +55,7 @@ fn configureRun(run: *Run, policy: *const Policy) !void {
     const target = executable.root_module.resolved_target.?.result;
     if (target.cpu.arch != policy.arch or target.os.tag != policy.os) return;
     if (policy.kind == .unavailable) {
-        run.step.makeFn = skipForeignRun;
+        skipForeignRunPolicy(run);
         return;
     }
     if (policy.runner.len == 0) {
@@ -66,12 +68,19 @@ fn configureRun(run: *Run, policy: *const Policy) !void {
     prefix[0] = .{ .bytes = @constCast(policy.runner) };
     var prefix_count: usize = 1;
     if (std.mem.startsWith(u8, policy.reason, "qemu_user")) {
-        const needs_loader = executable.is_linking_libc and
+        const links_libc = if (@hasField(@TypeOf(executable.*), "is_linking_libc"))
+            executable.is_linking_libc
+        else
+            executable.dependsOnSystemLibrary("c");
+        const needs_loader = links_libc and
             (target.isGnuLibC() or
                 (target.isMuslLibC() and executable.linkage == .dynamic));
         if (needs_loader) {
-            const runtimes = b.libc_runtimes_dir orelse {
-                run.step.makeFn = skipForeignRun;
+            const runtimes = (if (@hasField(std.Build, "libc_runtimes_dir"))
+                b.libc_runtimes_dir
+            else
+                b.graph.environ_map.get("CROSS_TEST_LIBC_RUNTIMES")) orelse {
+                skipForeignRunPolicy(run);
                 return;
             };
             const triple = if (target.isGnuLibC())
@@ -98,6 +107,16 @@ fn configureRun(run: *Run, policy: *const Policy) !void {
     }
     // Force the detected executor instead of relying on kernel binfmt or x86 compatibility.
     try run.argv.insertSlice(b.allocator, 0, prefix[0..prefix_count]);
+}
+
+fn skipForeignRunPolicy(run: *Run) void {
+    if (@hasField(Step, "makeFn")) {
+        run.step.makeFn = skipForeignRun;
+    } else {
+        // Preserve MakeSkipped across the configurer/maker boundary, even
+        // when binfmt_misc would try the wrong operating system's executable.
+        run.setEnvironmentVariable("CROSS_TEST_SKIP_FOREIGN", "1");
+    }
 }
 
 fn skipForeignRun(_: *Step, _: Step.MakeOptions) error{MakeSkipped}!void {

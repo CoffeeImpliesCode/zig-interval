@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compilation-only coverage of the pinned harness's complete Zig 0.16.0 matrix.
+# Compilation-only coverage of the pinned harness's complete Zig 0.17.0 matrix.
 # Run from this repository with the installed cross-test:
 #   ZIG=/absolute/path/to/zig cross-test --profile ./cross-compile.profile.sh \
 #     --output /absolute/local/scratch/compile-out

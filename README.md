@@ -104,7 +104,8 @@ only the final rounded result is insufficient.
 - `scripts/gen_corpus.c`: optional MPFR corpus generator; existing tests use the
   committed corpus and do not require MPFR.
 - `tools/quality/`: pinned external analyzer sources, patches, and harnesses.
-  These tools retain their separate Zig 0.16.0 compiler requirement.
+  zbc uses Zig 0.17.0 to match the project parser; the other three analyzers
+  retain their Zig 0.16.0 build compiler. Both toolchains are digest-pinned in CI.
 
 ## License
 

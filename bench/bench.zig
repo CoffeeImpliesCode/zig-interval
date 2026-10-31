@@ -801,7 +801,7 @@ fn runExt(runner: *timing.Runner) !void {
 // =========================================================================
 
 pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    var gpa: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa.deinit();
 
     // One runner per group, so each prints its own table and the two

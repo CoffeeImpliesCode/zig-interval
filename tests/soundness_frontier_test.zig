@@ -968,17 +968,17 @@ const frontier_trace = true;
 fn rowText(buf: []u8, op: Op, a: Shape, b: ?Shape, s: f64) []const u8 {
     if (op.usesScalar()) {
         if (b) |x| {
-            const text = std.fmt.bufPrint(buf, "a = {s}, b = {s}, s = {e}", .{
+            const text = std.mem.print(buf, "a = {s}, b = {s}, s = {e}", .{
                 a.label(), x.label(), s,
             }) catch "a shape pair";
             return text;
         }
-        return std.fmt.bufPrint(buf, "a = {s}, s = {e}", .{ a.label(), s }) catch "one shape";
+        return std.mem.print(buf, "a = {s}, s = {e}", .{ a.label(), s }) catch "one shape";
     }
     if (b) |x| {
-        return std.fmt.bufPrint(buf, "a = {s}, b = {s}", .{ a.label(), x.label() }) catch "a shape pair";
+        return std.mem.print(buf, "a = {s}, b = {s}", .{ a.label(), x.label() }) catch "a shape pair";
     }
-    return std.fmt.bufPrint(buf, "a = {s}", .{a.label()}) catch "one shape";
+    return std.mem.print(buf, "a = {s}", .{a.label()}) catch "one shape";
 }
 
 /// The canonical reading of the second operand, or of a stand-in point when

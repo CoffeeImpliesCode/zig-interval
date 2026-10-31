@@ -627,7 +627,7 @@ const Counting = struct {
 ///
 /// The section's claim is a claim about ownership, and the only thing in a
 /// Zig source file that can decide one is an allocator that knows what it
-/// is holding. So `Counting` is wrapped UNDER a `DebugAllocator` and the
+/// is holding. So `Counting` is wrapped UNDER a `SafeAllocator` and the
 /// claim is decided on its high-water mark: the first loop's dropped boxes
 /// are captured, the count is asserted while all of them are still
 /// outstanding, and every one of them is freed before the run returns. The
@@ -670,7 +670,7 @@ fn readmeBoxOwnership(report: *Report) !void {
     // log a gate reads, and it is indistinguishable from a leak in the
     // library, which is the one thing this fixture must never be.
     {
-        var dbg: std.heap.DebugAllocator(.{ .safety = true }) = .init;
+        var dbg: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{ .check_write_after_free = true });
         var counting: Counting = .{ .child = dbg.allocator() };
 
         // The boxes the loop below drops, kept so the demonstration can be
@@ -700,16 +700,16 @@ fn readmeBoxOwnership(report: *Report) !void {
         acc.deinit();
         for (dropped) |*d| d.deinit();
 
-        try expectBool(report, "readme-box-add-frees-everything", dbg.deinit() == .ok, true);
+        try expectBool(report, "readme-box-add-frees-everything", dbg.deinit() == 0, true);
     }
 
     // The first way out, and the one the README says to reach for by
     // default. The claim is the other half of the pair above, and it is
     // stricter than "did not leak": `iadd` must not allocate at all, not
-    // even a block it hands straight back. A `.ok` from the leak check
+    // even a block it hands straight back. A zero from the leak check
     // cannot see that difference, so the count does.
     {
-        var dbg: std.heap.DebugAllocator(.{ .safety = true }) = .init;
+        var dbg: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{ .check_write_after_free = true });
         var counting: Counting = .{ .child = dbg.allocator() };
 
         var acc = try DynVec.init(counting.count(), n, fill);
@@ -724,12 +724,12 @@ fn readmeBoxOwnership(report: *Report) !void {
         );
 
         acc.deinit();
-        try expectBool(report, "readme-box-iadd-frees-everything", dbg.deinit() == .ok, true);
+        try expectBool(report, "readme-box-iadd-frees-everything", dbg.deinit() == 0, true);
     }
 
     // The second way out, for when the old box has to survive the step.
     {
-        var dbg: std.heap.DebugAllocator(.{ .safety = true }) = .init;
+        var dbg: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{ .check_write_after_free = true });
         var acc = try interval.DynVec.init(dbg.allocator(), n, fill);
 
         for (others) |o| {
@@ -739,14 +739,14 @@ fn readmeBoxOwnership(report: *Report) !void {
         }
 
         acc.deinit();
-        try expectBool(report, "readme-box-transfer-frees-everything", dbg.deinit() == .ok, true);
+        try expectBool(report, "readme-box-transfer-frees-everything", dbg.deinit() == 0, true);
     }
 
     // The first operand intersects at the shared endpoint. Later operands
     // produce null and leave the accumulator unchanged. Mutable payload
     // capture lets transfer drain the owned nonnull result safely.
     {
-        var dbg: std.heap.DebugAllocator(.{ .safety = true }) = .init;
+        var dbg: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{ .check_write_after_free = true });
         var acc = try interval.DynVec.init(dbg.allocator(), n, fill);
 
         for (others) |o| {
@@ -757,7 +757,7 @@ fn readmeBoxOwnership(report: *Report) !void {
         }
 
         acc.deinit();
-        try expectBool(report, "readme-box-intersect-ownership", dbg.deinit() == .ok, true);
+        try expectBool(report, "readme-box-intersect-ownership", dbg.deinit() == 0, true);
     }
 }
 

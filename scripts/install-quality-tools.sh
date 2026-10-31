@@ -90,9 +90,10 @@ required
                     stamp written by
                     an older installer costs one fetch rather than a build from
                     a tree nobody hashed.
-  --zig ABS         path to Zig 0.16.0 for analyzers; harness-only installs also accept 0.17.0.
+  --zig ABS         default compiler; each analyzer must match its manifest compiler.
 
 optional
+  --zig-0.17 ABS    Zig 0.17.0 compiler for analyzer rows that require it.
   --only LIST       comma-separated subset of:
                     zbc, ziglint, zlint, zwanzig, cross-test, zig-gate,
                     harness (= cross-test + zig-gate), analyzers (the four),
@@ -168,6 +169,7 @@ USAGE
 PREFIX=
 WORK_ROOT=
 ZIG=
+ZIG_017=
 ONLY=
 MANIFEST=
 OPTIMIZE=ReleaseFast
@@ -177,12 +179,13 @@ FORCE=0
 
 while (($#)); do
     case $1 in
-        --prefix | --work-root | --zig | --only | --manifest | --optimize)
+        --prefix | --work-root | --zig | --zig-0.17 | --only | --manifest | --optimize)
             (($# >= 2)) && [[ -n $2 ]] || die "$1 needs a value"
             case $1 in
                 --prefix) PREFIX=$2 ;;
                 --work-root) WORK_ROOT=$2 ;;
                 --zig) ZIG=$2 ;;
+                --zig-0.17) ZIG_017=$2 ;;
                 --only) ONLY=$2 ;;
                 --manifest) MANIFEST=$2 ;;
                 --optimize) OPTIMIZE=$2 ;;
@@ -329,12 +332,11 @@ fi
     die "bash 4.4 or newer is required, found ${BASH_VERSION}"
 [[ -x $ZIG ]] || die "--zig is not an executable file: $ZIG"
 ZIG_VERSION=$("$ZIG" version 2>/dev/null) || die "cannot run --zig: $ZIG"
-if ((${#WANT_ANALYZERS[@]})); then
-    [[ $ZIG_VERSION == 0.16.0 ]] ||
-        die "--zig reports $ZIG_VERSION; analyzer sources require 0.16.0 (got $ZIG)"
-else
-    [[ $ZIG_VERSION == 0.16.0 || $ZIG_VERSION == 0.17.0 ]] ||
-        die "--zig reports $ZIG_VERSION; harness supports 0.16.0 and 0.17.0"
+[[ $ZIG_VERSION == 0.16.0 || $ZIG_VERSION == 0.17.0 ]] ||
+    die "--zig reports $ZIG_VERSION; supported compilers are 0.16.0 and 0.17.0"
+if [[ -n $ZIG_017 ]]; then
+    [[ $ZIG_017 == /* && -x $ZIG_017 ]] || die "--zig-0.17 must be an absolute executable path"
+    [[ $("$ZIG_017" version) == 0.17.0 ]] || die "--zig-0.17 must report 0.17.0"
 fi
 
 # --prefix and --work-root are held to the SAME contract the harness uses. On a
@@ -742,6 +744,9 @@ for id in ${WANT_ANALYZERS[@]+"${WANT_ANALYZERS[@]}"}; do
     # exists at all: everything here finishes before anything is created, and a
     # build_recipe this installer cannot run is exactly a manifest error.
     require_recipe "$id" "$(row_field "$row" $COL_RECIPE)"
+    comp=$(row_field "$row" $COL_COMP)
+    [[ $comp == "zig $ZIG_VERSION" || ( $comp == "zig 0.17.0" && -n $ZIG_017 ) ]] ||
+        die "$id requires $comp; supply a matching --zig or --zig-0.17"
 done
 
 if ((LIST_ONLY)); then
@@ -824,6 +829,21 @@ for id in ${WANT_ANALYZERS[@]+"${WANT_ANALYZERS[@]}"}; do
     # would be exactly the one nothing in the distribution describes.
     require_recipe "$id" "$recipe"
     step=$(recipe_step "$recipe")
+    build_zig=$ZIG
+    build_version=$ZIG_VERSION
+    if [[ $comp != "zig $ZIG_VERSION" ]]; then
+        build_zig=$ZIG_017
+        build_version=0.17.0
+    fi
+    build_optimize=$OPTIMIZE
+    if [[ $build_version == 0.17.0 ]]; then
+        case $OPTIMIZE in
+            Debug) build_optimize=debug ;;
+            ReleaseSafe) build_optimize=safe ;;
+            ReleaseFast) build_optimize=fast ;;
+            ReleaseSmall) build_optimize=small ;;
+        esac
+    fi
 
     note "== $id $rev ($(row_field "$row" $COL_TVER), built with $comp, recipe $recipe)"
 
@@ -832,9 +852,9 @@ for id in ${WANT_ANALYZERS[@]+"${WANT_ANALYZERS[@]}"}; do
     # where this run happened to put things and stay out of the column, so
     # install-manifest.tsv carries no work-root path that differs per host.
     if [[ -n $step ]]; then
-        build_argv="zig build $step -Doptimize=$OPTIMIZE"
+        build_argv="zig build $step -Doptimize=$build_optimize"
     else
-        build_argv="zig build -Doptimize=$OPTIMIZE"
+        build_argv="zig build -Doptimize=$build_optimize"
     fi
 
     # Patches are verified before a single byte is applied, so a tampered or
@@ -926,11 +946,11 @@ for id in ${WANT_ANALYZERS[@]+"${WANT_ANALYZERS[@]}"}; do
     builddir="$WORK_ROOT/build/$id"
     rm -rf -- "$builddir" || die "cannot clear $builddir"
     mkdir -p -- "$builddir" || die "cannot create $builddir"
-    note "   building $build_argv with $ZIG_VERSION"
-    if ! (cd "$src" && "$ZIG" build ${step:+"$step"} "-Doptimize=$OPTIMIZE" \
+    note "   building $build_argv with $build_version"
+    if ! (cd "$src" && ZIG_GLOBAL_CACHE_DIR="$WORK_ROOT/cache/global" \
+        "$build_zig" build ${step:+"$step"} "-Doptimize=$build_optimize" -j2 \
         --prefix "$builddir" \
-        --cache-dir "$WORK_ROOT/cache/local/$id" \
-        --global-cache-dir "$WORK_ROOT/cache/global") \
+        --cache-dir "$WORK_ROOT/cache/local/$id") \
         >"$builddir/build.log" 2>&1; then
         printf '%s: %s: build failed; last 40 lines of %s/build.log\n' "$PROG" "$id" "$builddir" >&2
         tail -40 "$builddir/build.log" >&2

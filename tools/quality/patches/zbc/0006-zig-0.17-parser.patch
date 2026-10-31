@@ -1,0 +1,1634 @@
+# zbc: Zig 0.17.0 parser and standard-library port.
+# Base: upstream 419d153 plus patches 0001-0005.
+# Adapted with upstream dd5f557 (v0.1.4) compatibility changes as reference.
+# Preserves local rules, severities, budgets, source policy, and full-array-fill proof.
+# Zig 0.17 removes array repetition: carry borrow traversal through @splat instead.
+diff --git a/build.zig b/build.zig
+--- a/build.zig
++++ b/build.zig
+@@ -70,7 +70,7 @@
+     b.default_step.dependOn(&self_check.step);
+ 
+     const run_cmd = b.addRunArtifact(exe);
+-    if (b.args) |args| run_cmd.addArgs(args);
++    run_cmd.addPassthruArgs();
+     const run_step = b.step("run", "Run zbc CLI");
+     run_step.dependOn(&run_cmd.step);
+ 
+diff --git a/build.zig.zon b/build.zig.zon
+--- a/build.zig.zon
++++ b/build.zig.zon
+@@ -2,7 +2,7 @@
+     .name = .zbc,
+     .version = "0.1.3",
+     .dependencies = .{},
+-    .minimum_zig_version = "0.16.0",
++    .minimum_zig_version = "0.17.0",
+     .fingerprint = 0x25570d53f55a8b70,
+     .paths = .{
+         "build.zig",
+diff --git a/src/ast/scope_iter.zig b/src/ast/scope_iter.zig
+--- a/src/ast/scope_iter.zig
++++ b/src/ast/scope_iter.zig
+@@ -59,7 +59,7 @@
+         \\    for (0..1) |entry| { _ = entry; }
+         \\}
+     ;
+-    var tree = try Ast.parse(std.testing.allocator, src, .zig);
++    var tree = try Ast.parse(std.testing.allocator, src, .{});
+     defer tree.deinit(std.testing.allocator);
+     const tags = tree.tokens.items(.tag);
+     const last: TokenIndex = @intCast(tree.tokens.len - 1);
+diff --git a/src/ast/token_query.zig b/src/ast/token_query.zig
+--- a/src/ast/token_query.zig
++++ b/src/ast/token_query.zig
+@@ -546,7 +546,7 @@
+ const testing = std.testing;
+ 
+ fn parseTokens(src: [:0]const u8) !Ast {
+-    return try Ast.parse(testing.allocator, src, .zig);
++    return try Ast.parse(testing.allocator, src, .{});
+ }
+ 
+ fn findIdent(tree: *const Ast, name: []const u8) TokenIndex {
+diff --git a/src/ast/tokens.zig b/src/ast/tokens.zig
+--- a/src/ast/tokens.zig
++++ b/src/ast/tokens.zig
+@@ -51,7 +51,7 @@
+     var token = first;
+     while (token <= last) : (token += 1) {
+         switch (tags[token]) {
+-            .question_mark, .asterisk, .asterisk_asterisk, .keyword_const, .keyword_volatile, .keyword_allowzero => {},
++            .question_mark, .asterisk, .keyword_const, .keyword_volatile, .keyword_allowzero => {},
+             .keyword_align, .keyword_addrspace => {
+                 if (token + 1 > last or tags[token + 1] != .l_paren) return null;
+                 token = matchParen(tags, token + 1, last) orelse return null;
+@@ -530,7 +530,7 @@
+ 
+ test "matchBrace pairs simple braces" {
+     const src: [:0]const u8 = "fn f() void { { } }";
+-    var tree = try Ast.parse(std.testing.allocator, src, .zig);
++    var tree = try Ast.parse(std.testing.allocator, src, .{});
+     defer tree.deinit(std.testing.allocator);
+     const tags = tree.tokens.items(.tag);
+     // Find first `{` (after `void`).
+@@ -542,7 +542,7 @@
+ 
+ test "findStmtSemicolon skips inner parens" {
+     const src: [:0]const u8 = "fn f() void { x(a; b); }";
+-    var tree = try Ast.parse(std.testing.allocator, src, .zig);
++    var tree = try Ast.parse(std.testing.allocator, src, .{});
+     defer tree.deinit(std.testing.allocator);
+     const tags = tree.tokens.items(.tag);
+     // Start scanning from the `x` token.
+@@ -565,7 +565,7 @@
+ 
+ test "hasTokenInRange finds keyword_try" {
+     const src: [:0]const u8 = "fn f() !void { _ = try g(); }";
+-    var tree = try Ast.parse(std.testing.allocator, src, .zig);
++    var tree = try Ast.parse(std.testing.allocator, src, .{});
+     defer tree.deinit(std.testing.allocator);
+     const tags = tree.tokens.items(.tag);
+     const last: TokenIndex = @intCast(tree.tokens.len - 1);
+@@ -578,7 +578,7 @@
+         \\    return struct { x: u32 };
+         \\}
+     ;
+-    var tree = try Ast.parse(std.testing.allocator, src, .zig);
++    var tree = try Ast.parse(std.testing.allocator, src, .{});
+     defer tree.deinit(std.testing.allocator);
+     var idx: u32 = 1;
+     while (idx < tree.nodes.len) : (idx += 1) {
+@@ -600,7 +600,7 @@
+         .{ .src = "fn f() void { foo(); }", .want = false },
+     };
+     for (cases) |c| {
+-        var tree = try Ast.parse(gpa, c.src, .zig);
++        var tree = try Ast.parse(gpa, c.src, .{});
+         defer tree.deinit(gpa);
+         var idx: u32 = 1;
+         while (idx < tree.nodes.len) : (idx += 1) {
+@@ -619,7 +619,7 @@
+     const gpa = std.testing.allocator;
+     {
+         const src: [:0]const u8 = "const S = struct { fn f(x: u32) void { _ = x; } };";
+-        var tree = try Ast.parse(gpa, src, .zig);
++        var tree = try Ast.parse(gpa, src, .{});
+         defer tree.deinit(gpa);
+         const tags = tree.tokens.items(.tag);
+         const last: TokenIndex = @intCast(tree.tokens.len - 1);
+@@ -631,7 +631,7 @@
+     {
+         // extern fn: no body — should stop at `;`
+         const src: [:0]const u8 = "extern fn malloc(n: usize) ?*anyopaque;";
+-        var tree = try Ast.parse(gpa, src, .zig);
++        var tree = try Ast.parse(gpa, src, .{});
+         defer tree.deinit(gpa);
+         const tags = tree.tokens.items(.tag);
+         const last: TokenIndex = @intCast(tree.tokens.len - 1);
+diff --git a/src/budget.zig b/src/budget.zig
+--- a/src/budget.zig
++++ b/src/budget.zig
+@@ -178,8 +178,8 @@
+ 
+ test "NameBuf truncates rather than overflowing" {
+     var name: NameBuf = .{};
+-    const long = "x" ** 200;
+-    name.set(long);
++    const long: [200]u8 = @splat('x');
++    name.set(&long);
+     try std.testing.expectEqual(@as(usize, 64), name.slice().len);
+     name.set("short");
+     try std.testing.expectEqualStrings("short", name.slice());
+diff --git a/src/cache/file_cache.zig b/src/cache/file_cache.zig
+--- a/src/cache/file_cache.zig
++++ b/src/cache/file_cache.zig
+@@ -1462,7 +1462,7 @@
+         \\    pub fn deinit(self: *Foo) void { _ = self; }
+         \\};
+     ;
+-    var tree = try Ast.parse(gpa, src, .zig);
++    var tree = try Ast.parse(gpa, src, .{});
+     defer tree.deinit(gpa);
+     var cache = try FileCache.init(gpa, &tree);
+     defer cache.deinit();
+@@ -1478,7 +1478,7 @@
+         \\fn foo(x: u32) void { _ = x; }
+         \\fn bar(y: u32) void { _ = y; }
+     ;
+-    var tree = try Ast.parse(gpa, src, .zig);
++    var tree = try Ast.parse(gpa, src, .{});
+     defer tree.deinit(gpa);
+     var cache = try FileCache.init(gpa, &tree);
+     defer cache.deinit();
+@@ -1513,7 +1513,7 @@
+         \\    }
+         \\};
+     ;
+-    var tree = try Ast.parse(gpa, src, .zig);
++    var tree = try Ast.parse(gpa, src, .{});
+     defer tree.deinit(gpa);
+     var cache = try FileCache.init(gpa, &tree);
+     defer cache.deinit();
+@@ -1545,7 +1545,7 @@
+         \\    pub fn deinit(self: *Bar) void { _ = self; }
+         \\};
+     ;
+-    var tree = try Ast.parse(gpa, src, .zig);
++    var tree = try Ast.parse(gpa, src, .{});
+     defer tree.deinit(gpa);
+     var cache = try FileCache.init(gpa, &tree);
+     defer cache.deinit();
+@@ -1567,7 +1567,7 @@
+         \\    }
+         \\};
+     ;
+-    var tree = try Ast.parse(gpa, src, .zig);
++    var tree = try Ast.parse(gpa, src, .{});
+     defer tree.deinit(gpa);
+     var cache = try FileCache.init(gpa, &tree);
+     defer cache.deinit();
+@@ -1592,7 +1592,7 @@
+         \\    return try gpa.alloc(u8, 1);
+         \\}
+     ;
+-    var tree = try Ast.parse(gpa, src, .zig);
++    var tree = try Ast.parse(gpa, src, .{});
+     defer tree.deinit(gpa);
+     var cache = try FileCache.init(gpa, &tree);
+     defer cache.deinit();
+@@ -1650,7 +1650,7 @@
+         \\const destroyer = @import("./destroyer.zig");
+         \\pub fn useNode(n: *destroyer.Node) void { _ = n; }
+     ;
+-    var consumer_tree = try Ast.parse(gpa, consumer_src, .zig);
++    var consumer_tree = try Ast.parse(gpa, consumer_src, .{});
+     defer consumer_tree.deinit(gpa);
+ 
+     const project_root = try tmp.dir.realPathFileAlloc(tio, ".", gpa);
+@@ -1707,7 +1707,7 @@
+         \\    node.kill(gpa);
+         \\}
+     ;
+-    var tree = try Ast.parse(gpa, src, .zig);
++    var tree = try Ast.parse(gpa, src, .{});
+     defer tree.deinit(gpa);
+ 
+     const project_root = try tmp.dir.realPathFileAlloc(tio, ".", gpa);
+@@ -1737,7 +1737,7 @@
+         \\    pub fn deinitOuter(self: *Outer) void { self.inner.deinit(); }
+         \\};
+     ;
+-    var tree = try Ast.parse(gpa, src, .zig);
++    var tree = try Ast.parse(gpa, src, .{});
+     defer tree.deinit(gpa);
+     var cache = try FileCache.init(gpa, &tree);
+     defer cache.deinit();
+@@ -1788,7 +1788,7 @@
+         \\const destroyer = @import("./destroyer.zig");
+         \\pub fn useNode(n: *destroyer.Xf20Node) void { _ = n; }
+     ;
+-    var tree = try Ast.parse(gpa, consumer_src, .zig);
++    var tree = try Ast.parse(gpa, consumer_src, .{});
+     defer tree.deinit(gpa);
+ 
+     const project_root = try tmp.dir.realPathFileAlloc(tio, ".", gpa);
+@@ -1817,7 +1817,7 @@
+         \\    pub fn reallyFree(self: *Xf20Node, g: std.mem.Allocator) void { g.destroy(self); }
+         \\};
+     ;
+-    var tree = try Ast.parse(gpa, src, .zig);
++    var tree = try Ast.parse(gpa, src, .{});
+     defer tree.deinit(gpa);
+     // No setProject — exactly the project-less foreign cache that
+     // summaryByMethodCrossFile constructs over rm.tree.
+@@ -1844,7 +1844,7 @@
+         \\    fn outer(self: *T) void { self.grow(1); }
+         \\};
+     ;
+-    var tree = try Ast.parse(gpa, src, .zig);
++    var tree = try Ast.parse(gpa, src, .{});
+     defer tree.deinit(gpa);
+     var cache = try FileCache.init(gpa, &tree);
+     defer cache.deinit();
+@@ -1885,7 +1885,7 @@
+         \\const grower = @import("./grower.zig");
+         \\pub fn run(g: *grower.Xf20Grower) void { g.add(1); }
+     ;
+-    var tree = try Ast.parse(gpa, caller_src, .zig);
++    var tree = try Ast.parse(gpa, caller_src, .{});
+     defer tree.deinit(gpa);
+     const project_root = try tmp.dir.realPathFileAlloc(tio, ".", gpa);
+     defer gpa.free(project_root);
+@@ -1924,7 +1924,7 @@
+     defer gpa.free(directory);
+     const path = try std.fs.path.join(gpa, &.{ directory, "main.zig" });
+     defer gpa.free(path);
+-    var tree = try Ast.parse(gpa, src, .zig);
++    var tree = try Ast.parse(gpa, src, .{});
+     defer tree.deinit(gpa);
+     var project = project_cache_mod.ProjectCache.init(gpa, io, .{ .roots = &.{directory} });
+     defer project.deinit();
+@@ -1966,7 +1966,7 @@
+     var tree = try Ast.parse(gpa,
+         \\const Holder = @import("holder.zig");
+         \\const Item = struct { pub fn kill(self: *Item, allocator: anytype) void { _ = self; _ = allocator; } };
+-    , .zig);
++    , .{});
+     defer tree.deinit(gpa);
+     var project = project_cache_mod.ProjectCache.init(gpa, io, .{ .roots = &.{directory} });
+     defer project.deinit();
+@@ -2005,7 +2005,7 @@
+     defer gpa.free(source);
+     const src_z = try gpa.dupeSentinel(u8, source, 0);
+     defer gpa.free(src_z);
+-    var tree = try Ast.parse(gpa, src_z, .zig);
++    var tree = try Ast.parse(gpa, src_z, .{});
+     defer tree.deinit(gpa);
+     try std.testing.expectEqual(@as(usize, 0), tree.errors.len);
+     var cache = try FileCache.init(gpa, &tree);
+@@ -2027,7 +2027,7 @@
+     defer gpa.free(source);
+     const src_z = try gpa.dupeSentinel(u8, source, 0);
+     defer gpa.free(src_z);
+-    var tree = try Ast.parse(gpa, src_z, .zig);
++    var tree = try Ast.parse(gpa, src_z, .{});
+     defer tree.deinit(gpa);
+     try std.testing.expectEqual(@as(usize, 0), tree.errors.len);
+     var cache = try FileCache.init(gpa, &tree);
+diff --git a/src/cache/project_cache.zig b/src/cache/project_cache.zig
+--- a/src/cache/project_cache.zig
++++ b/src/cache/project_cache.zig
+@@ -226,7 +226,7 @@
+             0,
+         );
+         errdefer self.gpa.free(bytes);
+-        var tree = try Ast.parse(self.gpa, bytes, .zig);
++        var tree = try Ast.parse(self.gpa, bytes, .{});
+         errdefer tree.deinit(self.gpa);
+         if (tree.errors.len != 0) {
+             try self.rememberParseFailure(path, &tree);
+diff --git a/src/config.zig b/src/config.zig
+--- a/src/config.zig
++++ b/src/config.zig
+@@ -955,8 +955,9 @@
+ /// unknown names so callers can surface a useful error message
+ /// rather than silently ignoring typos.
+ pub fn invariantFromName(name: []const u8) ?Invariant {
+-    inline for (@typeInfo(Invariant).@"enum".fields) |field| {
+-        if (std.mem.eql(u8, name, field.name)) return @enumFromInt(field.value);
++    const info = @typeInfo(Invariant).@"enum";
++    inline for (info.field_names, info.field_values) |field_name, field_value| {
++        if (std.mem.eql(u8, name, field_name)) return @fromBackingInt(@intCast(field_value));
+     }
+     return null;
+ }
+@@ -964,9 +965,10 @@
+ // ── Tests ──────────────────────────────────────────────────
+ 
+ test "invariantFromName round-trips every variant" {
+-    inline for (@typeInfo(Invariant).@"enum".fields) |field| {
+-        const got = invariantFromName(field.name).?;
+-        try std.testing.expectEqual(@as(Invariant, @enumFromInt(field.value)), got);
++    const info = @typeInfo(Invariant).@"enum";
++    inline for (info.field_names, info.field_values) |field_name, field_value| {
++        const got = invariantFromName(field_name).?;
++        try std.testing.expectEqual(@as(Invariant, @fromBackingInt(@intCast(field_value))), got);
+     }
+ }
+ 
+diff --git a/src/flow/cfg_builder.zig b/src/flow/cfg_builder.zig
+--- a/src/flow/cfg_builder.zig
++++ b/src/flow/cfg_builder.zig
+@@ -817,10 +817,13 @@
+                 .array_init_dot_comma,
+                 .array_init_dot_two,
+                 .array_init_dot_two_comma,
+-                .array_mult,
+                 .@"catch",
+                 .@"orelse",
+                 => Iterator.init(tree, node),
++                .builtin_call, .builtin_call_two, .builtin_call_comma, .builtin_call_two_comma => if (std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(node)), "@splat"))
++                    Iterator.init(tree, node)
++                else
++                    one(builder.transparentCastSource(node) orelse return null),
+                 .grouped_expression, .unwrap_optional => one(tree.nodeData(node).node_and_token[0]),
+                 .@"try" => one(tree.nodeData(node).node),
+                 .@"if", .if_simple => blk: {
+@@ -841,7 +844,6 @@
+                     break :blk cases;
+                 },
+                 .switch_case, .switch_case_one, .switch_case_inline, .switch_case_inline_one => one(tree.fullSwitchCase(node).?.ast.target_expr),
+-                .builtin_call, .builtin_call_two, .builtin_call_comma, .builtin_call_two_comma => one(builder.transparentCastSource(node) orelse return null),
+                 .block, .block_two, .block_semicolon, .block_two_semicolon => blk: {
+                     const label = builder.blockLabelToken(node) orelse return null;
+                     break :blk one(builder.singleLabeledBreakValue(node, label) orelse return null);
+@@ -1475,7 +1477,7 @@
+                 try self.pushDefer(body);
+             },
+             .@"errdefer" => {
+-                const body = tree.nodeData(stmt_node).opt_token_and_node[1];
++                const body = tree.nodeData(stmt_node).node;
+                 try self.pushErrdefer(body);
+             },
+             .if_simple, .@"if" => try self.lowerIf(stmt_node, cur),
+@@ -5024,7 +5026,7 @@
+                 if (self.transparentCastSource(expr_node)) |src| {
+                     return self.classifyExpr(src);
+                 }
+-                return .unknown;
++                if (!std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(expr_node)), "@splat")) return .unknown;
+             },
+             else => {},
+         }
+@@ -5058,7 +5060,7 @@
+             .array_init_dot_comma,
+             .array_init_dot_two,
+             .array_init_dot_two_comma,
+-            .array_mult,
++            .builtin_call, .builtin_call_two, .builtin_call_comma, .builtin_call_two_comma,
+             => true,
+             else => false,
+         };
+@@ -7139,7 +7141,7 @@
+ fn lowerAllBudgetFailure(gpa: std.mem.Allocator, src: []const u8) !?budget_mod.Diagnostic {
+     const src_z = try gpa.dupeSentinel(u8, src, 0);
+     defer gpa.free(src_z);
+-    var tree = try Ast.parse(gpa, src_z, .zig);
++    var tree = try Ast.parse(gpa, src_z, .{});
+     defer tree.deinit(gpa);
+     if (tree.errors.len != 0) return error.InvalidSyntax;
+     budget_mod.clear();
+diff --git a/src/flow/cfg_tests.zig b/src/flow/cfg_tests.zig
+--- a/src/flow/cfg_tests.zig
++++ b/src/flow/cfg_tests.zig
+@@ -40,7 +40,7 @@
+ fn parseAndLower(gpa: std.mem.Allocator, src: []const u8) !TestBundle {
+     const src_z = try gpa.dupeSentinel(u8, src, 0);
+     errdefer gpa.free(src_z);
+-    var tree = try Ast.parse(gpa, src_z, .zig);
++    var tree = try Ast.parse(gpa, src_z, .{});
+     errdefer tree.deinit(gpa);
+     if (tree.errors.len != 0) return error.InvalidSyntax;
+ 
+diff --git a/src/flow/value_range.zig b/src/flow/value_range.zig
+--- a/src/flow/value_range.zig
++++ b/src/flow/value_range.zig
+@@ -1508,16 +1508,15 @@
+ }
+ 
+ /// Lexical test for a declared pointer type: `*T`, `**T`, `[*]T`, `[*c]T` and
+-/// their `?`-optional forms.  A `*` that starts a pointer always lexes as
+-/// `.asterisk` — inside `[*c]T` and `[*]T` as much as in a bare `*T` — with
+-/// one exception: `**` is the single token `.asterisk_asterisk`.
++/// their `?`-optional forms. Every pointer star lexes as `.asterisk`,
++/// including the two successive stars in `**T`.
+ fn spellingIsPointer(tree: *const Ast, type_node: Ast.Node.Index) bool {
+     const tags = tree.tokens.items(.tag);
+     var token = tree.firstToken(type_node);
+     const last = tree.lastToken(type_node);
+     while (token <= last) : (token += 1) {
+         switch (tags[token]) {
+-            .asterisk, .asterisk_asterisk => return true,
++            .asterisk => return true,
+             else => {},
+         }
+     }
+@@ -1844,7 +1843,7 @@
+         },
+         .@"errdefer" => {
+             dropLoopMutated(o, node, st);
+-            dropIndirectFacts(o, st, tree.nodeData(node).opt_token_and_node[1]);
++            dropIndirectFacts(o, st, tree.nodeData(node).node);
+             return if (o.tokenInNode(node)) .{ .answer = o.answerAt(st) } else .{};
+         },
+         else => return analyzeExpression(o, node, st),
+@@ -1992,7 +1991,7 @@
+     var token = tree.firstToken(type_node);
+     while (token <= last) : (token += 1) {
+         switch (tags[token]) {
+-            .asterisk, .asterisk_asterisk => return false,
++            .asterisk => return false,
+             .l_bracket => {
+                 if (token + 1 > last) return false;
+                 if (tags[token + 1] == .r_bracket) return true; // `[]T`
+@@ -2278,6 +2277,10 @@
+         .{ "@field", {} },
+         .{ "@intFromEnum", {} },
+         .{ "@enumFromInt", {} },
++        .{ "@backingInt", {} },
++        .{ "@fromBackingInt", {} },
++        .{ "@splat", {} },
++        .{ "@divCeil", {} },
+         .{ "@intFromBool", {} },
+         .{ "@intFromPtr", {} },
+         .{ "@ptrFromInt", {} },
+diff --git a/src/flow/value_range_tests.zig b/src/flow/value_range_tests.zig
+--- a/src/flow/value_range_tests.zig
++++ b/src/flow/value_range_tests.zig
+@@ -9,7 +9,7 @@
+ /// there.  Returns the oracle's answer.
+ fn proveAt(src: [:0]const u8, target: []const u8, arr: []const u8) !bool {
+     const gpa = std.testing.allocator;
+-    var tree = try Ast.parse(gpa, src, .zig);
++    var tree = try Ast.parse(gpa, src, .{});
+     defer tree.deinit(gpa);
+     if (tree.errors.len != 0) return error.InvalidSyntax;
+ 
+@@ -59,7 +59,7 @@
+     occurrence: usize,
+ ) !bool {
+     const gpa = std.testing.allocator;
+-    var tree = try Ast.parse(gpa, src, .zig);
++    var tree = try Ast.parse(gpa, src, .{});
+     defer tree.deinit(gpa);
+     if (tree.errors.len != 0) return error.InvalidSyntax;
+     const body = firstFnBody(&tree) orelse return error.NoFnBody;
+@@ -74,7 +74,7 @@
+     occurrence: usize,
+ ) !bool {
+     const gpa = std.testing.allocator;
+-    var tree = try Ast.parse(gpa, src, .zig);
++    var tree = try Ast.parse(gpa, src, .{});
+     defer tree.deinit(gpa);
+     if (tree.errors.len != 0) return error.InvalidSyntax;
+     const body = firstFnBody(&tree) orelse return error.NoFnBody;
+@@ -90,7 +90,7 @@
+     occurrence: usize,
+ ) !bool {
+     const gpa = std.testing.allocator;
+-    var tree = try Ast.parse(gpa, src, .zig);
++    var tree = try Ast.parse(gpa, src, .{});
+     defer tree.deinit(gpa);
+     if (tree.errors.len != 0) return error.InvalidSyntax;
+     const body = firstFnBody(&tree) orelse return error.NoFnBody;
+@@ -118,7 +118,7 @@
+     occurrence: usize,
+ ) !bool {
+     const gpa = std.testing.allocator;
+-    var tree = try Ast.parse(gpa, src, .zig);
++    var tree = try Ast.parse(gpa, src, .{});
+     defer tree.deinit(gpa);
+     if (tree.errors.len != 0) return error.InvalidSyntax;
+     const body = firstFnBody(&tree) orelse return error.NoFnBody;
+@@ -448,7 +448,7 @@
+ /// Query `provesNonempty(container)` at the `[` token after identifier `arr`.
+ fn proveNonemptyAt(src: [:0]const u8, container: []const u8, arr: []const u8) !bool {
+     const gpa = std.testing.allocator;
+-    var tree = try Ast.parse(gpa, src, .zig);
++    var tree = try Ast.parse(gpa, src, .{});
+     defer tree.deinit(gpa);
+     if (tree.errors.len != 0) return error.InvalidSyntax;
+     const body = firstFnBody(&tree) orelse return error.NoFnBody;
+@@ -459,7 +459,7 @@
+ /// Query `provesMinLen(container, n)` at the `[` token after identifier `arr`.
+ fn proveMinLenAt(src: [:0]const u8, container: []const u8, n: u64, arr: []const u8) !bool {
+     const gpa = std.testing.allocator;
+-    var tree = try Ast.parse(gpa, src, .zig);
++    var tree = try Ast.parse(gpa, src, .{});
+     defer tree.deinit(gpa);
+     if (tree.errors.len != 0) return error.InvalidSyntax;
+     const body = firstFnBody(&tree) orelse return error.NoFnBody;
+@@ -1222,9 +1222,8 @@
+ }
+ 
+ test "escape: a pointer-to-pointer local with no target reaches everything" {
+-    // `**[]u8` is one `**` token, not two `*` ones, so a spelling test that
+-    // only looks for `*` misses it and reads `p` as a by-value header.  A
+-    // callee holding `p` can write through `p.*`, so nothing is call-stable.
++    // Both stars in `**[]u8` must preserve pointer classification. A callee
++    // holding `p` can write through `p.*`, so nothing is call-stable.
+     try std.testing.expect(!try proveMinLenAtNth(
+         \\fn f(src: []u8) u8 {
+         \\    const buf: []u8 = src;
+diff --git a/src/flow/worklist.zig b/src/flow/worklist.zig
+--- a/src/flow/worklist.zig
++++ b/src/flow/worklist.zig
+@@ -513,7 +513,7 @@
+ ) !std.ArrayListUnmanaged(Problem) {
+     const src_z = try gpa.dupeSentinel(u8, src, 0);
+     defer gpa.free(src_z);
+-    var tree = try Ast.parse(gpa, src_z, .zig);
++    var tree = try Ast.parse(gpa, src_z, .{});
+     defer tree.deinit(gpa);
+     if (tree.errors.len != 0) return error.InvalidSyntax;
+ 
+@@ -1707,7 +1707,7 @@
+         \\}
+         \\fn maybeSlice(s: []u8) ?[]u8 { return s; }
+         \\pub fn sliced(s: []u8) []const u8 {
+-        \\    var buf: [4]u8 = [_]u8{0} ** 4;
++        \\    var buf: [4]u8 = @splat(0);
+         \\    const v = maybeSlice(s) orelse buf[0..];
+         \\    return v;
+         \\}
+@@ -4063,6 +4063,32 @@
+     try std.testing.expectEqualStrings("use-undefined", problems.items[0].rule_id);
+ }
+ 
++test "address AST: splat retains a local pointer borrow" {
++    try expectFlowRules(
++        \\pub fn bad() [2]*u32 {
++        \\    var x: u32 = 1;
++        \\    return @splat(&x);
++        \\}
++    , &.{"stack-escape"});
++}
++
++test "address AST: nested splat retains a local pointer borrow" {
++    try expectFlowRules(
++        \\pub fn bad() struct { pointers: [2]*u32 } {
++        \\    var x: u32 = 1;
++        \\    return .{ .pointers = @splat(&x) };
++        \\}
++    , &.{"stack-escape"});
++}
++
++test "address AST: splat of a caller pointer adds no stack borrow" {
++    try expectFlowRules(
++        \\pub fn good(x: *u32) [2]*u32 {
++        \\    return @splat(x);
++        \\}
++    , &.{});
++}
++
+ fn expectFlowRules(source: []const u8, expected: []const []const u8) !void {
+     const gpa = std.testing.allocator;
+     var problems = try analyze(gpa, source);
+diff --git a/src/fuzz_check.zig b/src/fuzz_check.zig
+--- a/src/fuzz_check.zig
++++ b/src/fuzz_check.zig
+@@ -85,7 +85,7 @@
+     defer gpa.free(src);
+     @memcpy(src[0..raw.len], raw);
+ 
+-    var tree = try Ast.parse(gpa, src, .zig);
++    var tree = try Ast.parse(gpa, src, .{});
+     defer tree.deinit(gpa);
+     if (tree.errors.len != 0) return error.InvalidSyntax;
+ 
+diff --git a/src/lib.zig b/src/lib.zig
+--- a/src/lib.zig
++++ b/src/lib.zig
+@@ -412,14 +412,14 @@
+     ));
+ }
+ 
+-test "stable array repetition is analyzed without rewriting source" {
++test "stable array splat is analyzed without rewriting source" {
+     var tmp = std.testing.tmpDir(.{});
+     defer tmp.cleanup();
+     const problems = try analyzeSrc(
+         std.testing.allocator,
+         std.testing.io,
+         &tmp,
+-        "pub const values = [_]u8{0} ** 4;",
++        "pub const values: [4]u8 = @splat(0);",
+     );
+     defer freeProblems(std.testing.allocator, problems);
+     try std.testing.expectEqual(@as(usize, 0), problems.len);
+diff --git a/src/main.zig b/src/main.zig
+--- a/src/main.zig
++++ b/src/main.zig
+@@ -88,8 +88,8 @@
+             return 0;
+         }
+         if (std.mem.eql(u8, a, "--list-invariants")) {
+-            inline for (@typeInfo(lib.Invariant).@"enum".fields) |field| {
+-                std.debug.print("{s}\n", .{field.name});
++            inline for (@typeInfo(lib.Invariant).@"enum".field_names) |field_name| {
++                std.debug.print("{s}\n", .{field_name});
+             }
+             return 0;
+         }
+diff --git a/src/model/file_model.zig b/src/model/file_model.zig
+--- a/src/model/file_model.zig
++++ b/src/model/file_model.zig
+@@ -1535,7 +1535,7 @@
+         \\    }
+         \\};
+     ;
+-    var tree = try Ast.parse(testing.allocator, src, .zig);
++    var tree = try Ast.parse(testing.allocator, src, .{});
+     defer tree.deinit(testing.allocator);
+     var model = try build(testing.allocator, &tree);
+     defer model.deinit();
+@@ -1565,7 +1565,7 @@
+         \\    pub fn deinit(self: *Outer) void { _ = self; }
+         \\};
+     ;
+-    var tree = try Ast.parse(testing.allocator, src, .zig);
++    var tree = try Ast.parse(testing.allocator, src, .{});
+     defer tree.deinit(testing.allocator);
+     var model = try build(testing.allocator, &tree);
+     defer model.deinit();
+@@ -1589,7 +1589,7 @@
+         \\    pub fn noRecv() void {}
+         \\};
+     ;
+-    var tree = try Ast.parse(testing.allocator, src, .zig);
++    var tree = try Ast.parse(testing.allocator, src, .{});
+     defer tree.deinit(testing.allocator);
+     var model = try build(testing.allocator, &tree);
+     defer model.deinit();
+@@ -1630,7 +1630,7 @@
+         \\    _ = x;
+         \\}
+     ;
+-    var tree = try Ast.parse(testing.allocator, src, .zig);
++    var tree = try Ast.parse(testing.allocator, src, .{});
+     defer tree.deinit(testing.allocator);
+     var model = try build(testing.allocator, &tree);
+     defer model.deinit();
+@@ -1656,7 +1656,7 @@
+         \\    pub fn kill(self: *U) void { _ = self; }
+         \\};
+     ;
+-    var tree = try Ast.parse(testing.allocator, src, .zig);
++    var tree = try Ast.parse(testing.allocator, src, .{});
+     defer tree.deinit(testing.allocator);
+     var model = try build(testing.allocator, &tree);
+     defer model.deinit();
+@@ -1671,7 +1671,7 @@
+ }
+ 
+ test "build: empty source" {
+-    var tree = try Ast.parse(testing.allocator, "", .zig);
++    var tree = try Ast.parse(testing.allocator, "", .{});
+     defer tree.deinit(testing.allocator);
+     var model = try build(testing.allocator, &tree);
+     defer model.deinit();
+@@ -1690,7 +1690,7 @@
+         \\    };
+         \\};
+     ;
+-    var tree = try Ast.parse(testing.allocator, src, .zig);
++    var tree = try Ast.parse(testing.allocator, src, .{});
+     defer tree.deinit(testing.allocator);
+     var model = try build(testing.allocator, &tree);
+     defer model.deinit();
+@@ -1716,7 +1716,7 @@
+         \\};
+         \\const Inner = struct {};
+     ;
+-    var tree = try Ast.parse(testing.allocator, src, .zig);
++    var tree = try Ast.parse(testing.allocator, src, .{});
+     defer tree.deinit(testing.allocator);
+     var model = try build(testing.allocator, &tree);
+     defer model.deinit();
+@@ -1737,7 +1737,7 @@
+         \\};
+         \\pub fn top_level() void {}
+     ;
+-    var tree = try Ast.parse(testing.allocator, src, .zig);
++    var tree = try Ast.parse(testing.allocator, src, .{});
+     defer tree.deinit(testing.allocator);
+     var model = try build(testing.allocator, &tree);
+     defer model.deinit();
+@@ -1772,7 +1772,7 @@
+         \\};
+         \\const Inner = struct {};
+     ;
+-    var tree = try Ast.parse(testing.allocator, src, .zig);
++    var tree = try Ast.parse(testing.allocator, src, .{});
+     defer tree.deinit(testing.allocator);
+     var model = try build(testing.allocator, &tree);
+     defer model.deinit();
+@@ -1792,7 +1792,7 @@
+         \\    other: u32,
+         \\};
+     ;
+-    var tree = try Ast.parse(testing.allocator, src, .zig);
++    var tree = try Ast.parse(testing.allocator, src, .{});
+     defer tree.deinit(testing.allocator);
+     var model = try build(testing.allocator, &tree);
+     defer model.deinit();
+@@ -1813,7 +1813,7 @@
+         \\    three: u32,
+         \\};
+     ;
+-    var tree = try Ast.parse(testing.allocator, src, .zig);
++    var tree = try Ast.parse(testing.allocator, src, .{});
+     defer tree.deinit(testing.allocator);
+     var model = try build(testing.allocator, &tree);
+     defer model.deinit();
+@@ -1833,7 +1833,7 @@
+         \\    };
+         \\};
+     ;
+-    var tree = try Ast.parse(testing.allocator, src, .zig);
++    var tree = try Ast.parse(testing.allocator, src, .{});
+     defer tree.deinit(testing.allocator);
+     var model = try build(testing.allocator, &tree);
+     defer model.deinit();
+diff --git a/src/model/fn_summary.zig b/src/model/fn_summary.zig
+--- a/src/model/fn_summary.zig
++++ b/src/model/fn_summary.zig
+@@ -912,7 +912,7 @@
+ const testing = std.testing;
+ 
+ fn parse(src: [:0]const u8) !Ast {
+-    var tree = try Ast.parse(testing.allocator, src, .zig);
++    var tree = try Ast.parse(testing.allocator, src, .{});
+     errdefer tree.deinit(testing.allocator);
+     if (tree.errors.len != 0) return error.InvalidSyntax;
+     return tree;
+diff --git a/src/model/local_bindings.zig b/src/model/local_bindings.zig
+--- a/src/model/local_bindings.zig
++++ b/src/model/local_bindings.zig
+@@ -498,7 +498,7 @@
+ /// build a LocalBindings for `f`'s body.  Returns the bindings plus
+ /// the owned tree — caller deinits both (bindings first).
+ fn parseFn(src: [:0]const u8) !struct { tree: Ast, bindings: LocalBindings } {
+-    var tree = try Ast.parse(testing.allocator, src, .zig);
++    var tree = try Ast.parse(testing.allocator, src, .{});
+     errdefer tree.deinit(testing.allocator);
+     if (tree.errors.len != 0) return error.InvalidSyntax;
+     var idx: u32 = 1;
+diff --git a/src/model/model_query.zig b/src/model/model_query.zig
+--- a/src/model/model_query.zig
++++ b/src/model/model_query.zig
+@@ -241,7 +241,7 @@
+         \\const B = union { x: u32 };
+         \\const C = enum { a, b };
+     ;
+-    var tree = try Ast.parse(testing.allocator, src, .zig);
++    var tree = try Ast.parse(testing.allocator, src, .{});
+     defer tree.deinit(testing.allocator);
+     var model = try file_model.build(testing.allocator, &tree);
+     defer model.deinit();
+@@ -266,7 +266,7 @@
+         \\    x: u32 = 0,
+         \\};
+     ;
+-    var tree = try Ast.parse(testing.allocator, src, .zig);
++    var tree = try Ast.parse(testing.allocator, src, .{});
+     defer tree.deinit(testing.allocator);
+     var model = try file_model.build(testing.allocator, &tree);
+     defer model.deinit();
+@@ -297,7 +297,7 @@
+         \\};
+         \\const Inner = struct {};
+     ;
+-    var tree = try Ast.parse(testing.allocator, src, .zig);
++    var tree = try Ast.parse(testing.allocator, src, .{});
+     defer tree.deinit(testing.allocator);
+     var model = try file_model.build(testing.allocator, &tree);
+     defer model.deinit();
+@@ -322,7 +322,7 @@
+         \\    c: Inner,
+         \\};
+     ;
+-    var tree = try Ast.parse(testing.allocator, src, .zig);
++    var tree = try Ast.parse(testing.allocator, src, .{});
+     defer tree.deinit(testing.allocator);
+     var model = try file_model.build(testing.allocator, &tree);
+     defer model.deinit();
+@@ -346,7 +346,7 @@
+         \\    pub fn ordinary(self: *T) void { _ = self; }
+         \\};
+     ;
+-    var tree = try Ast.parse(testing.allocator, src, .zig);
++    var tree = try Ast.parse(testing.allocator, src, .{});
+     defer tree.deinit(testing.allocator);
+     var model = try file_model.build(testing.allocator, &tree);
+     defer model.deinit();
+@@ -369,7 +369,7 @@
+         \\    pub fn deinit(self: *Inner) void { _ = self; }
+         \\};
+     ;
+-    var tree = try Ast.parse(testing.allocator, src, .zig);
++    var tree = try Ast.parse(testing.allocator, src, .{});
+     defer tree.deinit(testing.allocator);
+     var model = try file_model.build(testing.allocator, &tree);
+     defer model.deinit();
+@@ -413,7 +413,7 @@
+         \\    child: ?Namespace.Tree.Child,
+         \\};
+     ;
+-    var tree = try Ast.parse(testing.allocator, source, .zig);
++    var tree = try Ast.parse(testing.allocator, source, .{});
+     defer tree.deinit(testing.allocator);
+     var model = try file_model.build(testing.allocator, &tree);
+     defer model.deinit();
+diff --git a/src/problem.zig b/src/problem.zig
+--- a/src/problem.zig
++++ b/src/problem.zig
+@@ -109,7 +109,7 @@
+ test "diagnostic token ends exclude inter-token whitespace and comments" {
+     const allocator = std.testing.allocator;
+     const source = "const alpha = 1 /* gap */ ;";
+-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
++    var tree = try std.zig.Ast.parse(allocator, source, .{});
+     defer tree.deinit(allocator);
+ 
+     const end = Pos.fromTokenEnd(&tree, 3);
+diff --git a/src/testing.zig b/src/testing.zig
+--- a/src/testing.zig
++++ b/src/testing.zig
+@@ -56,7 +56,7 @@
+ ) !std.ArrayListUnmanaged(Problem) {
+     const src_z = try dupeSource(gpa, src);
+     defer gpa.free(src_z);
+-    var tree = try Ast.parse(gpa, src_z, .zig);
++    var tree = try Ast.parse(gpa, src_z, .{});
+     defer tree.deinit(gpa);
+     if (tree.errors.len != 0) return error.InvalidSyntax;
+     var cache = try FileCache.init(gpa, &tree);
+@@ -77,7 +77,7 @@
+ ) !std.ArrayListUnmanaged(Problem) {
+     const src_z = try dupeSource(gpa, src);
+     defer gpa.free(src_z);
+-    var tree = try Ast.parse(gpa, src_z, .zig);
++    var tree = try Ast.parse(gpa, src_z, .{});
+     defer tree.deinit(gpa);
+     if (tree.errors.len != 0) return error.InvalidSyntax;
+     var cache = try FileCache.init(gpa, &tree);
+diff --git a/src/type_engine/analysis.zig b/src/type_engine/analysis.zig
+--- a/src/type_engine/analysis.zig
++++ b/src/type_engine/analysis.zig
+@@ -1514,7 +1514,7 @@
+     if (primitives.get(identifier_name)) |primitive| return primitive;
+ 
+     if (identifier_name.len < 2) return null;
+-    const signedness: std.builtin.Signedness = switch (identifier_name[0]) {
++    const signedness: std.lang.Signedness = switch (identifier_name[0]) {
+         'i' => .signed,
+         'u' => .unsigned,
+         else => return null,
+@@ -2954,26 +2954,6 @@
+             return lhs_ty.withoutIPIndex(analyser);
+         },
+ 
+-        .array_mult => {
+-            const lhs, const rhs = tree.nodeData(node).node_and_node;
+-            var array = try analyser.resolveTypeOfNodeInternal(.of(lhs, handle)) orelse return null;
+-            if (array.is_type_val) return null;
+-            const pointer = array.pointerElementType(analyser, .one);
+-            if (pointer) |pointee| array = try pointee.instanceUnchecked(analyser);
+-            const count, const sentinel, const elem_ty = array.arrayInfo(analyser) orelse return null;
+-            const repeat = try analyser.resolveIntegerLiteral(u64, .of(rhs, handle));
+-            const length: ?u64 = if (count != null and repeat != null)
+-                std.math.mul(u64, count.?, repeat.?) catch null
+-            else
+-                null;
+-            const array_ty = try Type.createArrayType(analyser, length, sentinel, elem_ty);
+-            if (pointer != null) {
+-                const pointer_ty = try Type.createPointerType(analyser, .one, .none, true, array_ty);
+-                return try pointer_ty.instanceUnchecked(analyser);
+-            }
+-            return try array_ty.instanceUnchecked(analyser);
+-        },
+-
+         .array_cat => {
+             const l_elem_idx, const r_elem_idx = tree.nodeData(node).node_and_node;
+ 
+@@ -3191,7 +3171,7 @@
+         /// - `[]const T`
+         /// - `[*c]T`
+         pointer: struct {
+-            size: std.builtin.Type.Pointer.Size,
++            size: std.lang.Type.Pointer.Size,
+             /// `.none` means no sentinel, `.unknown_unknown` means unknown sentinel
+             sentinel: InternPool.Index,
+             is_const: bool,
+@@ -3298,7 +3278,7 @@
+ 
+         fn createPointer(
+             analyser: *Analyser,
+-            size: std.builtin.Type.Pointer.Size,
++            size: std.lang.Type.Pointer.Size,
+             sentinel: InternPool.Index,
+             is_const: bool,
+             elem_ty: Type,
+@@ -3777,7 +3757,7 @@
+ 
+     fn createPointerType(
+         analyser: *Analyser,
+-        size: std.builtin.Type.Pointer.Size,
++        size: std.lang.Type.Pointer.Size,
+         sentinel: InternPool.Index,
+         is_const: bool,
+         elem_ty: Type,
+@@ -4406,7 +4386,7 @@
+         };
+     }
+ 
+-    fn pointerSize(self: Type, analyser: *Analyser) ?std.builtin.Type.Pointer.Size {
++    fn pointerSize(self: Type, analyser: *Analyser) ?std.lang.Type.Pointer.Size {
+         if (self.is_type_val) return null;
+         return switch (self.data) {
+             .pointer => |info| info.size,
+@@ -4421,7 +4401,7 @@
+     fn pointerElementType(
+         self: Type,
+         analyser: *Analyser,
+-        size: std.builtin.Type.Pointer.Size,
++        size: std.lang.Type.Pointer.Size,
+     ) ?Type {
+         if (self.is_type_val) return null;
+         return switch (self.data) {
+@@ -4936,7 +4916,7 @@
+ /// Useful for functionality related to builtin fns
+ pub fn instanceStdBuiltinType(analyser: *Analyser, type_name: []const u8) Error!?Type {
+     const zig_lib_dir = analyser.store.config.zig_lib_dir orelse return null;
+-    const builtin_path = try zig_lib_dir.join(analyser.arena, &.{ "std", "builtin.zig" });
++    const builtin_path = try zig_lib_dir.join(analyser.arena, &.{ "std", "lang.zig" });
+     const builtin_uri: Uri = try .fromPath(analyser.arena, builtin_path);
+ 
+     const builtin_handle = try analyser.store.getOrLoadHandle(builtin_uri) orelse return null;
+diff --git a/src/type_engine/ast.zig b/src/type_engine/ast.zig
+--- a/src/type_engine/ast.zig
++++ b/src/type_engine/ast.zig
+@@ -9,8 +9,8 @@
+ const full = Ast.full;
+ 
+ fn fullPtrTypeComponents(tree: *const Ast, info: full.PtrType.Components) full.PtrType {
+-    const size: std.builtin.Type.Pointer.Size = switch (tree.tokenTag(info.main_token)) {
+-        .asterisk, .asterisk_asterisk => .one,
++    const size: std.lang.Type.Pointer.Size = switch (tree.tokenTag(info.main_token)) {
++        .asterisk => .one,
+         .l_bracket => switch (tree.tokenTag(info.main_token + 1)) {
+             .asterisk => if (tree.tokenTag(info.main_token + 2) == .identifier) .c else .many,
+             else => .slice,
+@@ -22,6 +22,7 @@
+         .allowzero_token = null,
+         .const_token = null,
+         .volatile_token = null,
++        .duplicate_token = null,
+         .ast = info,
+     };
+     // We need to be careful that we don't iterate over any sub-expressions
+@@ -35,9 +36,18 @@
+     const end = tree.firstToken(info.child_type);
+     while (i < end) : (i += 1) {
+         switch (tree.tokenTag(i)) {
+-            .keyword_allowzero => result.allowzero_token = i,
+-            .keyword_const => result.const_token = i,
+-            .keyword_volatile => result.volatile_token = i,
++            .keyword_allowzero => {
++                if (result.allowzero_token != null) result.duplicate_token = i;
++                result.allowzero_token = i;
++            },
++            .keyword_const => {
++                if (result.const_token != null) result.duplicate_token = i;
++                result.const_token = i;
++            },
++            .keyword_volatile => {
++                if (result.volatile_token != null) result.duplicate_token = i;
++                result.volatile_token = i;
++            },
+             .keyword_align => {
+                 const align_node = info.align_node.unwrap().?;
+                 if (info.bit_range_end.unwrap()) |bit_range_end| {
+@@ -466,7 +476,6 @@
+         .add,
+         .sub,
+         .array_cat,
+-        .array_mult,
+         .add_wrap,
+         .sub_wrap,
+         .add_sat,
+@@ -490,8 +499,7 @@
+         => n = tree.nodeData(n).node_and_node[1],
+ 
+         .test_decl => n = tree.nodeData(n).opt_token_and_node[1],
+-        .@"errdefer" => n = tree.nodeData(n).opt_token_and_node[1],
+-        .@"defer" => n = tree.nodeData(n).node,
++        .@"errdefer", .@"defer" => n = tree.nodeData(n).node,
+         .anyframe_type => n = tree.nodeData(n).token_and_node[1],
+ 
+         .switch_case_one,
+@@ -1088,9 +1096,9 @@
+             .@"comptime",
+             .@"nosuspend",
+             .@"defer",
++            .@"errdefer",
+             => return .initArray(.{tree.nodeData(node).node}),
+             .@"return" => return .initArray(.{tree.nodeData(node).opt_node}),
+-            .@"errdefer" => return .initArray(.{tree.nodeData(node).opt_token_and_node[1]}),
+ 
+             .@"catch",
+             .equal_equal,
+@@ -1126,7 +1134,6 @@
+             .add,
+             .sub,
+             .array_cat,
+-            .array_mult,
+             .add_wrap,
+             .sub_wrap,
+             .add_sat,
+diff --git a/src/type_engine/document_scope.zig b/src/type_engine/document_scope.zig
+--- a/src/type_engine/document_scope.zig
++++ b/src/type_engine/document_scope.zig
+@@ -78,7 +78,6 @@
+     /// - `if (condition) |_| {} else |identifier| {}`
+     /// - `while (condition) |_| {} else |identifier| {}`
+     /// - `condition catch |identifier| {}`
+-    /// - `errdefer |identifier| {}` (condition is `.none`)
+     error_union_error: struct {
+         identifier: Ast.TokenIndex,
+         condition: Ast.Node.OptionalIndex,
+@@ -98,8 +97,8 @@
+     error_token: Ast.TokenIndex,
+ 
+     comptime {
+-        for (@typeInfo(Declaration).@"union".fields) |field| {
+-            std.debug.assert(@sizeOf(field.type) <= 8);
++        for (@typeInfo(Declaration).@"union".field_types) |FieldType| {
++            std.debug.assert(@sizeOf(FieldType) <= 8);
+         }
+     }
+ 
+@@ -340,7 +339,7 @@
+             if (std.mem.eql(u8, name, "_")) return;
+             defer std.debug.assert(pushed.context.doc_scope.declarations.len == pushed.context.doc_scope.declaration_lookup_map.count());
+ 
+-            if (@import("builtin").mode == .Debug) {
++            if (@import("builtin").optimize == .debug) {
+                 // Check that nameToken works
+                 std.debug.assert(identifier_token == declaration.nameToken(pushed.context.tree));
+             }
+@@ -621,7 +620,7 @@
+         .switch_comma,
+         => walkSwitchNode(context, tree, node_idx),
+ 
+-        .@"errdefer" => walkNode(context, tree, tree.nodeData(node_idx).opt_token_and_node[1]),
++        .@"errdefer",
+         .@"defer",
+         .bool_not,
+         .negation,
+@@ -670,7 +669,6 @@
+         .add,
+         .sub,
+         .array_cat,
+-        .array_mult,
+         .add_wrap,
+         .sub_wrap,
+         .add_sat,
+diff --git a/src/type_engine/document_store.zig b/src/type_engine/document_store.zig
+--- a/src/type_engine/document_store.zig
++++ b/src/type_engine/document_store.zig
+@@ -215,7 +215,7 @@
+                 /// to avoid checking build files multiple times, a bitset stores whether or
+                 /// not the build file should be skipped because it has previously been
+                 /// found to be "unassociated" with the handle.
+-                has_been_checked: std.DynamicBitSetUnmanaged,
++                has_been_checked: std.bit_set.Dynamic,
+             },
+             /// The Handle has no associated build file (build.zig).
+             none,
+@@ -258,7 +258,7 @@
+                     return .none;
+                 }
+ 
+-                var has_been_checked: std.DynamicBitSetUnmanaged = try .initEmpty(document_store.allocator, potential_build_files.len);
++                var has_been_checked: std.bit_set.Dynamic = try .initEmpty(document_store.allocator, potential_build_files.len);
+                 errdefer has_been_checked.deinit(document_store.allocator);
+ 
+                 self.impl.associated_build_file = .{ .unresolved = .{
+@@ -356,7 +356,7 @@
+ 
+         const modules = &build_config.modules.map;
+ 
+-        var visted: std.DynamicBitSetUnmanaged = try .initEmpty(allocator, modules.count());
++        var visted: std.bit_set.Dynamic = try .initEmpty(allocator, modules.count());
+         defer visted.deinit(allocator);
+ 
+         var queue: std.ArrayList(usize) = try .initCapacity(allocator, 1);
+@@ -475,7 +475,7 @@
+ 
+         try requireAddressableSource(new_text);
+ 
+-        var tree = try Ast.parse(allocator, new_text, mode);
++        var tree = try Ast.parse(allocator, new_text, .{ .mode = mode });
+         errdefer tree.deinit(allocator);
+ 
+         // remove unused capacity
+@@ -1203,7 +1203,7 @@
+             error.Canceled => return error.Canceled,
+             else => return,
+         };
+-        var tree = Ast.parse(gpa, source, .zig) catch |err| switch (err) {
++        var tree = Ast.parse(gpa, source, .{}) catch |err| switch (err) {
+             error.OutOfMemory => return error.OutOfMemory,
+             else => return,
+         };
+diff --git a/src/type_engine/engine.zig b/src/type_engine/engine.zig
+--- a/src/type_engine/engine.zig
++++ b/src/type_engine/engine.zig
+@@ -54,14 +54,15 @@
+     defer arena.deinit();
+     const temporary = arena.allocator();
+     const source = std.mem.trim(u8, output, &std.ascii.whitespace);
++    var diagnostics: std.zon.parse.Diagnostics = undefined;
+     const environment = if (std.mem.startsWith(u8, source, ".{"))
+-        try std.zon.parse.fromSliceAlloc(
+-            Environment,
+-            temporary,
+-            try temporary.dupeSentinel(u8, source, 0),
+-            null,
+-            .{ .ignore_unknown_fields = true },
+-        )
++        try std.zon.parse.fromSlice(Environment, .{
++            .gpa = gpa,
++            .arena = temporary,
++            .source = try temporary.dupeSentinel(u8, source, 0),
++            .diagnostics = &diagnostics,
++            .ignore_unknown_fields = true,
++        })
+     else
+         try std.json.parseFromSliceLeaky(Environment, temporary, source, .{ .ignore_unknown_fields = true });
+     if (environment.zig_exe.len == 0 or environment.lib_dir.len == 0) return error.NotFound;
+@@ -298,7 +299,7 @@
+         return self.ctx.ip.floatBits(field_type.ipIndex() orelse return null, builtin.target);
+     }
+ 
+-    fn typeTag(self: *TypeResolver, ty: Analyser.Type) ?std.builtin.TypeId {
++    fn typeTag(self: *TypeResolver, ty: Analyser.Type) ?std.lang.TypeId {
+         std.debug.assert(ty.is_type_val);
+         return switch (ty.data) {
+             .ip_index => self.ctx.ip.zigTypeTag(ty.ipIndex() orelse return null),
+@@ -344,7 +345,7 @@
+         };
+     }
+ 
+-    fn pointerSize(self: *TypeResolver, ty: Analyser.Type) ?std.builtin.Type.Pointer.Size {
++    fn pointerSize(self: *TypeResolver, ty: Analyser.Type) ?std.lang.Type.Pointer.Size {
+         std.debug.assert(ty.is_type_val);
+         return switch (ty.data) {
+             .pointer => |info| info.size,
+@@ -692,14 +693,14 @@
+     try std.testing.expectEqual(@as(?bool, false), @as(?bool, try resolver.isOptionalType(try testIdentifier(tree, "integer"))));
+ }
+ 
+-test "array repetition retains its compiler-derived element count" {
++test "array concatenation retains its compiler-derived element count" {
+     const gpa = std.testing.allocator;
+     var context: TypeContext = undefined;
+     try context.init(gpa, std.testing.io);
+     defer context.deinit();
+     var resolver: TypeResolver = undefined;
+     try resolver.init(&context, gpa, "/tmp/zbc-repetition-type.zig",
+-        \\const repeated = [_]u8{ 1, 2 } ** 3;
++        \\const repeated = [_]u8{ 1, 2 } ++ [_]u8{ 1, 2 } ++ [_]u8{ 1, 2 };
+         \\fn observe() void { _ = repeated; }
+     );
+     defer resolver.deinit();
+@@ -712,7 +713,7 @@
+     try context.init(gpa, std.testing.io);
+     defer context.deinit();
+     const source = try std.fmt.allocPrintSentinel(gpa, "const Tag = enum {{ a }}; const Deep = {s}Tag;\n" ++
+-        "fn observe(deep: Deep, unknown: anytype, pptr: **[7]u8) void {{ _ = deep; _ = unknown; _ = pptr; }}", .{"?" ** 40}, 0);
++        "fn observe(deep: Deep, unknown: anytype, pptr: **[7]u8) void {{ _ = deep; _ = unknown; _ = pptr; }}", .{@as([40]u8, @splat('?'))}, 0);
+     defer gpa.free(source);
+     var resolver: TypeResolver = undefined;
+     try resolver.init(&context, gpa, "virtual-type-boundary.zig", source);
+diff --git a/src/type_engine/error_msg.zig b/src/type_engine/error_msg.zig
+--- a/src/type_engine/error_msg.zig
++++ b/src/type_engine/error_msg.zig
+@@ -13,7 +13,7 @@
+     /// zig: expected error set type, found '{}'
+     /// zig: expected pointer, found '{}'
+     expected_tag_type: struct {
+-        expected_tag: std.builtin.TypeId,
++        expected_tag: std.lang.TypeId,
+         actual: Index,
+     },
+     /// zig: comparison of '{}' with null
+diff --git a/src/type_engine/intern_pool.zig b/src/type_engine/intern_pool.zig
+--- a/src/type_engine/intern_pool.zig
++++ b/src/type_engine/intern_pool.zig
+@@ -34,7 +34,7 @@
+     simple_type: SimpleType,
+     simple_value: SimpleValue,
+ 
+-    int_type: std.builtin.Type.Int,
++    int_type: std.lang.Type.Int,
+     pointer_type: Pointer,
+     array_type: Array,
+     struct_type: Struct.Index,
+@@ -75,11 +75,11 @@
+         packed_offset: PackedOffset = .{ .bit_offset = 0, .host_size = 0 },
+ 
+         pub const Flags = packed struct(u32) {
+-            size: std.builtin.Type.Pointer.Size,
++            size: std.lang.Type.Pointer.Size,
+             is_const: bool = false,
+             is_volatile: bool = false,
+             is_allowzero: bool = false,
+-            address_space: std.builtin.AddressSpace = .generic,
++            address_space: std.lang.AddressSpace = .generic,
+             _: u6 = 0,
+             alignment: u16 = 0,
+         };
+@@ -115,16 +115,16 @@
+     pub const Function = struct {
+         args: Index.Slice,
+         /// zig only lets the first 32 arguments be `comptime`
+-        args_is_comptime: std.StaticBitSet(32) = .empty,
++        args_is_comptime: std.bit_set.Static(32) = .empty,
+         /// zig only lets the first 32 arguments be generic
+-        args_is_generic: std.StaticBitSet(32) = .empty,
++        args_is_generic: std.bit_set.Static(32) = .empty,
+         /// zig only lets the first 32 arguments be `noalias`
+-        args_is_noalias: std.StaticBitSet(32) = .empty,
++        args_is_noalias: std.bit_set.Static(32) = .empty,
+         return_type: Index,
+         flags: Flags = .{},
+ 
+         pub const Flags = packed struct(u32) {
+-            calling_convention: std.builtin.CallingConvention.Tag = .auto,
++            calling_convention: std.lang.CallingConvention.Tag = .auto,
+             is_generic: bool = false,
+             is_var_args: bool = false,
+             _: u6 = 0,
+@@ -952,7 +952,7 @@
+     /// this stores both the type and the value
+     index: InternPool.Index,
+     alignment: u16,
+-    address_space: std.builtin.AddressSpace,
++    address_space: std.lang.AddressSpace,
+     src_namespace: InternPool.NamespaceIndex,
+     is_pub: bool,
+     is_exported: bool,
+@@ -993,7 +993,7 @@
+     fields: std.array_hash_map.Auto(String, Field),
+     owner_decl: Decl.OptionalIndex,
+     namespace: NamespaceIndex,
+-    layout: std.builtin.Type.ContainerLayout = .auto,
++    layout: std.lang.Type.ContainerLayout = .auto,
+     backing_int_ty: InternPool.Index,
+     status: FieldStatus,
+ 
+@@ -1021,7 +1021,7 @@
+     tag_type: InternPool.Index,
+     fields: std.array_hash_map.Auto(String, Field),
+     namespace: NamespaceIndex,
+-    layout: std.builtin.Type.ContainerLayout = .auto,
++    layout: std.lang.Type.ContainerLayout = .auto,
+     status: FieldStatus,
+ 
+     pub const Field = struct {
+@@ -1111,7 +1111,7 @@
+         .{ .index = .fn_noreturn_no_args_type, .key = .{ .function_type = .{ .args = Index.Slice.empty, .return_type = .noreturn_type } } },
+         .{ .index = .fn_void_no_args_type, .key = .{ .function_type = .{ .args = Index.Slice.empty, .return_type = .void_type } } },
+         .{ .index = .fn_naked_noreturn_no_args_type, .key = .{ .function_type = .{ .args = Index.Slice.empty, .return_type = .void_type, .flags = .{ .calling_convention = .naked } } } },
+-        .{ .index = .fn_ccc_void_no_args_type, .key = .{ .function_type = .{ .args = Index.Slice.empty, .return_type = .void_type, .flags = .{ .calling_convention = std.builtin.CallingConvention.c } } } },
++        .{ .index = .fn_ccc_void_no_args_type, .key = .{ .function_type = .{ .args = Index.Slice.empty, .return_type = .void_type, .flags = .{ .calling_convention = std.lang.CallingConvention.c } } } },
+         .{ .index = .single_const_pointer_to_comptime_int_type, .key = .{ .pointer_type = .{ .elem_type = .comptime_int_type, .flags = .{ .size = .one, .is_const = true } } } },
+         .{ .index = .slice_const_u8_type, .key = .{ .pointer_type = .{ .elem_type = .u8_type, .flags = .{ .size = .slice, .is_const = true } } } },
+         .{ .index = .slice_const_u8_sentinel_0_type, .key = .{ .pointer_type = .{ .elem_type = .u8_type, .sentinel = .zero_u8, .flags = .{ .size = .slice, .is_const = true } } } },
+@@ -1144,7 +1144,7 @@
+ 
+     try ip.map.ensureTotalCapacity(gpa, items.len);
+     try ip.items.ensureTotalCapacity(gpa, items.len);
+-    if (builtin.is_test or builtin.mode == .Debug) {
++    if (builtin.is_test or builtin.optimize == .debug) {
+         // detect wrong value for extra_count
+         try ip.extra.ensureTotalCapacityPrecise(gpa, extra_count);
+     } else {
+@@ -1570,20 +1570,21 @@
+     const size = @divExact(@sizeOf(T), 4);
+ 
+     const range = try reserveRange(&ip.extra, ip.gpa, size);
+-    inline for (@typeInfo(T).@"struct".fields) |field| {
+-        const item = @field(extra, field.name);
+-        switch (field.type) {
++    const info = @typeInfo(T).@"struct";
++    inline for (info.field_names, info.field_types) |field_name, FieldType| {
++        const item = @field(extra, field_name);
++        switch (FieldType) {
+             Index,
+             Decl.Index,
+             Decl.OptionalIndex,
+             StringPool.String,
+             StringPool.OptionalString,
+-            std.builtin.Type.Pointer.Size,
++            std.lang.Type.Pointer.Size,
+             => ip.extra.appendAssumeCapacity(@intFromEnum(item)),
+ 
+             u32,
+             i32,
+-            std.StaticBitSet(32),
++            std.bit_set.Static(32),
+             Key.Pointer.Flags,
+             Key.Pointer.PackedOffset,
+             Key.Function.Flags,
+@@ -1598,7 +1599,7 @@
+             LimbSlice,
+             => ip.extra.appendSliceAssumeCapacity(&.{ item.start, item.len }),
+ 
+-            else => @compileError("unexpected: " ++ @typeName(field.type)),
++            else => @compileError("unexpected: " ++ @typeName(FieldType)),
+         }
+     }
+     return range.start;
+@@ -1607,23 +1608,24 @@
+ fn extraData(ip: *const InternPool, comptime T: type, index: u32) T {
+     var result: T = undefined;
+     var i: u32 = 0;
+-    inline for (@typeInfo(T).@"struct".fields) |field| {
++    const info = @typeInfo(T).@"struct";
++    inline for (info.field_names, info.field_types) |field_name, FieldType| {
+         const item = ip.extra.items[index + i];
+         i += 1;
+-        @field(result, field.name) = switch (field.type) {
++        @field(result, field_name) = switch (FieldType) {
+             Index,
+             StringPool.String,
+             StringPool.OptionalString,
+             Decl.Index,
+             Decl.OptionalIndex,
+-            std.builtin.Type.Pointer.Size,
+-            // std.builtin.AddressSpace,
+-            // std.builtin.CallingConvention,
++            std.lang.Type.Pointer.Size,
++            // std.lang.AddressSpace,
++            // std.lang.CallingConvention,
+             => @enumFromInt(item),
+ 
+             u32,
+             i32,
+-            std.StaticBitSet(32),
++            std.bit_set.Static(32),
+             Key.Pointer.Flags,
+             Key.Pointer.PackedOffset,
+             Key.Function.Flags,
+@@ -1644,7 +1646,7 @@
+                 break :blk .{ .start = item, .len = ip.extra.items[index + i] };
+             },
+ 
+-            else => @compileError("unexpected: " ++ @typeName(field.type)),
++            else => @compileError("unexpected: " ++ @typeName(FieldType)),
+         };
+     }
+     return result;
+@@ -1920,7 +1922,7 @@
+ }
+ 
+ pub fn resolvePeerTypes(ip: *InternPool, types: []const Index, target: std.Target) Allocator.Error!Index {
+-    if (builtin.mode == .Debug) {
++    if (builtin.optimize == .debug) {
+         for (types) |ty| {
+             assert(ip.isType(ty));
+         }
+@@ -2480,8 +2482,8 @@
+     };
+ 
+     const IntMismatch = struct {
+-        actual_signedness: std.builtin.Signedness,
+-        wanted_signedness: std.builtin.Signedness,
++        actual_signedness: std.lang.Signedness,
++        wanted_signedness: std.lang.Signedness,
+         actual_bits: u16,
+         wanted_bits: u16,
+     };
+@@ -2492,8 +2494,8 @@
+     };
+ 
+     const Size = struct {
+-        actual: std.builtin.Type.Pointer.Size,
+-        wanted: std.builtin.Type.Pointer.Size,
++        actual: std.lang.Type.Pointer.Size,
++        wanted: std.lang.Type.Pointer.Size,
+     };
+ 
+     const Qualifiers = struct {
+@@ -2504,13 +2506,13 @@
+     };
+ 
+     const AddressSpace = struct {
+-        actual: std.builtin.AddressSpace,
+-        wanted: std.builtin.AddressSpace,
++        actual: std.lang.AddressSpace,
++        wanted: std.lang.AddressSpace,
+     };
+ 
+     const CC = struct {
+-        actual: std.builtin.CallingConvention.Tag,
+-        wanted: std.builtin.CallingConvention.Tag,
++        actual: std.lang.CallingConvention.Tag,
++        wanted: std.lang.CallingConvention.Tag,
+     };
+ 
+     const BitRange = struct {
+@@ -2985,7 +2987,7 @@
+ //               HELPER FUNCTIONS
+ // ---------------------------------------------
+ 
+-pub fn zigTypeTag(ip: *InternPool, index: Index) ?std.builtin.TypeId {
++pub fn zigTypeTag(ip: *InternPool, index: Index) ?std.lang.TypeId {
+     ip.lock.lockSharedUncancelable(ip.io);
+     defer ip.lock.unlockShared(ip.io);
+     return switch (ip.items.items(.tag)[@intFromEnum(index)]) {
+@@ -3332,7 +3334,7 @@
+ }
+ 
+ /// Asserts the type is an integer, enum, error set, packed struct, or vector of one of them.
+-pub fn intInfo(ip: *InternPool, ty: Index, target: std.Target) std.builtin.Type.Int {
++pub fn intInfo(ip: *InternPool, ty: Index, target: std.Target) std.lang.Type.Int {
+     var index = ty;
+     while (true) switch (index) {
+         .u1_type => return .{ .signedness = .unsigned, .bits = 1 },
+@@ -3351,16 +3353,16 @@
+         .usize_type => return .{ .signedness = .unsigned, .bits = target.ptrBitWidth() },
+         .isize_type => return .{ .signedness = .signed, .bits = target.ptrBitWidth() },
+ 
+-        .c_char_type => return .{ .signedness = .signed, .bits = target.cTypeBitSize(.char) },
+-        .c_short_type => return .{ .signedness = .signed, .bits = target.cTypeBitSize(.short) },
+-        .c_ushort_type => return .{ .signedness = .unsigned, .bits = target.cTypeBitSize(.ushort) },
+-        .c_int_type => return .{ .signedness = .signed, .bits = target.cTypeBitSize(.int) },
+-        .c_uint_type => return .{ .signedness = .unsigned, .bits = target.cTypeBitSize(.uint) },
+-        .c_long_type => return .{ .signedness = .signed, .bits = target.cTypeBitSize(.long) },
+-        .c_ulong_type => return .{ .signedness = .unsigned, .bits = target.cTypeBitSize(.ulong) },
+-        .c_longlong_type => return .{ .signedness = .signed, .bits = target.cTypeBitSize(.longlong) },
+-        .c_ulonglong_type => return .{ .signedness = .unsigned, .bits = target.cTypeBitSize(.ulonglong) },
+-        .c_longdouble_type => return .{ .signedness = .signed, .bits = target.cTypeBitSize(.longdouble) },
++        .c_char_type => return .{ .signedness = .signed, .bits = target.cTypeBitSize(.char).? },
++        .c_short_type => return .{ .signedness = .signed, .bits = target.cTypeBitSize(.short).? },
++        .c_ushort_type => return .{ .signedness = .unsigned, .bits = target.cTypeBitSize(.ushort).? },
++        .c_int_type => return .{ .signedness = .signed, .bits = target.cTypeBitSize(.int).? },
++        .c_uint_type => return .{ .signedness = .unsigned, .bits = target.cTypeBitSize(.uint).? },
++        .c_long_type => return .{ .signedness = .signed, .bits = target.cTypeBitSize(.long).? },
++        .c_ulong_type => return .{ .signedness = .unsigned, .bits = target.cTypeBitSize(.ulong).? },
++        .c_longlong_type => return .{ .signedness = .signed, .bits = target.cTypeBitSize(.longlong).? },
++        .c_ulonglong_type => return .{ .signedness = .unsigned, .bits = target.cTypeBitSize(.ulonglong).? },
++        .c_longdouble_type => return .{ .signedness = .signed, .bits = target.cTypeBitSize(.longdouble).? },
+ 
+         // TODO revisit this when error sets support custom int types (comment taken from zig codebase)
+         .anyerror_type => return .{ .signedness = .unsigned, .bits = 16 },
+@@ -3420,7 +3422,7 @@
+         .f64_type => 64,
+         .f80_type => 80,
+         .f128_type, .comptime_float_type => 128,
+-        .c_longdouble_type => target.cTypeBitSize(.longdouble),
++        .c_longdouble_type => target.cTypeBitSize(.longdouble).?,
+ 
+         else => unreachable,
+     };
+@@ -3970,17 +3972,17 @@
+             .empty_struct_type => try writer.writeAll("@TypeOf(.{})"),
+             .enum_literal_type => try writer.writeAll("@EnumLiteral()"),
+ 
+-            .atomic_order => try writer.writeAll("std.builtin.AtomicOrder"),
+-            .atomic_rmw_op => try writer.writeAll("std.builtin.AtomicRmwOp"),
+-            .calling_convention => try writer.writeAll("std.builtin.CallingConvention"),
+-            .address_space => try writer.writeAll("std.builtin.AddressSpace"),
+-            .float_mode => try writer.writeAll("std.builtin.FloatMode"),
+-            .reduce_op => try writer.writeAll("std.builtin.ReduceOp"),
+-            .modifier => try writer.writeAll("std.builtin.CallModifier"),
+-            .prefetch_options => try writer.writeAll("std.builtin.PrefetchOptions"),
+-            .export_options => try writer.writeAll("std.builtin.ExportOptions"),
+-            .extern_options => try writer.writeAll("std.builtin.ExternOptions"),
+-            .type_info => try writer.writeAll("std.builtin.Type"),
++            .atomic_order => try writer.writeAll("std.lang.AtomicOrder"),
++            .atomic_rmw_op => try writer.writeAll("std.lang.AtomicRmwOp"),
++            .calling_convention => try writer.writeAll("std.lang.CallingConvention"),
++            .address_space => try writer.writeAll("std.lang.AddressSpace"),
++            .float_mode => try writer.writeAll("std.lang.FloatMode"),
++            .reduce_op => try writer.writeAll("std.lang.ReduceOp"),
++            .modifier => try writer.writeAll("std.lang.CallModifier"),
++            .prefetch_options => try writer.writeAll("std.lang.PrefetchOptions"),
++            .export_options => try writer.writeAll("std.lang.ExportOptions"),
++            .extern_options => try writer.writeAll("std.lang.ExternOptions"),
++            .type_info => try writer.writeAll("std.lang.Type"),
+             .unknown => try writer.writeAll("(unknown type)"),
+             .generic_poison => try writer.writeAll("(generic poison)"),
+         },
+@@ -4714,9 +4716,9 @@
+         .return_type = .bool_type,
+     } });
+ 
+-    var args_is_comptime: std.StaticBitSet(32) = .empty;
++    var args_is_comptime: std.bit_set.Static(32) = .empty;
+     args_is_comptime.set(0);
+-    var args_is_noalias: std.StaticBitSet(32) = .empty;
++    var args_is_noalias: std.bit_set.Static(32) = .empty;
+     args_is_noalias.set(1);
+ 
+     const @"fn(comptime type, noalias i32) type" = try ip.get(.{ .function_type = .{
+@@ -4738,7 +4740,7 @@
+         .args = .empty,
+         .return_type = .type_type,
+         .flags = .{
+-            .calling_convention = std.builtin.CallingConvention.c,
++            .calling_convention = std.lang.CallingConvention.c,
+             .alignment = 4,
+         },
+     } });
+@@ -4943,7 +4945,7 @@
+ 
+     try std.testing.expectEqual(index_start + @as(usize, size), ip.map.count());
+ 
+-    var found: std.DynamicBitSetUnmanaged = try .initEmpty(gpa, size);
++    var found: std.bit_set.Dynamic = try .initEmpty(gpa, size);
+     defer found.deinit(gpa);
+ 
+     // test that every value is in the InternPool
+diff --git a/src/type_engine/offsets.zig b/src/type_engine/offsets.zig
+--- a/src/type_engine/offsets.zig
++++ b/src/type_engine/offsets.zig
+@@ -665,7 +665,7 @@
+ }
+ 
+ test sourceIndexToTokenIndex {
+-    var tree: Ast = try .parse(std.testing.allocator, " a  bb; ", .zig);
++    var tree: Ast = try .parse(std.testing.allocator, " a  bb; ", .{});
+     defer tree.deinit(std.testing.allocator);
+ 
+     try std.testing.expectEqualSlices(
+@@ -691,7 +691,7 @@
+ }
+ 
+ test "sourceIndexToTokenIndex - token at end" {
+-    var tree: Ast = try .parse(std.testing.allocator, " a", .zig);
++    var tree: Ast = try .parse(std.testing.allocator, " a", .{});
+     defer tree.deinit(std.testing.allocator);
+ 
+     try std.testing.expectEqualSlices(
+@@ -815,7 +815,7 @@
+ test identifierLocFromIndex {
+     var tree = try Ast.parse(std.testing.allocator,
+         \\ name  @builtin  @"escaped"  @"s p a c e"  end
+-    , .zig);
++    , .{});
+     defer tree.deinit(std.testing.allocator);
+ 
+     try std.testing.expectEqualSlices(
+@@ -929,7 +929,7 @@
+ }
+ 
+ fn testTokenToLoc(text: [:0]const u8, token_index: Ast.TokenIndex, start: usize, end: usize) !void {
+-    var tree = try Ast.parse(std.testing.allocator, text, .zig);
++    var tree = try Ast.parse(std.testing.allocator, text, .{});
+     defer tree.deinit(std.testing.allocator);
+ 
+     const actual = tokenToLoc(&tree, token_index);
+diff --git a/src/type_engine/segmented_list.zig b/src/type_engine/segmented_list.zig
+--- a/src/type_engine/segmented_list.zig
++++ b/src/type_engine/segmented_list.zig
+@@ -123,7 +123,7 @@
+         pub const prealloc_count = prealloc_item_count;
+ 
+         fn AtType(comptime SelfType: type) type {
+-            if (@typeInfo(SelfType).pointer.is_const) {
++            if (@typeInfo(SelfType).pointer.attrs.@"const") {
+                 return *const T;
+             } else {
+                 return *T;
+diff --git a/src/type_engine/tracy_stub.zig b/src/type_engine/tracy_stub.zig
+--- a/src/type_engine/tracy_stub.zig
++++ b/src/type_engine/tracy_stub.zig
+@@ -2,9 +2,9 @@
+ pub const Ctx = struct {
+     pub fn end(_: Ctx) void {}
+ };
+-pub fn trace(_: std.builtin.SourceLocation) Ctx {
++pub fn trace(_: std.lang.SourceLocation) Ctx {
+     return .{};
+ }
+-pub fn traceNamed(_: std.builtin.SourceLocation, _: []const u8) Ctx {
++pub fn traceNamed(_: std.lang.SourceLocation, _: []const u8) Ctx {
+     return .{};
+ }

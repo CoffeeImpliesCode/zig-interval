@@ -213,6 +213,8 @@ jobs:
       # build.zig states in the benchmark comment above `bench_scalar`, so
       # the library inside these binaries is ReleaseFast whatever the parent
       # step asks for. Passing it would look like it mattered.
+      - name: bench-accounting-test
+        run: zig build bench-accounting-test
       - name: bench-scalar
         run: zig build bench-scalar
       - name: bench-vec
@@ -389,7 +391,7 @@ jobs:
           # this job's product, not an input to it.
           key: quality-tools-${{ env.ZIG_VERSION }}-${{ runner.os }}-${{ runner.arch }}-analyzers-${{ hashFiles('tools/quality/manifest.tsv', 'tools/quality/SHA256SUMS', 'tools/quality/harness/**', 'tools/quality/patches/**') }}
 
-      - name: Install the analyzer compiler
+      - name: Install the legacy analyzer compiler (three tools)
         run: |
           set -euo pipefail
           tgz=zig-x86_64-linux-0.16.0.tar.xz
@@ -416,6 +418,7 @@ jobs:
             --prefix "$QUALITY_TOOLS_PREFIX" \
             --work-root "$QUALITY_TOOLS_WORK_ROOT" \
             --zig "$ANALYZER_ZIG" \
+            --zig-0.17 "$ZIG" \
             --only analyzers,zig-gate
 
       - name: the installed prefix matches the install manifest, and the tree matches SHA256SUMS
@@ -435,6 +438,7 @@ jobs:
             --prefix "$QUALITY_TOOLS_PREFIX" \
             --work-root "$QUALITY_TOOLS_WORK_ROOT" \
             --zig "$ANALYZER_ZIG" \
+            --zig-0.17 "$ZIG" \
             --verify-only
 
           # All four analyzers must be present AND executable. Present but not
@@ -476,8 +480,8 @@ jobs:
 
           # WHAT ACTUALLY BUILT EACH BINARY is column 10 of the manifest the
           # installer wrote, and it is checked here rather than assumed. This
-          # step installs with no -Doptimize, so all four rows must record
-          # ReleaseFast, and zbc must be the one recording the `cli` step. A
+          # step uses the default fast mode: ReleaseFast on 0.16 and fast on
+          # 0.17. zbc must be the one recording the `cli` step. A
           # silent revert to a plain `zig build` for zbc would still produce a
           # working binary and pass every hash above -- the dogfood is a
           # property of the analyzer's own checkout and never runs in this job
@@ -487,7 +491,7 @@ jobs:
           awk -F'\t' '
             !/^#/ && NF == 12 && $2 == "analyzer" {
               n++
-              want = ($1 == "zbc") ? "zig build cli -Doptimize=ReleaseFast" \
+              want = ($1 == "zbc") ? "zig build cli -Doptimize=fast" \
                                     : "zig build -Doptimize=ReleaseFast"
               if ($10 != want) {
                 printf "analyze: %s records build_recipe [%s], expected [%s]\n", $1, $10, want
@@ -959,6 +963,15 @@ jobs:
               sys.exit(1)
           print("cross: every Linux target in the profile built AND ran; %s." % windows_claim)
           PY
+
+      - name: Print retained cross-target failure logs
+        if: failure()
+        run: |
+          for log in "$CROSS_PREFIX/runs/$CROSS_RUN_ID/"*.log; do
+            [ -f "$log" ] || continue
+            printf '\n=== %s ===\n' "$log"
+            cat "$log"
+          done
 
 
   # ------------------------------------------------------------------- fmt --

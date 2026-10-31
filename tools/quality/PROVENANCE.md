@@ -8,6 +8,74 @@ distributable, and — the part that matters most — what is **not** establishe
 Read `manifest.tsv` for the machine-readable pins and `SHA256SUMS` for the
 content hashes. This file is the reasoning.
 
+## Zig 0.17 target-table update (2026-10-31)
+
+The cross harness retains the verified 53-target Zig 0.16.0 table and adds
+the 56-target Zig 0.17.0 table, checked against the published
+[0.17.0 Support Table](https://ziglang.org/download/0.17.0/release-notes.html#Support-Table).
+This is not a version-only copy: `loongarch32-linux`, `riscv32-netbsd`,
+`riscv64-netbsd`, and `sparc64-linux` enter Tier 2; `thumb-windows` moves to
+Tier 3 and is omitted from that release's default Tier 1/2 matrix.
+Shell regressions assert both counts, the changed membership, the source URL,
+and rejection of unverified compiler releases.
+
+Benchmark and consumer-fixture checking heaps now use Zig 0.17's
+`SafeAllocator` backed by the thread-safe page allocator. Historical timing
+figures below and in the benchmark commentary refer to `DebugAllocator`,
+not to the replacement allocator; new runs must be measured afresh.
+
+The LP accounting gate formerly required identical allocation counters in two
+sweeps on the same heap. That is invalid for `SafeAllocator`: its small-object
+resize succeeds only if the current bucket can grow the allocation
+(`heap/SafeAllocator.zig`, `growingResizeBucket` in Zig 0.17.0). Equal work can
+therefore make different numbers of allocation calls. The corrected gate keeps
+bit-exact checksum equality and checks allocation/free and byte balance for
+**both** sweeps, not just the first. Differing repeat counters are printed.
+`zig build bench-accounting-test` runs a real-heap regression that failed under
+the old equality check; the benchmark CI job runs that step too.
+
+The profile's test deadline is forwarded through `--test-timeout` on both
+supported compilers. The first 0.17 harness branch omitted it, although the
+0.17 maker still accepts it. A real sleeping unit test checks that a one-second
+deadline fails instead of silently using the compiler's default. CI also
+prints retained per-target logs when the cross job fails; runner scratch is
+deleted after the job.
+
+### Remaining upstream frontend blocker
+
+Upstream zwanzig at
+[`bdc10e5`](https://github.com/forketyfork/zwanzig/tree/bdc10e5d00b1218245ff057b0017df9f69dd1f27)
+documents only Zig 0.15.2 and 0.16.0 embedded frontends; its latest release
+line is v0.15.1. The pinned 0.16 frontend rejects the 0.17 formatter's
+`@backingInt` in `bench/bench_vec.zig` with `AstGenFailed`, so its required typed
+checks correctly fail the gate rather than being silently skipped. A 0.17
+frontend port or compatible upstream release is still needed. No check or
+severity has been disabled to hide that incompatibility.
+
+
+zbc is still pinned to the original upstream revision plus its five reviewed
+analysis patches. Patch `0006-zig-0.17-parser.patch` ports that complete tree
+to Zig 0.17.0. It uses the compatibility changes in upstream
+[`dd5f557` / v0.1.4](https://github.com/ericsssan/zbc/commit/dd5f557c9f4aa47aaec5d3473b2f77f2783ef421)
+as a reference, but retains the local numeric rules, budgets, severity policy,
+source-selection errors, and full-array-fill proof. Removed array repetition
+is replaced with `@splat`, including aggregate-borrow traversal and regression
+cases. The compiler-version check remains strict; an older parser is not
+allowed to analyze the newer project's standard library.
+
+The installer selects zbc's 0.17 compiler with `--zig-0.17`; the other three
+analyzers keep their separate 0.16 build compiler. Their current project gates
+run unchanged. The installer rejects a manifest/compiler mismatch before
+fetching and records the compiler and actual optimize spelling per analyzer.
+The 0.17 cross harness uses a private compiler-library overlay: the configurer
+inserts the run policy, and the maker carries its explicit `MakeSkipped`
+decision across the process boundary. Both insertion seams must match or
+setup fails. This prevents host `binfmt_misc` from trying an unavailable
+foreign operating system's binary. Compilation dependencies stay intact.
+`--build-runner` was removed with the maker/configurer split; the installed
+compiler is never modified.
+
+
 ## The shape of the problem
 
 `zig-gate` and `cross-test` had no home. They lived in one person's
@@ -29,7 +97,7 @@ mutable branch, committing a binary, and committing a build cache.
 
 | tool | upstream | pinned commit | declared version | compiler | patches |
 | --- | --- | --- | --- | --- | --- |
-| zbc | ericsssan/zbc | `419d153ca411d1698899992d86c51eb9a7e14919` | 0.1.3 | Zig 0.16.0 | 5 |
+| zbc | ericsssan/zbc | `419d153ca411d1698899992d86c51eb9a7e14919` | 0.1.3 | Zig 0.17.0 | 6 |
 | ziglint | rockorager/ziglint | `66709a408f2ea9ac1de91a438a83b13f4691a941` | 0.5.3 | Zig 0.16.0 | 1 |
 | zlint | DonIsaac/zlint | `3ef67af7dfed776cb03012563942cdf3a97f1b59` (tag v0.10.0) | 0.10.0 | Zig 0.16.0 | 0 |
 | zwanzig | forketyfork/zwanzig | `1a0768ccd889d3586ec9482f02ffffe872a99749` | 0.15.1 | Zig 0.16.0 | 7 |
@@ -40,7 +108,7 @@ ls-remote`, recorded at capture time). The installer re-verifies each one after 
 hash rather than a name that could move.
 
 `tool_version` and `compiler` are separate manifest columns because they answer
-different questions. zbc declares version 0.1.3 and is compiled with Zig 0.16.0;
+different questions. zbc declares version 0.1.3 and is compiled with Zig 0.17.0;
 zwanzig declares 0.15.1 while its own `build.zig.zon` still names a 0.15.2
 minimum, because it is a dual-frontend analyzer. Writing "0.16.0" in a version
 column would have been a claim that no upstream made.

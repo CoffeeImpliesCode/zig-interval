@@ -135,14 +135,14 @@
 //!
 //! Every figure below is a time, and a time here is a property of a PAIR:
 //! these systems allocate, grow geometrically and free, so which heap they
-//! are built on is part of what is being timed. A `DebugAllocator` charges
+//! are built on is part of what is being timed. A `SafeAllocator` charges
 //! its own bookkeeping to every round trip, which is a reason to quote a
 //! figure measured under one as a measurement of the allocator - and it is
 //! also the only allocator here that can say what it still holds when the
 //! run ends, which is a reason to keep it. Neither reading wins, so the
 //! recipe is run TWICE, unchanged: the same thirteen bodies, under the same
 //! names, with the same iteration counts and the same seeds, once on a
-//! `DebugAllocator` and once on `std.heap.smp_allocator`, under the
+//! `SafeAllocator` and once on `std.heap.smp_allocator`, under the
 //! `allocator=dbg` and `allocator=smp` headings.
 //!
 //! What the two runs have in common is everything that is not allocation
@@ -156,7 +156,7 @@
 //! Io thread pool and each report's row buffer come from a THIRD
 //! allocator, `host`, which `Runner.init` builds them on and which releases
 //! them again, so a body can never be billed for the table it is being
-//! printed into. Both `DebugAllocator`s in this file are asked for `.ok` at
+//! printed into. Both `SafeAllocator`s in this file are checked for zero leaks at
 //! the end, through `requireNoLeaks`.
 //!
 //! ## The accounting, and why it is outside every timer
@@ -182,11 +182,11 @@
 //! `remap`; it is not a sum of requested sizes, and such a growth is not a
 //! new allocation for the call counters either. `freed_bytes` counts the
 //! bytes handed to `free` plus the shrinkage of those same resizes. Each
-//! sweep is run TWICE and the two must be identical, because a count that
-//! drifts between two identical sweeps is a count of something other than
-//! the work, and every body must come back balanced - as many frees as
-//! allocations, as many freed bytes as allocated bytes - because a workload
-//! allocation that outlived its call is a defect and not a figure.
+//! sweep is run TWICE and must produce the same checksum. Allocation counters
+//! can differ: SafeAllocator grows a small allocation in place only when its
+//! current bucket has room. Those counters describe the heap's state as well
+//! as the workload. BOTH sweeps must still balance frees against allocations
+//! and freed bytes against allocated bytes; an outstanding allocation is a defect.
 
 const std = @import("std");
 const interval = @import("interval");
@@ -994,7 +994,7 @@ const Case = struct {
 /// with the iteration counts it has always used.
 ///
 /// THE SINGLE CATALOG. Every section below reads this one array: the timed
-/// run on a `DebugAllocator`, the timed run on `smp_allocator`, and the
+/// run on a `SafeAllocator`, the timed run on `smp_allocator`, and the
 /// untimed accounting that follows each of them. A second copy of a list
 /// this long is a second thing to forget to update, and a benchmark that
 /// runs two recipes and prints them under one name is worse than one that
@@ -1182,38 +1182,57 @@ fn accountSweep(
     };
 }
 
-/// Whether two sweeps of one body over one input range counted the same
-/// thing, which they must.
+/// Whether two sweeps performed the same work. Allocation counters are not
+/// deterministic across heap states; the workload's result must be.
 ///
 /// The sink is compared as a BIT PATTERN for the reason
 /// `Report.sink_total` gives: these values are sums of interval endpoints
 /// and are legitimately unbounded, and a float comparison of two identical
 /// NaNs is false.
-fn sameAccount(a: Account, b: Account) bool {
-    return a.allocations == b.allocations and
-        a.deallocations == b.deallocations and
-        a.allocated_bytes == b.allocated_bytes and
-        a.freed_bytes == b.freed_bytes and
-        @as(u64, @bitCast(a.sink)) == @as(u64, @bitCast(b.sink));
+fn sameChecksum(a: Account, b: Account) bool {
+    return @as(u64, @bitCast(a.sink)) == @as(u64, @bitCast(b.sink));
+}
+
+test "accounting repeatability is independent of SafeAllocator bucket position" {
+    var heap: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{
+        .stack_trace_frames = 0,
+        .check_write_after_free = false,
+    });
+    defer std.debug.assert(heap.deinit() == 0);
+    var previous = accountSweep(heap.allocator(), std.testing.io, cases[0].body, 17);
+    for (0..64) |_| {
+        const next = accountSweep(heap.allocator(), std.testing.io, cases[0].body, 17);
+        const different_counts = previous.allocations != next.allocations or
+            previous.deallocations != next.deallocations or
+            previous.allocated_bytes != next.allocated_bytes or
+            previous.freed_bytes != next.freed_bytes;
+        if (different_counts) {
+            try std.testing.expect(sameChecksum(previous, next));
+            try std.testing.expect(previous.allocations == previous.deallocations);
+            try std.testing.expect(previous.allocated_bytes == previous.freed_bytes);
+            try std.testing.expect(next.allocations == next.deallocations);
+            try std.testing.expect(next.allocated_bytes == next.freed_bytes);
+            return;
+        }
+        previous = next;
+    }
+    return error.ExpectedAllocatorStateVariation;
 }
 
 /// Every body of the section, accounted twice, after its timed table.
 ///
-/// TWO SWEEPS PER BODY rather than one, because these counters are the only
-/// claim in this file that nothing is drifting between iterations: a body
-/// whose second sweep allocated a different number of bytes allocated
-/// something other than a deterministic function of its index, and a
-/// checksum that moved between two identical sweeps would be a checksum of
-/// the run rather than of the work.
+/// TWO SWEEPS PER BODY validate the workload's checksum independently of heap
+/// state. A successful in-place resize may avoid an allocation in one sweep
+/// but not another, so equal counters would be an invalid requirement.
 ///
 /// Each body must also come back BALANCED - as many frees as allocations,
 /// as many freed bytes as allocated bytes - because an allocation that
 /// outlived its call is a defect in the caller rather than a figure, and a
-/// leak found here is the same leak the `dbg` section's `.ok` check would
+/// leak found here is the same leak the `dbg` section's zero-leak check would
 /// report at the end of the run.
 ///
-/// The totals line counts ONE sweep of each body. The second sweep exists
-/// to be compared and is printed by neither, exactly as it is untimed.
+/// The totals line counts the FIRST sweep of each body. The second sweep is
+/// printed separately when its allocator-state-dependent counters differ.
 fn reportAccounting(comptime label: []const u8, solver: std.mem.Allocator, io: std.Io) !void {
     var out = timing.Out.init(io);
     try out.print("\n=== bench_lp: allocator={s}: untimed allocation accounting ===\n", .{label});
@@ -1230,7 +1249,8 @@ fn reportAccounting(comptime label: []const u8, solver: std.mem.Allocator, io: s
         \\    sizes. freed B is FailingAllocator.freed_bytes: the bytes handed to free plus the
         \\    shrinkage of those same resizes. checksum is this body's own Ctx sink over the
         \\    sweep, not the timed table's checksum over its warmup call and seven repetitions.
-        \\    Each body is swept twice; the two must be identical and balanced or the run ends.
+        \\    Each body is swept twice; checksums must match and BOTH sweeps must balance.
+        \\    Counts may differ with heap state; differing repeat counts are printed separately.
         \\
     , .{timing.reps});
     // The headings of the columns the rows below print, in those columns'
@@ -1248,15 +1268,17 @@ fn reportAccounting(comptime label: []const u8, solver: std.mem.Allocator, io: s
     inline for (cases) |case| {
         const first = accountSweep(solver, io, case.body, case.iterations);
         const second = accountSweep(solver, io, case.body, case.iterations);
-        if (!sameAccount(first, second)) {
+        if (!sameChecksum(first, second)) {
             trap(
-                case.name ++ ": two identical untimed sweeps accounted differently",
+                case.name ++ ": two identical untimed sweeps produced different checksums",
                 io,
                 error.AccountingDrift,
             );
         }
         if (first.allocations != first.deallocations or
-            first.allocated_bytes != first.freed_bytes)
+            first.allocated_bytes != first.freed_bytes or
+            second.allocations != second.deallocations or
+            second.allocated_bytes != second.freed_bytes)
         {
             trap(
                 case.name ++ ": a workload allocation outlived its call",
@@ -1279,10 +1301,27 @@ fn reportAccounting(comptime label: []const u8, solver: std.mem.Allocator, io: s
                 first.sink,
             },
         );
+        if (first.allocations != second.allocations or
+            first.deallocations != second.deallocations or
+            first.allocated_bytes != second.allocated_bytes or
+            first.freed_bytes != second.freed_bytes)
+        {
+            try out.print(
+                "    {s: <40}  {d:>6} allocs  {d:>6} frees  {d:>12} alloc B  {d:>12} freed B  checksum {d}\n",
+                .{
+                    case.name ++ " (repeat)",
+                    second.allocations,
+                    second.deallocations,
+                    second.allocated_bytes,
+                    second.freed_bytes,
+                    second.sink,
+                },
+            );
+        }
     }
     try out.print(
         "    {s: <40}  {d:>6} allocs  {d:>6} frees  {d:>12} alloc B  {d:>12} freed B " ++
-            " (one sweep of each of {d} bodies)\n",
+            " (first sweep of each of {d} bodies)\n",
         .{ "all bodies", allocs, frees, alloc_bytes, freed_bytes, cases.len },
     );
 }
@@ -1292,7 +1331,7 @@ fn reportAccounting(comptime label: []const u8, solver: std.mem.Allocator, io: s
 ///
 /// This is the file's original entry point and it keeps its original
 /// meaning: the runner's OWN allocator is the workload heap, so a caller
-/// that hands this a `DebugAllocator`-backed runner runs the recipe on
+/// that hands this a `SafeAllocator`-backed runner runs the recipe on
 /// that heap, under the `allocator=dbg` heading and with the untimed
 /// accounting after it. `main` is where the two heaps are kept apart,
 /// because only there is the harness's heap and the solver's heap two
@@ -1305,8 +1344,8 @@ pub fn run(runner: *timing.Runner) !void {
 /// without waiting for the shared driver to pick it up.
 ///
 /// THREE HEAPS, each here for a reason. `threaded` is the process's own
-/// `Io`, built on `smp_allocator` and on neither `DebugAllocator`, because
-/// it has to outlive every runner below: the two `.ok` checks are made
+/// `Io`, built on `smp_allocator` and on neither `SafeAllocator`, because
+/// it has to outlive every runner below: the two zero-leak checks are made
 /// after the runner they are about has been torn down, and an `Io` that
 /// belonged to a torn-down runner is nowhere to print a leak through.
 /// `host` is the harness - the two reports' row buffers and their Io thread
@@ -1317,11 +1356,11 @@ pub fn main() !void {
     const io = threaded.io();
     defer threaded.deinit();
 
-    var host: std.heap.DebugAllocator(.{}) = .init;
+    var host: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     // Outer defers run after runner teardown, including on propagated errors.
     // These checks remain active in ReleaseFast.
     defer requireNoLeaks("harness", io, host.deinit());
-    var dbg: std.heap.DebugAllocator(.{}) = .init;
+    var dbg: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer requireNoLeaks("allocator=dbg section", io, dbg.deinit());
 
     {
@@ -1338,13 +1377,13 @@ pub fn main() !void {
     }
 }
 
-/// Ends the run unless `status` is `.ok`.
+/// Ends the run unless `status` reports zero leaks.
 ///
 /// `std.debug.assert` is not usable here and the reason is the build: this
 /// file is `ReleaseFast`, and there an assertion is compiled out, so the
-/// check would be the `defer _ = dbg.deinit()` it replaced. A non-`.ok`
+/// check would be the `defer _ = dbg.deinit()` it replaced. A nonzero
 /// answer leaves through the same plain line on stderr and the same
 /// non-zero exit as every other failure in this file.
-fn requireNoLeaks(comptime what: []const u8, io: std.Io, status: std.heap.Check) void {
-    if (status != .ok) timing.fail("bench_lp: " ++ what, io, error.LeakedMemory);
+fn requireNoLeaks(comptime what: []const u8, io: std.Io, status: usize) void {
+    if (status != 0) timing.fail("bench_lp: " ++ what, io, error.LeakedMemory);
 }

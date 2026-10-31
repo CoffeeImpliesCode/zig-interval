@@ -276,4 +276,13 @@ pub const answer: u32 = 37;
 ZIG
 run_check 1 --targets "$native"
 grep -q '"reason":"no_test_results"' "$ROOT/out/cross-test-summary.json" || fail 'zero-test binary passed'
+cat > root.zig <<'ZIG'
+const std = @import("std");
+test "the configured deadline reaches the test runner" {
+    try std.Io.sleep(std.testing.io, .fromSeconds(2), .awake);
+}
+ZIG
+run_check 1 --targets "$native" --timeout 1
+grep -q 'timed out' "$ROOT/out/runs/"*/build-"$native".log ||
+  fail 'the selected compiler ignored the configured test deadline'
 printf 'PASS: fresh repeated execution, strict coverage, compiler errors, and failed tests\n'

@@ -3,9 +3,9 @@
 #
 # Run from the project root. Without artifact hooks, the command runs the
 # project's "zig build test -Dtarget=TARGET" step. The default matrix contains
-# all 53 concrete Tier 1/2 platforms from the Zig 0.16.0 support table:
-# https://ziglang.org/download/0.16.0/release-notes.html#Support-Table
-# Other Zig versions need an explicit CROSS_MATRIX and a compatible build path.
+# all concrete Tier 1/2 platforms from the selected Zig release's support table:
+# https://ziglang.org/download/0.17.0/release-notes.html#Support-Table
+# Verified tables: Zig 0.16.0 (53 targets), Zig 0.17.0 (56 targets).
 #
 # Standard builds accept Zig unit tests and executable checks in the requested
 # build step. run.tests counts reported Zig unit tests; it is null when only
@@ -275,6 +275,57 @@ resolve_zig() {
 }
 
 prepare_build_runner() {
+  if [[ $CROSS_ZIG_VERSION == 0.17.0 ]]; then
+    # 0.17 removed --build-runner. Use a private library overlay and insert
+    # the same policy at the configurer seam, without changing the compiler.
+    CROSS_BUILD_RUNNER="$CROSS_CACHE_DIR/zig-lib"
+    mkdir -p "$CROSS_BUILD_RUNNER/compiler/Maker/Step" || die 'cannot create compiler overlay'
+    local item name
+    for item in "$CROSS_ZIG_LIB_DIR"/*; do
+      name=${item##*/}
+      [[ $name == compiler ]] || ln -s "$item" "$CROSS_BUILD_RUNNER/$name"
+    done
+    for item in "$CROSS_ZIG_LIB_DIR/compiler"/*; do
+      name=${item##*/}
+      [[ $name == configurer.zig || $name == Maker ]] || ln -s "$item" "$CROSS_BUILD_RUNNER/compiler/$name"
+    done
+    for item in "$CROSS_ZIG_LIB_DIR/compiler/Maker"/*; do
+      name=${item##*/}
+      [[ $name == Step ]] || ln -s "$item" "$CROSS_BUILD_RUNNER/compiler/Maker/$name"
+    done
+    for item in "$CROSS_ZIG_LIB_DIR/compiler/Maker/Step"/*; do
+      name=${item##*/}
+      [[ $name == Run.zig ]] || ln -s "$item" "$CROSS_BUILD_RUNNER/compiler/Maker/Step/$name"
+    done
+    # The maker must not try an unavailable target through host binfmt_misc.
+    # Serialize the old MakeSkipped policy explicitly across the new split.
+    awk '
+      !hooks && $0 == "    const conf_run = conf_step.extended.get(conf.extra).run;" {
+        print
+        print "    if (conf_run.environ_map.value) |index| {"
+        print "        const environment = index.get(conf);"
+        print "        for (environment.keys.slice(conf), environment.values.slice(conf)) |key, value| {"
+        print "            if (mem.eql(u8, key.slice(conf), \"CROSS_TEST_SKIP_FOREIGN\") and mem.eql(u8, value.slice(conf), \"1\")) return error.MakeSkipped;"
+        print "        }"
+        print "    }"
+        hooks++; next
+      }
+      { print }
+      END { if (hooks != 1) exit 1 }
+    ' "$CROSS_ZIG_LIB_DIR/compiler/Maker/Step/Run.zig" > "$CROSS_BUILD_RUNNER/compiler/Maker/Step/Run.zig" ||
+      die 'unsupported Zig maker run seam'
+    cp -- "$LIB_DIR/run_policy.zig" "$CROSS_BUILD_RUNNER/compiler/run_policy.zig" ||
+      die 'cannot stage configurer policy'
+    awk '
+      /^[[:space:]]*builder.runPackageScript\(root\);[[:space:]]*$/ {
+        print; print "    try @import(\"run_policy.zig\").configure(builder);"; hooks++; next
+      }
+      { print }
+      END { if (hooks != 1) exit 1 }
+    ' "$CROSS_ZIG_LIB_DIR/compiler/configurer.zig" > "$CROSS_BUILD_RUNNER/compiler/configurer.zig" ||
+      die 'unsupported Zig configurer seam'
+    return
+  fi
   CROSS_BUILD_RUNNER="$CROSS_CACHE_DIR/build_runner.zig"
   cp -- "$LIB_DIR/run_policy.zig" "$CROSS_CACHE_DIR/run_policy.zig" || die 'cannot stage runner policy'
   # Patch only the configuration seam in the selected compiler's own runner.
@@ -415,11 +466,18 @@ check_zig_project() {
   resolve_runner "$target" || { worker_fail "$target" runner_detection_failed; return $?; }
   export CROSS_TEST_TARGET="$target" CROSS_TEST_RUNNER_KIND="$CROSS_RUNNER_KIND"
   export CROSS_TEST_RUNNER="${CROSS_RUNNER[0]:-}" CROSS_TEST_RUNNER_REASON="$CROSS_RUNNER_REASON"
+  export CROSS_TEST_LIBC_RUNTIMES="${CROSS_LIBC_RUNTIMES:-}"
   [[ -z ${CROSS_LIBC_RUNTIMES:-} ]] || flags+=(--libc-runtimes "$CROSS_LIBC_RUNTIMES")
   CROSS_COMMAND=("${ZIG_COMMAND[@]}" build "$CROSS_BUILD_STEP" "-Dtarget=$target" "-j$CROSS_BUILD_JOBS"
-    --prefix "$CROSS_PREFIX" --cache-dir "$CROSS_CACHE_DIR" --build-runner "$CROSS_BUILD_RUNNER"
+    --prefix "$CROSS_PREFIX" --cache-dir "$CROSS_CACHE_DIR"
     --summary all --color off)
-  [[ $CROSS_ZIG_VERSION != 0.16.0 ]] || CROSS_COMMAND+=(--test-timeout "${CROSS_TIMEOUT}s")
+  if [[ $CROSS_ZIG_VERSION == 0.17.0 ]]; then
+    export ZIG_LIB_DIR=$CROSS_BUILD_RUNNER
+    printf 'environment: ZIG_LIB_DIR=%q\n' "$ZIG_LIB_DIR"
+    CROSS_COMMAND+=(--test-timeout "${CROSS_TIMEOUT}s")
+  else
+    CROSS_COMMAND+=(--build-runner "$CROSS_BUILD_RUNNER" --test-timeout "${CROSS_TIMEOUT}s")
+  fi
   CROSS_COMMAND+=("${flags[@]}" "${CROSS_BUILD_ARGS[@]}")
   print_command "${CROSS_COMMAND[@]}"
   if "${CROSS_COMMAND[@]}"; then rc=0; else rc=$?; fi

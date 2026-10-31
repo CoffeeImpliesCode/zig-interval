@@ -58,6 +58,22 @@ reason() { grep -q "\"reason\":\"$1\"" "$2/cross-test-summary.json" || fail "mis
 picked=$(quality_scratch_pick "$BASE") || fail 'quality_scratch_pick refused a usable scratch base'
 [[ $picked == "$(realpath -m -- "$BASE")" ]] || fail "quality_scratch_pick returned $picked, not $BASE"
 
+# The release tables differ: new Tier 2 targets must be included and the
+# demoted Thumb Windows target must not remain in the 0.17 default matrix.
+source "$LIB_DIR/zig-targets.sh"
+cross_default_matrix 0.16.0 || fail 'Zig 0.16 tier table unavailable'
+[[ ${#CROSS_MATRIX[@]} == 53 ]] || fail 'incorrect Zig 0.16 tier count'
+cross_default_matrix 0.17.0 || fail 'Zig 0.17 tier table unavailable'
+[[ ${#CROSS_MATRIX[@]} == 56 ]] || fail 'incorrect Zig 0.17 tier count'
+for target in loongarch32-linux riscv32-netbsd riscv64-netbsd sparc64-linux; do
+  [[ " ${CROSS_MATRIX[*]} " == *" $target|auto "* ]] || fail "missing Tier 2 target $target"
+done
+[[ " ${CROSS_MATRIX[*]} " != *' thumb-windows|auto '* ]] || fail 'Tier 3 target in 0.17 matrix'
+[[ $CROSS_MATRIX_VERSION == 0.17.0 ]] || fail 'incorrect tier-table version'
+[[ $CROSS_MATRIX_SOURCE == 'https://ziglang.org/download/0.17.0/release-notes.html#Support-Table' ]] ||
+  fail 'incorrect tier-table provenance'
+if cross_default_matrix 0.18.0; then fail 'unverified Zig release accepted'; fi
+
 # A failed profile hook must not execute a partial command or remove an artifact.
 cat > failed-hook.sh <<'PROFILE'
 CROSS_MATRIX=('x86_64-linux|auto')
@@ -141,7 +157,7 @@ cross_build_command() { CROSS_COMMAND=(true); }
 cross_artifact() { printf '%s/stale\n' "$CROSS_PREFIX"; }
 PROFILE
 mkdir missing-out
-cp /bin/true missing-out/stale
+cp "$(type -P true)" missing-out/stale
 run_check 1 --profile missing.sh --output missing-out
 [[ ! -e missing-out/stale ]] || fail 'stale artifact was retained'
 reason missing_binary missing-out
@@ -167,7 +183,7 @@ reason per_run_timeout hangs-out
 # Compiling excluded runners is intentional: skip is build-only, not build-excluded.
 cat > build-only.sh <<'PROFILE'
 CROSS_MATRIX=('aarch64-macos|skip')
-cross_build_command() { CROSS_COMMAND=(cp /bin/true "$CROSS_PREFIX/artifact"); }
+cross_build_command() { CROSS_COMMAND=(cp "$(type -P true)" "$CROSS_PREFIX/artifact"); }
 cross_artifact() { printf '%s/artifact\n' "$CROSS_PREFIX"; }
 PROFILE
 ZIG="$ROOT/no-such-compiler" run_check 0 --profile build-only.sh --output only-out

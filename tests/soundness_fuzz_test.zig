@@ -365,7 +365,7 @@ fn report(c: Case, got: Value, t: *Tally) void {
             const gap = if (std.math.isNan(g.?.lo))
                 ""
             else
-                std.fmt.bufPrint(&buf, " : {e} ULP", .{gapUlp(g.?.lo, r.lo)}) catch " : ?";
+                std.mem.print(&buf, " : {e} ULP", .{gapUlp(g.?.lo, r.lo)}) catch " : ?";
             reportErr("      lower bound is ABOVE the true minimum and excludes it{s}\n", .{gap});
         }
         if (r.hi_beyond) {
@@ -379,7 +379,7 @@ fn report(c: Case, got: Value, t: *Tally) void {
             const gap = if (std.math.isNan(g.?.hi))
                 ""
             else
-                std.fmt.bufPrint(&buf, " : {e} ULP", .{gapUlp(g.?.hi, r.hi)}) catch " : ?";
+                std.mem.print(&buf, " : {e} ULP", .{gapUlp(g.?.hi, r.hi)}) catch " : ?";
             reportErr("      upper bound is BELOW the true maximum and excludes it{s}\n", .{gap});
         }
     } else {

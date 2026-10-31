@@ -14,8 +14,8 @@
 # What is set here, and only this: the execution budget, the concurrency, the
 # five targets, the rows that have to have EXECUTED, and the PATH guard at the
 # bottom. The build step is cross-test's own `zig build test`, its cache is its
-# own, and CROSS_MATRIX is untouched - this file narrows which of the 53
-# published targets run, it does not replace the table. Do not add `set -e`,
+# own, and CROSS_MATRIX is untouched - this file narrows which of the 56
+# published Zig 0.17 targets run, it does not replace the table. Do not add `set -e`,
 # traps, or a `cd` to this file: cross-test runs `set -uo pipefail` without `-e`
 # and forbids a profile from changing shell options, traps, or the working
 # directory.
@@ -56,7 +56,7 @@
 # HOW TO RUN IT ON THIS CHECKOUT
 # ---------------------------------------------------------------------------
 #   export QUALITY_TOOLS_PREFIX=$HOME/quality        # where you installed
-#   export PATH=$HOME/zigbin:$PATH                   # the real 0.16.0 zig
+#   export PATH=$HOME/zigbin:$PATH                   # the real 0.17.0 zig
 #   ZIG=$HOME/zigbin/zig \
 #     "$QUALITY_TOOLS_PREFIX/bin/cross-test" --output $HOME/cross-out
 #
@@ -130,7 +130,7 @@ CROSS_JOBS=2
 CROSS_BUILD_JOBS=1
 
 # ---------------------------------------------------------------------------
-# TARGETS - five of the 53, for an ordinary edit. The full table is one flag
+# TARGETS - five of the 56, for an ordinary edit. The full table is one flag
 # away and stays reachable; see the comment under the array.
 # ---------------------------------------------------------------------------
 #   x86_64-linux    native. The host itself, no emulator in the loop, and the
@@ -194,18 +194,18 @@ TARGETS=(
 CROSS_REQUIRED_RUN_TARGETS='x86_64-linux aarch64-linux riscv64-linux s390x-linux'
 
 # The full table: this profile narrows the SET and leaves CROSS_MATRIX alone,
-# so `--targets` still selects from all 53. A release sweep is the same command
+# so `--targets` still selects from all 56. A release sweep is the same command
 # with the list swapped:
 #
 #   cross-test --targets 'x86_64-linux aarch64-linux riscv64-linux s390x-linux \
 #                       aarch64_be-linux powerpc64-linux mips64-linux ...' \
 #               --output $HOME/cross-out
 #
-# For compilation-only coverage of all 53, use the separate profile instead:
+# For compilation-only coverage of all 56, use the separate profile instead:
 #   cross-test --profile ./cross-compile.profile.sh \
 #               --output $HOME/compile-out
 # That builds the library, all 11 test binaries and the NaN probe through
-# `test-compile`, executes none of them and reports build_only=53.
+# `test-compile`, executes none of them and reports build_only=56.
 #
 # `cross-test --no-profile --list` prints every platform in the table with the
 # runner detected for it on the current machine, and is where those names come
