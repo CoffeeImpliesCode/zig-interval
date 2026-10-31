@@ -481,7 +481,8 @@ jobs:
           # WHAT ACTUALLY BUILT EACH BINARY is column 10 of the manifest the
           # installer wrote, and it is checked here rather than assumed. This
           # step uses the default fast mode: ReleaseFast on 0.16 and fast on
-          # 0.17. zbc must be the one recording the `cli` step. A
+          # 0.17, read from each row's compiler column (4); zbc and zwanzig are
+          # built with 0.17. zbc must be the one recording the `cli` step. A
           # silent revert to a plain `zig build` for zbc would still produce a
           # working binary and pass every hash above -- the dogfood is a
           # property of the analyzer's own checkout and never runs in this job
@@ -491,8 +492,9 @@ jobs:
           awk -F'\t' '
             !/^#/ && NF == 12 && $2 == "analyzer" {
               n++
-              want = ($1 == "zbc") ? "zig build cli -Doptimize=fast" \
-                                    : "zig build -Doptimize=ReleaseFast"
+              mode = ($4 == "zig 0.17.0") ? "fast" : "ReleaseFast"
+              want = ($1 == "zbc") ? "zig build cli -Doptimize=" mode \
+                                    : "zig build -Doptimize=" mode
               if ($10 != want) {
                 printf "analyze: %s records build_recipe [%s], expected [%s]\n", $1, $10, want
                 bad = 1
