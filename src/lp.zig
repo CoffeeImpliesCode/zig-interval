@@ -184,6 +184,16 @@ pub const Partition = struct {
     carried: []Lin,
     lower: []Part,
     upper: []Part,
+    /// The lengths the three lists were allocated with, which `deinit` frees
+    /// them by. `partition` reserves the worst case up front and hands the
+    /// lists over as built. Shrinking them to fit would cost either a copy
+    /// or a `remap`, and whether a `remap` succeeds depends on everything the
+    /// allocator did before, so one call would make a different number of
+    /// allocations than the next (`std.testing.checkAllAllocationFailures`
+    /// rejects exactly that as `NondeterministicMemoryUsage`).
+    capacity: Capacity,
+
+    pub const Capacity = struct { carried: usize, lower: usize, upper: usize };
 
     /// Release the three lists. The borrowed rows are untouched.
     ///
@@ -192,9 +202,9 @@ pub const Partition = struct {
     /// a double free. The value moves, it does not copy; nothing here can
     /// detect the mistake, so it is stated instead.
     pub fn deinit(self: Partition) void {
-        self.gpa.free(self.carried);
-        self.gpa.free(self.lower);
-        self.gpa.free(self.upper);
+        self.gpa.free(self.carried.ptr[0..self.capacity.carried]);
+        self.gpa.free(self.lower.ptr[0..self.capacity.lower]);
+        self.gpa.free(self.upper.ptr[0..self.capacity.upper]);
     }
 
     /// Exactly how many rows eliminating the partitioned variable leaves
@@ -338,21 +348,27 @@ const Buckets = struct {
         return self.carried_count + self.lower.items.len * self.upper.items.len;
     }
 
-    /// Hand the three lists over to the caller. Each is emptied on the way,
-    /// so the `deinit` an error path still runs has nothing left to free.
-    /// Only meaningful on a collecting sink: a round's output tables belong
-    /// to the caller already, and there is nothing to hand over.
-    fn release(self: *Buckets) !Partition {
-        const carried = try self.carried.toOwnedSlice(self.gpa);
-        errdefer self.gpa.free(carried);
-        const lower = try self.lower.toOwnedSlice(self.gpa);
-        errdefer self.gpa.free(lower);
-        return .{
+    /// Hand the three lists over to the caller as they are, reservation
+    /// included (see `Partition.capacity`). Each is emptied on the way, so
+    /// the `deinit` an error path still runs has nothing left to free. Only
+    /// meaningful on a collecting sink: a round's output tables belong to
+    /// the caller already, and there is nothing to hand over.
+    fn release(self: *Buckets) Partition {
+        const part: Partition = .{
             .gpa = self.gpa,
-            .carried = carried,
-            .lower = lower,
-            .upper = try self.upper.toOwnedSlice(self.gpa),
+            .carried = self.carried.items,
+            .lower = self.lower.items,
+            .upper = self.upper.items,
+            .capacity = .{
+                .carried = self.carried.capacity,
+                .lower = self.lower.capacity,
+                .upper = self.upper.capacity,
+            },
         };
+        self.carried = .empty;
+        self.lower = .empty;
+        self.upper = .empty;
+        return part;
     }
 };
 
@@ -838,12 +854,15 @@ pub const System = struct {
         defer scratch.deinit();
 
         var order: std.ArrayList(usize) = .empty;
-        errdefer order.deinit(self.gpa);
+        defer order.deinit(self.gpa);
         while (try scratch.chooseNext()) |k| {
             try order.append(self.gpa, k);
             try scratch.eliminate(k);
         }
-        return order.toOwnedSlice(self.gpa);
+        // A copy at most `var_count` long, not `toOwnedSlice`: its shrinking
+        // `remap` succeeds or not depending on the allocator's history, which
+        // makes the number of allocations differ from one call to the next.
+        return self.gpa.dupe(usize, order.items);
     }
 
     /// Eliminate every variable following the same heuristic that
