@@ -3,6 +3,9 @@ const Step = std.Build.Step;
 const Run = Step.Run;
 
 // The build graph keeps its compile dependencies when a foreign run is skipped.
+// The caller is the build runner cross-test generates (harness/bin/cross-test injects
+// `@import("run_policy.zig").configure(builder)`), which is outside every analyzed file list.
+// zwanzig-disable-next-line: unused-decl
 pub fn configure(b: *std.Build) !void {
     // Runner selection is environment-driven, outside the configure cache key.
     if (@hasDecl(std.Build.Graph, "poisonCache")) b.graph.poisonCache();
@@ -52,7 +55,9 @@ fn configureRun(run: *Run, policy: *const Policy) !void {
         .artifact => |argument| argument.artifact,
         else => return, // Keep explicit project command prefixes and system commands.
     };
-    const target = executable.root_module.resolved_target.?.result;
+    // No resolved target means the host's, which never needs a foreign runner.
+    const resolved = executable.root_module.resolved_target orelse return;
+    const target = resolved.result;
     if (target.cpu.arch != policy.arch or target.os.tag != policy.os) return;
     if (policy.kind == .unavailable) {
         skipForeignRunPolicy(run);

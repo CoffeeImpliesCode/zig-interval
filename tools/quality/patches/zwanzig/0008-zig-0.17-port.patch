@@ -1,0 +1,1414 @@
+# zwanzig: Zig 0.17.0 frontend port.
+# Base: 1a0768ccd889d3586ec9482f02ffffe872a99749 plus 0001 through 0007.
+# Authored 2026-10-31. The embedded frontend is the compiler that builds zwanzig,
+# so code using 0.17-only builtins (@backingInt) failed AstGen under the 0.16 build.
+# Build with Zig 0.17.0 only: compat.zig now accepts 0.17.0 alone, because the
+# port drops AST/ZIR tags 0.17 removed (array_mult, c_import, defer_err_code) and
+# reads `errdefer expr` as 0.17 parses it (no payload). DeclContents.explicit_types
+# is type_decls; Ast.parse takes options; ** becomes @splat or a comptime repeat;
+# std.meta.fields/bufPrintZ/b.args/zon.parse follow their 0.17 replacements.
+# Tests: fixture_tests.zig adopts prepareProject (0001-0007 changed that API without
+# it); the two errdefer-payload fixtures are removed (the syntax no longer exists);
+# a no-resize backing allocator keeps two allocation-failure sweeps deterministic
+# under 0.17's SafeAllocator. 711/728 tests pass; the 17 failures are the ones the
+# 0001-0007 tree already has under Zig 0.16.0. No rule or severity changes.
+# Apply after 0007 with: git apply -p1 <this file>
+diff --git a/build.zig b/build.zig
+index c6bf2f3..7db6b92 100644
+--- a/build.zig
++++ b/build.zig
+@@ -6,7 +6,7 @@ pub fn build(b: *std.Build) void {
+     const optimize = b.standardOptimizeOption(.{});
+     const log_level = b.option(std.log.Level, "log-level", "Set log level") orelse .info;
+     const version = readPackageVersion(b);
+-    const main_source = if (builtin.zig_version.minor == 16)
++    const main_source = if (builtin.zig_version.minor >= 16)
+         b.path("src/main_0_16.zig")
+     else
+         b.path("src/main.zig");
+@@ -39,9 +39,7 @@ pub fn build(b: *std.Build) void {
+     // Create a run step
+     const run_cmd = b.addRunArtifact(exe);
+     run_cmd.step.dependOn(b.getInstallStep());
+-    if (b.args) |args| {
+-        run_cmd.addArgs(args);
+-    }
++    run_cmd.addPassthruArgs();
+ 
+     const run_step = b.step("run", "Run the analyzer");
+     run_step.dependOn(&run_cmd.step);
+@@ -89,7 +87,7 @@ pub fn build(b: *std.Build) void {
+ 
+ fn readPackageVersion(b: *std.Build) []const u8 {
+     const zon_path = "build.zig.zon";
+-    const zon_contents: [:0]u8 = if (builtin.zig_version.minor == 16)
++    const zon_contents: [:0]u8 = if (builtin.zig_version.minor >= 16)
+         std.Io.Dir.cwd().readFileAllocOptions(
+             b.graph.io,
+             zon_path,
+@@ -118,6 +116,23 @@ fn readPackageVersion(b: *std.Build) []const u8 {
+         version: []const u8,
+     };
+ 
++    if (builtin.zig_version.minor >= 17) {
++        // `b.allocator` is the build arena: the result and diagnostics live as long as the build.
++        var diagnostics: std.zon.parse.Diagnostics = undefined;
++        const metadata = std.zon.parse.fromSlice(PackageMetadata, .{
++            .gpa = b.allocator,
++            .arena = b.allocator,
++            .source = zon_contents,
++            .diagnostics = &diagnostics,
++            .ignore_unknown_fields = true,
++        }) catch |err| {
++            std.debug.panic("failed to parse {s}: {s}", .{ zon_path, @errorName(err) });
++        };
++        return b.allocator.dupe(u8, metadata.version) catch {
++            std.debug.panic("failed to allocate package version", .{});
++        };
++    }
++
+     const parsed = if (builtin.zig_version.minor == 16)
+         std.zon.parse.fromSliceAlloc(
+             PackageMetadata,
+@@ -180,7 +195,11 @@ fn addFixtureChecks(b: *std.Build, step: *std.Build.Step, target: std.Build.Reso
+         target,
+         optimize,
+         "test/fixtures/frontend_matrix",
+-        if (builtin.zig_version.minor == 16) "zig_0_16.zig" else "zig_0_15.zig",
++        switch (builtin.zig_version.minor) {
++            15 => "zig_0_15.zig",
++            16 => "zig_0_16.zig",
++            else => "zig_0_17.zig",
++        },
+     );
+ 
+     const fixture_dirs = [_][]const u8{
+@@ -195,7 +214,7 @@ fn addFixtureChecks(b: *std.Build, step: *std.Build.Step, target: std.Build.Reso
+     };
+ 
+     for (fixture_dirs) |dir_path| {
+-        if (builtin.zig_version.minor == 16) {
++        if (builtin.zig_version.minor >= 16) {
+             var dir = std.Io.Dir.cwd().openDir(b.graph.io, dir_path, .{ .iterate = true }) catch continue;
+             defer dir.close(b.graph.io);
+ 
+diff --git a/src/analysis/call_resolver.zig b/src/analysis/call_resolver.zig
+index e2b2b90..e08034e 100644
+--- a/src/analysis/call_resolver.zig
++++ b/src/analysis/call_resolver.zig
+@@ -1,4 +1,5 @@
+ const std = @import("std");
++const compat = @import("../compat.zig");
+ const import_resolver = @import("import_resolver.zig");
+ const lexical_index = @import("lexical_index.zig");
+ const LexicalIndex = lexical_index.LexicalIndex;
+@@ -2225,7 +2226,7 @@ test "project resolution rejects malformed imports without hiding valid siblings
+         \\const bad_method = malformed.Container.make();
+         \\const good_method = valid.Container.make();
+         \\const bad_cycle = valid.Cycle;
+-    , .zig);
++    , compat.ast_parse_zig);
+     defer source.deinit(allocator);
+     var malformed = try std.zig.Ast.parse(allocator,
+         \\wrapped: @import("valid.zig"),
+@@ -2237,7 +2238,7 @@ test "project resolution rejects malformed imports without hiding valid siblings
+         \\pub const Cycle = @import("valid.zig").Cycle;
+         \\pub fn make() @import("valid.zig") { return undefined; }
+         \\const broken = ;
+-    , .zig);
++    , compat.ast_parse_zig);
+     defer malformed.deinit(allocator);
+     var valid = try std.zig.Ast.parse(allocator,
+         \\wrapped: Container,
+@@ -2248,7 +2249,7 @@ test "project resolution rejects malformed imports without hiding valid siblings
+         \\pub const Alias = Container;
+         \\pub const Cycle = @import("malformed.zig").Cycle;
+         \\pub fn make() Container { return undefined; }
+-    , .zig);
++    , compat.ast_parse_zig);
+     defer valid.deinit(allocator);
+     try std.testing.expectEqual(@as(usize, 0), source.errors.len);
+     try std.testing.expectEqual(@as(usize, 0), valid.errors.len);
+@@ -2359,7 +2360,7 @@ test "indexed lexical bindings preserve unindexed scope and alias resolution" {
+         \\}
+         \\fn unrelated(value: Other) void { value.unrelated(); }
+     ;
+-    var tree = try std.zig.Ast.parse(allocator, code, .zig);
++    var tree = try std.zig.Ast.parse(allocator, code, compat.ast_parse_zig);
+     defer tree.deinit(allocator);
+     var index = try LexicalIndex.init(allocator, &tree);
+     defer index.deinit(allocator);
+@@ -2404,7 +2405,7 @@ test "indexed result locations preserve scoped calls and return types" {
+         \\    return .init();
+         \\}
+     ;
+-    var tree = try std.zig.Ast.parse(allocator, code, .zig);
++    var tree = try std.zig.Ast.parse(allocator, code, compat.ast_parse_zig);
+     defer tree.deinit(allocator);
+     var index = try LexicalIndex.init(allocator, &tree);
+     defer index.deinit(allocator);
+@@ -2437,7 +2438,7 @@ test "ProjectTypeResolver rejects cyclic aliases without hiding valid receivers"
+         \\const Good = struct {};
+         \\fn run(x: A, good: Good) void { x.run(); good.run(); }
+     ;
+-    var tree = try std.zig.Ast.parse(allocator, code, .zig);
++    var tree = try std.zig.Ast.parse(allocator, code, compat.ast_parse_zig);
+     defer tree.deinit(allocator);
+     const files = [_]import_resolver.File{.{ .path = "api.zig", .tree = &tree }};
+     const resolver: ProjectTypeResolver = .{ .files = &files, .file_index = 0 };
+@@ -2464,12 +2465,12 @@ test "ProjectTypeResolver rejects cross-file member alias cycles" {
+         \\const b = @import("b.zig");
+         \\pub const A = b.B;
+         \\fn run(x: A) void { x.run(); }
+-    , .zig);
++    , compat.ast_parse_zig);
+     defer first.deinit(allocator);
+     var second = try std.zig.Ast.parse(allocator,
+         \\const a = @import("a.zig");
+         \\pub const B = a.A;
+-    , .zig);
++    , compat.ast_parse_zig);
+     defer second.deinit(allocator);
+     var first_index = try LexicalIndex.init(allocator, &first);
+     defer first_index.deinit(allocator);
+diff --git a/src/analysis/import_resolver.zig b/src/analysis/import_resolver.zig
+index bd29eaf..5c6cee6 100644
+--- a/src/analysis/import_resolver.zig
++++ b/src/analysis/import_resolver.zig
+@@ -1,4 +1,5 @@
+ const std = @import("std");
++const compat = @import("../compat.zig");
+ const ast_walk = @import("../ast_walk.zig");
+ const ProjectTypeResolver = @import("call_resolver.zig").ProjectTypeResolver;
+ const LexicalIndex = @import("lexical_index.zig").LexicalIndex;
+@@ -629,7 +630,7 @@ test "skript residual: public conditional imports expose both branches" {
+         \\const no_ffi_impl = @import("no_ffi.zig");
+         \\pub const ffi = if (true) ffi_impl else no_ffi_impl;
+     ;
+-    var tree = try std.zig.Ast.parse(allocator, code, .zig);
++    var tree = try std.zig.Ast.parse(allocator, code, compat.ast_parse_zig);
+     defer tree.deinit(allocator);
+ 
+     const files = [_]File{
+@@ -648,21 +649,21 @@ test "import resolution rejects malformed exports and preserves valid aliases" {
+         \\const valid = @import("valid.zig");
+         \\pub const hidden = malformed.leaf;
+         \\pub const visible = valid.leaf;
+-    , .zig);
++    , compat.ast_parse_zig);
+     defer source.deinit(allocator);
+     var malformed = try std.zig.Ast.parse(allocator,
+         \\pub const leaf = @import("hidden.zig");
+         \\pub const cycle = alias;
+         \\const alias = cycle;
+         \\const broken = ;
+-    , .zig);
++    , compat.ast_parse_zig);
+     defer malformed.deinit(allocator);
+     var valid = try std.zig.Ast.parse(allocator,
+         \\pub const leaf = selected;
+         \\const selected = @import("visible.zig");
+         \\pub const cycle = alias;
+         \\const alias = cycle;
+-    , .zig);
++    , compat.ast_parse_zig);
+     defer valid.deinit(allocator);
+     try std.testing.expectEqual(@as(usize, 0), source.errors.len);
+     try std.testing.expectEqual(@as(usize, 0), valid.errors.len);
+@@ -715,7 +716,7 @@ test "indexed imports preserve forward aliases and local shadowing" {
+         \\pub const cycle = alias;
+         \\const alias = cycle;
+     ;
+-    var tree = try std.zig.Ast.parse(allocator, code, .zig);
++    var tree = try std.zig.Ast.parse(allocator, code, compat.ast_parse_zig);
+     defer tree.deinit(allocator);
+     var index = try LexicalIndex.init(allocator, &tree);
+     defer index.deinit(allocator);
+@@ -739,7 +740,7 @@ test "public import aliases ignore unrelated local bindings" {
+         \\    _ = selected;
+         \\}
+     ;
+-    var tree = try std.zig.Ast.parse(std.testing.allocator, code, .zig);
++    var tree = try std.zig.Ast.parse(std.testing.allocator, code, compat.ast_parse_zig);
+     defer tree.deinit(std.testing.allocator);
+     const files = [_]File{.{ .path = "src/root.zig", .tree = &tree }};
+     try std.testing.expect(filePubliclyImportsPath(&files, 0, "src/selected.zig"));
+@@ -758,7 +759,7 @@ test "public initializer locals shadow root import aliases" {
+         \\    break :blk selected;
+         \\};
+     ;
+-    var tree = try std.zig.Ast.parse(std.testing.allocator, code, .zig);
++    var tree = try std.zig.Ast.parse(std.testing.allocator, code, compat.ast_parse_zig);
+     defer tree.deinit(std.testing.allocator);
+     const files = [_]File{.{ .path = "src/root.zig", .tree = &tree }};
+     try std.testing.expect(!filePubliclyImportsPath(&files, 0, "src/selected.zig"));
+@@ -773,7 +774,7 @@ test "public values do not reexport namespaces passed to constructors" {
+         \\pub const instance = Box{ .count = count(hidden) };
+         \\pub const conditional = if (true) Box{ .count = count(hidden) } else count(hidden);
+     ;
+-    var tree = try std.zig.Ast.parse(std.testing.allocator, code, .zig);
++    var tree = try std.zig.Ast.parse(std.testing.allocator, code, compat.ast_parse_zig);
+     defer tree.deinit(std.testing.allocator);
+     const files = [_]File{.{ .path = "src/root.zig", .tree = &tree }};
+     try std.testing.expect(!filePubliclyImportsPath(&files, 0, "src/hidden.zig"));
+@@ -786,7 +787,7 @@ test "conditional namespace aliases do not reexport their condition" {
+         \\else
+         \\    @import("fallback.zig");
+     ;
+-    var tree = try std.zig.Ast.parse(std.testing.allocator, code, .zig);
++    var tree = try std.zig.Ast.parse(std.testing.allocator, code, compat.ast_parse_zig);
+     defer tree.deinit(std.testing.allocator);
+     const files = [_]File{.{ .path = "src/root.zig", .tree = &tree }};
+     try std.testing.expect(filePubliclyImportsPath(&files, 0, "src/native.zig"));
+@@ -796,18 +797,18 @@ test "conditional namespace aliases do not reexport their condition" {
+ 
+ test "unsupported usingnamespace syntax does not expose imports" {
+     const allocator = std.testing.allocator;
+-    var first = try std.zig.Ast.parse(allocator, "pub usingnamespace @import(\"b.zig\");", .zig);
++    var first = try std.zig.Ast.parse(allocator, "pub usingnamespace @import(\"b.zig\");", compat.ast_parse_zig);
+     defer first.deinit(allocator);
+     var second = try std.zig.Ast.parse(allocator,
+         \\pub usingnamespace @import("a.zig");
+         \\pub usingnamespace @import("malformed.zig");
+         \\pub usingnamespace @import("c.zig");
+-    , .zig);
++    , compat.ast_parse_zig);
+     defer second.deinit(allocator);
+     var malformed = try std.zig.Ast.parse(allocator,
+         \\pub usingnamespace @import("hidden.zig");
+         \\const broken = ;
+-    , .zig);
++    , compat.ast_parse_zig);
+     defer malformed.deinit(allocator);
+     try std.testing.expect(malformed.errors.len != 0);
+     const files = [_]File{
+@@ -835,7 +836,7 @@ test "unsupported usingnamespace syntax does not expose imports" {
+ 
+ test "path index preserves POSIX equivalence and first matching file" {
+     const allocator = std.testing.allocator;
+-    var tree = try std.zig.Ast.parse(allocator, "", .zig);
++    var tree = try std.zig.Ast.parse(allocator, "", compat.ast_parse_zig);
+     defer tree.deinit(allocator);
+     var files = [_]File{
+         .{ .path = "./src/value.zig", .tree = &tree },
+@@ -863,7 +864,7 @@ test "path index preserves POSIX equivalence and first matching file" {
+ 
+ test "path index releases duplicate and partial normalized keys" {
+     const allocator = std.testing.allocator;
+-    var tree = try std.zig.Ast.parse(allocator, "", .zig);
++    var tree = try std.zig.Ast.parse(allocator, "", compat.ast_parse_zig);
+     defer tree.deinit(allocator);
+     const files = [_]File{
+         .{ .path = "src/value.zig", .tree = &tree },
+@@ -897,9 +898,9 @@ test "import path comparisons preserve normalization and package precedence" {
+ 
+ test "indexed imports preserve exact spelling and package first-match precedence" {
+     const allocator = std.testing.allocator;
+-    var tree = try std.zig.Ast.parse(allocator, "", .zig);
++    var tree = try std.zig.Ast.parse(allocator, "", compat.ast_parse_zig);
+     defer tree.deinit(allocator);
+-    const deep_path = ("dir/" ** 128) ++ "deep.zig";
++    const deep_path = comptime repeatString("dir/", 128) ++ "deep.zig";
+     var files = [_]File{
+         .{ .path = "lib/module.zig", .tree = &tree },
+         .{ .path = "src/value.zig", .tree = &tree },
+@@ -927,3 +928,13 @@ test "indexed imports preserve exact spelling and package first-match precedence
+     }
+     try std.testing.expectEqual(@as(?usize, 1), resolveImportToFileIndex(files[1..], "other/main.zig", "src/./value.zig"));
+ }
++
++/// `s` repeated `n` times, as a string literal would be (Zig 0.17 removed `**`).
++fn repeatString(comptime s: []const u8, comptime n: usize) *const [s.len * n:0]u8 {
++    comptime {
++        var out: [s.len * n:0]u8 = undefined;
++        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
++        const result = out;
++        return &result;
++    }
++}
+diff --git a/src/analysis/lexical_index.zig b/src/analysis/lexical_index.zig
+index 0aec0c8..9d1cfd1 100644
+--- a/src/analysis/lexical_index.zig
++++ b/src/analysis/lexical_index.zig
+@@ -281,17 +281,17 @@ fn tokenOwners(
+     };
+     std.mem.sort(u32, nodes.items, ranges, Order.start);
+     const Queue: type = std.PriorityQueue(u32, []const ScopeRange, Order.smallest);
+-    var active = if (compat.frontend == .zig_0_16)
++    var active = if (compat.frontend != .zig_0_15)
+         Queue.initContext(ranges)
+     else
+         Queue.init(allocator, ranges);
+-    defer if (compat.frontend == .zig_0_16) active.deinit(allocator) else active.deinit();
++    defer if (compat.frontend != .zig_0_15) active.deinit(allocator) else active.deinit();
+     const owners = try allocator.alloc(u32, tree.tokens.len);
+     errdefer allocator.free(owners);
+     var next: usize = 0;
+     for (owners, 0..) |*owner, token| {
+         while (next < nodes.items.len and ranges[nodes.items[next]].first_token <= token) : (next += 1) {
+-            if (compat.frontend == .zig_0_16) {
++            if (compat.frontend != .zig_0_15) {
+                 try active.push(allocator, nodes.items[next]);
+             } else {
+                 try active.add(nodes.items[next]);
+@@ -299,7 +299,7 @@ fn tokenOwners(
+         }
+         while (active.peek()) |node| {
+             if (ranges[node].last_token >= token) break;
+-            const removed = if (compat.frontend == .zig_0_16)
++            const removed = if (compat.frontend != .zig_0_15)
+                 active.pop() orelse @panic("lexical owner queue became empty after peek")
+             else
+                 active.remove();
+@@ -316,7 +316,7 @@ test "lexical index leaves malformed trees inert" {
+         \\pub const Earlier = struct {};
+         \\pub fn complete() void {}
+         \\fn broken(
+-    , .zig);
++    , compat.ast_parse_zig);
+     defer tree.deinit(allocator);
+     try std.testing.expect(tree.errors.len != 0);
+ 
+@@ -345,7 +345,7 @@ test "lexical index releases partial syntax and name indexes on allocation failu
+         \\    { const value: Later = undefined; value.inner(); }
+         \\    value.outer();
+         \\}
+-    , .zig);
++    , compat.ast_parse_zig);
+     defer tree.deinit(allocator);
+     const Harness = struct {
+         fn run(failing_allocator: std.mem.Allocator, ast: *const std.zig.Ast) !void {
+diff --git a/src/analysis/project_reference_index.zig b/src/analysis/project_reference_index.zig
+index 71b569c..f3b7a26 100644
+--- a/src/analysis/project_reference_index.zig
++++ b/src/analysis/project_reference_index.zig
+@@ -1,4 +1,6 @@
+ const std = @import("std");
++const NoResizeAllocator = @import("../no_resize_allocator.zig");
++const compat = @import("../compat.zig");
+ const ast_walk = @import("../ast_walk.zig");
+ const import_resolver = @import("import_resolver.zig");
+ const ProjectTypeResolver = @import("call_resolver.zig").ProjectTypeResolver;
+@@ -298,9 +300,9 @@ test "reference index propagates imports through cyclic aliases" {
+         \\const first = second;
+         \\const second = if (true) first else @import("leaf.zig");
+         \\pub const exposed = first;
+-    , .zig);
++    , compat.ast_parse_zig);
+     defer root.deinit(allocator);
+-    var leaf = try std.zig.Ast.parse(allocator, "", .zig);
++    var leaf = try std.zig.Ast.parse(allocator, "", compat.ast_parse_zig);
+     defer leaf.deinit(allocator);
+     const files = [_]import_resolver.File{
+         .{ .path = "root.zig", .tree = &root },
+@@ -316,16 +318,16 @@ test "reference index propagates imports through cyclic aliases" {
+ 
+ test "reference index isolates unsupported usingnamespace syntax from valid siblings" {
+     const allocator = std.testing.allocator;
+-    var root = try std.zig.Ast.parse(allocator, "pub usingnamespace @import(\"facade.zig\");", .zig);
++    var root = try std.zig.Ast.parse(allocator, "pub usingnamespace @import(\"facade.zig\");", compat.ast_parse_zig);
+     defer root.deinit(allocator);
+     var facade = try std.zig.Ast.parse(allocator,
+         \\pub usingnamespace @import("root.zig");
+         \\pub usingnamespace @import("leaf.zig");
+-    , .zig);
++    , compat.ast_parse_zig);
+     defer facade.deinit(allocator);
+-    var leaf = try std.zig.Ast.parse(allocator, "pub const api = @import(\"sibling.zig\");", .zig);
++    var leaf = try std.zig.Ast.parse(allocator, "pub const api = @import(\"sibling.zig\");", compat.ast_parse_zig);
+     defer leaf.deinit(allocator);
+-    var sibling = try std.zig.Ast.parse(allocator, "pub const value = 1;", .zig);
++    var sibling = try std.zig.Ast.parse(allocator, "pub const value = 1;", compat.ast_parse_zig);
+     defer sibling.deinit(allocator);
+     try std.testing.expect(root.errors.len != 0);
+     try std.testing.expect(facade.errors.len != 0);
+@@ -363,16 +365,16 @@ test "reference index keeps malformed import targets without scanning their expo
+     var root = try std.zig.Ast.parse(allocator,
+         \\pub const malformed = @import("malformed.zig");
+         \\pub const leaf = @import("leaf.zig");
+-    , .zig);
++    , compat.ast_parse_zig);
+     defer root.deinit(allocator);
+     var malformed = try std.zig.Ast.parse(allocator,
+         \\pub const leaked = @import("hidden.zig");
+         \\pub usingnamespace @import("hidden.zig");
+         \\const broken = ;
+-    , .zig);
++    , compat.ast_parse_zig);
+     defer malformed.deinit(allocator);
+     try std.testing.expect(malformed.errors.len != 0);
+-    var leaf = try std.zig.Ast.parse(allocator, "pub const value = 1;", .zig);
++    var leaf = try std.zig.Ast.parse(allocator, "pub const value = 1;", compat.ast_parse_zig);
+     defer leaf.deinit(allocator);
+     const files = [_]import_resolver.File{
+         .{ .path = "root.zig", .tree = &root },
+@@ -399,7 +401,8 @@ test "reference index keeps malformed import targets without scanning their expo
+             try std.testing.expectEqualSlices(usize, &.{1}, try index.namespaceTargets(0, @intFromEnum(initializer)));
+         }
+     };
+-    try std.testing.checkAllAllocationFailures(allocator, Harness.run, .{@as([]const import_resolver.File, &files)});
++    var no_resize: NoResizeAllocator = .init(allocator);
++    try std.testing.checkAllAllocationFailures(no_resize.allocator(), Harness.run, .{@as([]const import_resolver.File, &files)});
+ }
+ 
+ test "reference index keeps namespace member and shadowed alias targets distinct" {
+@@ -412,11 +415,11 @@ test "reference index keeps namespace member and shadowed alias targets distinct
+         \\    const facade = struct { const api = struct { const used = 0; }; };
+         \\    _ = facade.api.used;
+         \\}
+-    , .zig);
++    , compat.ast_parse_zig);
+     defer root.deinit(allocator);
+-    var facade = try std.zig.Ast.parse(allocator, "pub const api = @import(\"leaf.zig\");", .zig);
++    var facade = try std.zig.Ast.parse(allocator, "pub const api = @import(\"leaf.zig\");", compat.ast_parse_zig);
+     defer facade.deinit(allocator);
+-    var leaf = try std.zig.Ast.parse(allocator, "pub const used = 1;", .zig);
++    var leaf = try std.zig.Ast.parse(allocator, "pub const used = 1;", compat.ast_parse_zig);
+     defer leaf.deinit(allocator);
+     const files = [_]import_resolver.File{
+         .{ .path = "root.zig", .tree = &root },
+diff --git a/src/ast_walk.zig b/src/ast_walk.zig
+index a4685ab..44e1a27 100644
+--- a/src/ast_walk.zig
++++ b/src/ast_walk.zig
+@@ -281,7 +281,7 @@ pub fn walkChildren(
+             return;
+         },
+         .@"errdefer" => {
+-            const body = @intFromEnum(datas[node].opt_token_and_node[1]);
++            const body = @intFromEnum(datas[node].node);
+             if (body != 0) {
+                 try child_fn(tree, body, visitor);
+             }
+@@ -400,7 +400,6 @@ pub fn walkChildren(
+         .mul,
+         .div,
+         .mod,
+-        .array_mult,
+         .mul_wrap,
+         .mul_sat,
+         .add,
+diff --git a/src/cached_artifacts.zig b/src/cached_artifacts.zig
+index f1e92ca..92e97ab 100644
+--- a/src/cached_artifacts.zig
++++ b/src/cached_artifacts.zig
+@@ -174,10 +174,7 @@ fn deserializeBool(data: []const u8, offset: *usize) !bool {
+ }
+ 
+ fn deserializeEnum(comptime T: type, value: u8) !T {
+-    inline for (std.meta.fields(T)) |field| {
+-        if (value == field.value) return @enumFromInt(value);
+-    }
+-    return error.InvalidFormat;
++    return std.enums.fromInt(T, value) orelse error.InvalidFormat;
+ }
+ 
+ fn serializeCfg(cfg: *const Cfg, allocator: std.mem.Allocator, buffer: *std.ArrayList(u8)) !void {
+diff --git a/src/checkers/divide_by_zero/scan.zig b/src/checkers/divide_by_zero/scan.zig
+index 6d602ff..7762441 100644
+--- a/src/checkers/divide_by_zero/scan.zig
++++ b/src/checkers/divide_by_zero/scan.zig
+@@ -1,4 +1,5 @@
+ const std = @import("std");
++const compat = @import("../../compat.zig");
+ const ast_walk = @import("../../ast_walk.zig");
+ const checker_mod = @import("../../checker.zig");
+ const CheckerError = checker_mod.CheckerError;
+@@ -306,7 +307,7 @@ test "divide-by-zero emission propagates allocation failures without leaks" {
+         \\    _ = 1 / 0;
+         \\}
+     ;
+-    var tree = try std.zig.Ast.parse(std.testing.allocator, code, .zig);
++    var tree = try std.zig.Ast.parse(std.testing.allocator, code, compat.ast_parse_zig);
+     defer tree.deinit(std.testing.allocator);
+     const site: Site = for (tree.nodes.items(.tag), 0..) |tag, index| {
+         if (tag != .div) continue;
+diff --git a/src/checkers/optional_unwrap/bindings.zig b/src/checkers/optional_unwrap/bindings.zig
+index f6cbbc8..3d43dae 100644
+--- a/src/checkers/optional_unwrap/bindings.zig
++++ b/src/checkers/optional_unwrap/bindings.zig
+@@ -1,4 +1,5 @@
+ const std = @import("std");
++const compat = @import("../../compat.zig");
+ const lexical_index = @import("../../analysis/lexical_index.zig");
+ const import_resolver = @import("../../analysis/import_resolver.zig");
+ 
+@@ -138,10 +139,6 @@ const PayloadBindingSearch = struct {
+                     const pair = tree.nodeData(@enumFromInt(parent)).node_and_node;
+                     self.optional(catch_token + 2, @intFromEnum(pair[1]));
+                 },
+-                .@"errdefer" => {
+-                    const pair = tree.nodeData(@enumFromInt(parent)).opt_token_and_node;
+-                    self.optional(pair[0].unwrap(), @intFromEnum(pair[1]));
+-                },
+                 else => {},
+             }
+         }
+@@ -209,13 +206,12 @@ test "guard bindings preserve payload scopes and nested function boundaries" {
+         \\        .first => |*value| value.switch_payload(),
+         \\        else => value.switch_else(),
+         \\    }
+-        \\    errdefer |value| value.errdefer_payload();
+         \\    const Nested = struct { fn inner() void { value.nested(); } };
+         \\    value.after();
+         \\}
+     ;
+     const allocator = std.testing.allocator;
+-    var tree = try std.zig.Ast.parse(allocator, code, .zig);
++    var tree = try std.zig.Ast.parse(allocator, code, compat.ast_parse_zig);
+     defer tree.deinit(allocator);
+     try std.testing.expectEqual(@as(usize, 0), tree.errors.len);
+     var lexical = try lexical_index.LexicalIndex.init(allocator, &tree);
+@@ -236,7 +232,6 @@ test "guard bindings preserve payload scopes and nested function boundaries" {
+         .{ .member = "catch_payload", .declaration = "value| value.catch_payload" },
+         .{ .member = "switch_payload", .declaration = "value| value.switch_payload" },
+         .{ .member = "switch_else", .declaration = "value: ?u8, optional" },
+-        .{ .member = "errdefer_payload", .declaration = "value| value.errdefer_payload" },
+         .{ .member = "nested", .declaration = "value: ?u8 = null" },
+         .{ .member = "after", .declaration = "value: ?u8, optional" },
+     }) |case| {
+diff --git a/src/checkers/optional_unwrap/guards.zig b/src/checkers/optional_unwrap/guards.zig
+index 0a91706..1b4b7cd 100644
+--- a/src/checkers/optional_unwrap/guards.zig
++++ b/src/checkers/optional_unwrap/guards.zig
+@@ -1183,7 +1183,6 @@ fn isStrictBinaryTag(tag: std.zig.Ast.Node.Tag) bool {
+         .mul,
+         .div,
+         .mod,
+-        .array_mult,
+         .mul_wrap,
+         .mul_sat,
+         .add,
+diff --git a/src/checkers/optional_unwrap_engine.zig b/src/checkers/optional_unwrap_engine.zig
+index cddb168..3202748 100644
+--- a/src/checkers/optional_unwrap_engine.zig
++++ b/src/checkers/optional_unwrap_engine.zig
+@@ -975,7 +975,7 @@ test "long block assignments after statement 64 dominate optional unwraps" {
+     const code: [:0]const u8 =
+         "const State = struct { value: ?u32 };\n" ++
+         "fn read(state: *State) u32 {\n" ++
+-        "    _ = 0;\n" ** 70 ++
++        comptime repeatString("    _ = 0;\n", 70) ++
+         "    state.value = 1;\n" ++
+         "    return state.value.?;\n" ++
+         "}\n";
+@@ -987,7 +987,7 @@ test "long block mutations after statement 64 invalidate optional guards" {
+         "const State = struct { value: ?u32 };\n" ++
+         "fn read(state: *State) u32 {\n" ++
+         "    state.value = 1;\n" ++
+-        "    _ = 0;\n" ** 70 ++
++        comptime repeatString("    _ = 0;\n", 70) ++
+         "    state.value = null;\n" ++
+         "    return state.value.?;\n" ++
+         "}\n";
+@@ -1194,3 +1194,13 @@ test "a field nulled inside the use loop stays an unsafe unwrap" {
+ 
+     try expectOptionalUnwrapDiagnosticLines(code, &.{10});
+ }
++
++/// `s` repeated `n` times, as a string literal would be (Zig 0.17 removed `**`).
++fn repeatString(comptime s: []const u8, comptime n: usize) *const [s.len * n:0]u8 {
++    comptime {
++        var out: [s.len * n:0]u8 = undefined;
++        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
++        const result = out;
++        return &result;
++    }
++}
+diff --git a/src/checkers/slice_bounds/scan.zig b/src/checkers/slice_bounds/scan.zig
+index 67092dc..bec4fd9 100644
+--- a/src/checkers/slice_bounds/scan.zig
++++ b/src/checkers/slice_bounds/scan.zig
+@@ -1,4 +1,5 @@
+ const std = @import("std");
++const compat = @import("../../compat.zig");
+ const ast_walk = @import("../../ast_walk.zig");
+ const checker_mod = @import("../../checker.zig");
+ const CheckerError = checker_mod.CheckerError;
+@@ -250,7 +251,7 @@ test "slice-bounds emission propagates allocation failures without leaks" {
+         \\    _ = items[5];
+         \\}
+     ;
+-    var tree = try std.zig.Ast.parse(std.testing.allocator, code, .zig);
++    var tree = try std.zig.Ast.parse(std.testing.allocator, code, compat.ast_parse_zig);
+     defer tree.deinit(std.testing.allocator);
+     const site: BoundsSite = for (tree.nodes.items(.tag), 0..) |tag, index| {
+         if (tag != .array_access) continue;
+diff --git a/src/checkers/store_violations_engine.zig b/src/checkers/store_violations_engine.zig
+index 98e4c95..43a6f27 100644
+--- a/src/checkers/store_violations_engine.zig
++++ b/src/checkers/store_violations_engine.zig
+@@ -230,7 +230,7 @@ test "store_violations_engine keeps fractional and wide integer paths reachable"
+     for (cases) |case| {
+         for ([_]bool{ false, true }) |with_types| {
+             var buffer: [1024]u8 = undefined;
+-            const code = try std.fmt.bufPrintZ(
++            const code = try std.fmt.bufPrintSentinel(
+                 &buffer,
+                 \\const std = @import("std");
+                 \\fn check(allocator: std.mem.Allocator, input: {s}) !void {{
+@@ -245,6 +245,7 @@ test "store_violations_engine keeps fractional and wide integer paths reachable"
+                 \\}}
+             ,
+                 .{ case.value_type, case.first, case.second },
++                0,
+             );
+             var source = Source.init(allocator, "numeric-domain.zig", code);
+             defer source.deinit();
+diff --git a/src/compat.zig b/src/compat.zig
+index e9c2415..3d0aed0 100644
+--- a/src/compat.zig
++++ b/src/compat.zig
+@@ -9,8 +9,9 @@ const std = @import("std");
+ const builtin = @import("builtin");
+ 
+ pub const supported_zig_versions = [_]std.SemanticVersion{
+-    .{ .major = 0, .minor = 15, .patch = 2 },
+-    .{ .major = 0, .minor = 16, .patch = 0 },
++    // The Zig 0.17 port (zig-interval patch 0008) removes node and instruction tags 0.17
++    // dropped, so this tree no longer analyses correctly when built by 0.15 or 0.16.
++    .{ .major = 0, .minor = 17, .patch = 0 },
+ };
+ 
+ comptime {
+@@ -20,30 +21,38 @@ comptime {
+     }
+     if (!supported) {
+         @compileError("zwanzig does not support Zig " ++ builtin.zig_version_string ++
+-            "; supported versions: 0.15.2, 0.16.0 (see docs/ZIG_0_16_MIGRATION_PLAN.md)");
++            "; supported versions: 0.17.0 (see docs/ZIG_0_16_MIGRATION_PLAN.md)");
+     }
+ }
+ 
+ pub const Frontend = enum {
+     zig_0_15,
+     zig_0_16,
++    zig_0_17,
+ };
+ 
+ pub const frontend: Frontend = switch (builtin.zig_version.minor) {
+     15 => .zig_0_15,
+     16 => .zig_0_16,
++    17 => .zig_0_17,
+     else => unreachable,
+ };
+ 
+-pub const io = if (builtin.zig_version.minor == 16)
+-    @import("compat/zig_0_16/io.zig")
+-else
+-    @import("compat/zig_0_15/io.zig");
++pub const io = switch (frontend) {
++    .zig_0_15 => @import("compat/zig_0_15/io.zig"),
++    // 0.17 kept the 0.16 I/O and ZIR container APIs these wrap.
++    .zig_0_16, .zig_0_17 => @import("compat/zig_0_16/io.zig"),
++};
++
++pub const zir = switch (frontend) {
++    .zig_0_15 => @import("compat/zig_0_15/zir.zig"),
++    // 0.17 kept the 0.16 I/O and ZIR container APIs these wrap.
++    .zig_0_16, .zig_0_17 => @import("compat/zig_0_16/zir.zig"),
++};
+ 
+-pub const zir = if (builtin.zig_version.minor == 16)
+-    @import("compat/zig_0_16/zir.zig")
+-else
+-    @import("compat/zig_0_15/zir.zig");
++/// The `std.zig.Ast.parse` argument that parses Zig source: a `Mode` until 0.16, an options
++/// struct (mode `.zig` by default) from 0.17 on.
++pub const ast_parse_zig = if (frontend == .zig_0_17) std.zig.Ast.ParseOptions{} else std.zig.Ast.Mode.zig;
+ 
+ pub const Context = io.Context;
+ pub const Executor = io.Executor;
+diff --git a/src/counting_allocator.zig b/src/counting_allocator.zig
+index 81ff6eb..f0991ae 100644
+--- a/src/counting_allocator.zig
++++ b/src/counting_allocator.zig
+@@ -114,7 +114,7 @@ test "CountingAllocator preserves counts when realloc moves or fails" {
+     const old_pointer = bytes.ptr;
+     bytes = try allocator.realloc(bytes, 64);
+     try std.testing.expect(bytes.ptr != old_pointer);
+-    try std.testing.expectEqualSlices(u8, &([_]u8{0x5a} ** 16), bytes[0..16]);
++    try std.testing.expectEqualSlices(u8, &@as([16]u8, @splat(0x5a)), bytes[0..16]);
+     try std.testing.expectEqual(@as(usize, 64), counting.live_bytes);
+     failing.fail_index = failing.alloc_index;
+     try std.testing.expectError(error.OutOfMemory, allocator.realloc(bytes, 128));
+diff --git a/src/engine/analysis/defer_scan.zig b/src/engine/analysis/defer_scan.zig
+index 71c44b9..acbbb56 100644
+--- a/src/engine/analysis/defer_scan.zig
++++ b/src/engine/analysis/defer_scan.zig
+@@ -24,7 +24,7 @@ pub fn Mixin(comptime _Engine: type) type {
+             const data = tree.nodes.items(.data);
+             const tags = tree.nodes.items(.tag);
+             if (defer_node >= data.len) return;
+-            const body_node = @intFromEnum(data[defer_node].opt_token_and_node[1]);
++            const body_node = @intFromEnum(data[defer_node].node);
+             if (body_node == 0) return;
+             const parent_map = try self.getParentMap(tree);
+             const scope_node = findErrdeferScope(tags, parent_map, defer_node);
+diff --git a/src/engine/analysis/engine.zig b/src/engine/analysis/engine.zig
+index aa29546..eceda18 100644
+--- a/src/engine/analysis/engine.zig
++++ b/src/engine/analysis/engine.zig
+@@ -1,4 +1,5 @@
+ const std = @import("std");
++const compat = @import("../../compat.zig");
+ const log = std.log.scoped(.analysis_engine);
+ const cfg_mod = @import("../../cfg.zig");
+ const ids = @import("../../ids.zig");
+@@ -1267,7 +1268,7 @@ test "AnalysisEngine source parents retain container scope after engine teardown
+         \\    };
+         \\};
+     ;
+-    var parsed = try std.zig.Ast.parse(allocator, code, .zig);
++    var parsed = try std.zig.Ast.parse(allocator, code, compat.ast_parse_zig);
+     defer parsed.deinit(allocator);
+     var source = Source.initParsed(allocator, "parent-scope.zig", &parsed);
+     defer source.deinit();
+diff --git a/src/engine/analysis/resource_calls.zig b/src/engine/analysis/resource_calls.zig
+index 99da182..b041165 100644
+--- a/src/engine/analysis/resource_calls.zig
++++ b/src/engine/analysis/resource_calls.zig
+@@ -270,7 +270,6 @@ pub fn Mixin(comptime _Engine: type) type {
+                 .slice_open,
+                 .slice_sentinel,
+                 .address_of,
+-                .array_mult,
+                 .array_cat,
+                 .array_init,
+                 .array_init_comma,
+diff --git a/src/engine/store.zig b/src/engine/store.zig
+index 00044f7..ddf2161 100644
+--- a/src/engine/store.zig
++++ b/src/engine/store.zig
+@@ -91,7 +91,7 @@ const ViolationSet = struct {
+     const empty: ViolationSet = .{ .shared = null };
+     const Map: type = switch (compat.frontend) {
+         .zig_0_15 => std.ArrayHashMapUnmanaged(StoreViolation, void, Context, true),
+-        .zig_0_16 => std.array_hash_map.Custom(StoreViolation, void, Context, true),
++        .zig_0_16, .zig_0_17 => std.array_hash_map.Custom(StoreViolation, void, Context, true),
+     };
+     const Context = struct {
+         pub fn hash(_: @This(), violation: StoreViolation) u32 {
+@@ -249,7 +249,7 @@ const ViolationSet = struct {
+                 if (lhs.vtable == std.heap.raw_c_allocator.vtable) return true;
+             }
+         }
+-        if (compat.frontend == .zig_0_16 and builtin.single_threaded and
++        if (compat.frontend != .zig_0_15 and builtin.single_threaded and
+             (builtin.os.tag == .linux or builtin.cpu.arch.isWasm()))
+         {
+             if (lhs.vtable == std.heap.brk_allocator.vtable) return true;
+@@ -1512,7 +1512,7 @@ test "Store violation unions retain overlapping large histories" {
+     try testing.expectEqual(@as(usize, 384), widened.violationCount());
+     try testing.expect(widened.eql(&reversed));
+     try testing.expectEqual(widened.computeHash(), reversed.computeHash());
+-    var observed = [_]bool{false} ** 384;
++    var observed: [384]bool = @splat(false);
+     for (widened.getViolations()) |violation| {
+         const region = ids.varIndex(violation.region);
+         try testing.expect(region < observed.len);
+diff --git a/src/engine/var_resolver.zig b/src/engine/var_resolver.zig
+index cca220f..ef11694 100644
+--- a/src/engine/var_resolver.zig
++++ b/src/engine/var_resolver.zig
+@@ -451,16 +451,8 @@ pub const VarResolver = struct {
+     }
+ 
+     fn scanErrdefer(self: *VarResolver, node: u32) ResolveError!void {
+-        const data = self.tree.nodes.items(.data)[node].opt_token_and_node;
+-        const payload_token = data[0].unwrap();
+-        const expr_node = data[1];
+-
+-        try self.pushScope();
+-        if (payload_token) |tok| {
+-            try self.addPayloadName(tok);
+-        }
+-        try self.scanNode(@intFromEnum(expr_node));
+-        self.popScope();
++        // Zig 0.17 removed the `errdefer |err|` payload: the node is `errdefer expr`.
++        try self.scanNode(@intFromEnum(self.tree.nodes.items(.data)[node].node));
+     }
+ 
+     fn scanContainer(self: *VarResolver, node: u32) ResolveError!void {
+diff --git a/src/main_0_16.zig b/src/main_0_16.zig
+index 1da5c3b..59e22f1 100644
+--- a/src/main_0_16.zig
++++ b/src/main_0_16.zig
+@@ -26,6 +26,7 @@ pub fn main(init: std.process.Init) !void {
+ }
+ 
+ test {
++    _ = @import("no_resize_allocator.zig");
+     _ = @import("analysis/call_resolver.zig");
+     _ = @import("analysis/import_resolver.zig");
+     _ = @import("ir.zig");
+diff --git a/src/no_resize_allocator.zig b/src/no_resize_allocator.zig
+new file mode 100644
+index 0000000..d73fa86
+--- /dev/null
++++ b/src/no_resize_allocator.zig
+@@ -0,0 +1,52 @@
++//! An allocator that never grows or shrinks in place: every resize and remap fails, so every
++//! size change is a fresh allocation, a copy and a free.
++//!
++//! For `std.testing.checkAllAllocationFailures`, which counts the allocations of one run and then
++//! replays it failing each one in turn. Zig 0.17's `std.testing.allocator` (a `SafeAllocator`)
++//! resizes in place or not depending on bucket occupancy, so a growing list allocates a different
++//! number of times from one run to the next and the replay reports
++//! `error.NondeterministicMemoryUsage`. Backed by this allocator, the count depends only on the
++//! code under test. Leaks are still caught by the child allocator.
++
++const std = @import("std");
++const Allocator = std.mem.Allocator;
++
++child: Allocator,
++
++const NoResizeAllocator = @This();
++
++pub fn init(child: Allocator) NoResizeAllocator {
++    return .{ .child = child };
++}
++
++pub fn allocator(self: *NoResizeAllocator) Allocator {
++    return .{
++        .ptr = self,
++        .vtable = &.{
++            .alloc = alloc,
++            .resize = Allocator.noResize,
++            .remap = Allocator.noRemap,
++            .free = free,
++        },
++    };
++}
++
++fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
++    const self: *NoResizeAllocator = @ptrCast(@alignCast(ctx));
++    return self.child.rawAlloc(len, alignment, ret_addr);
++}
++
++fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
++    const self: *NoResizeAllocator = @ptrCast(@alignCast(ctx));
++    self.child.rawFree(memory, alignment, ret_addr);
++}
++
++test "in-place growth and shrinking always fail" {
++    var no_resize: NoResizeAllocator = .init(std.testing.allocator);
++    const gpa = no_resize.allocator();
++    const memory = try gpa.alloc(u8, 16);
++    defer gpa.free(memory); // through the child, whose leak check would report a lost free
++    try std.testing.expect(!gpa.resize(memory, 8));
++    try std.testing.expect(!gpa.resize(memory, 32));
++    try std.testing.expect(gpa.remap(memory, 32) == null);
++}
+diff --git a/src/project_sources.zig b/src/project_sources.zig
+index 68746a8..1af8752 100644
+--- a/src/project_sources.zig
++++ b/src/project_sources.zig
+@@ -28,7 +28,7 @@ const Entry = struct {
+         const content = try compat.readFileAlloc(io_context, allocator, path, max_source_size);
+         errdefer allocator.free(content.ptr[0 .. content.len + 1]);
+ 
+-        var tree = try std.zig.Ast.parse(allocator, content, .zig);
++        var tree = try std.zig.Ast.parse(allocator, content, compat.ast_parse_zig);
+         errdefer tree.deinit(allocator);
+         const lexical_index = try LexicalIndex.init(allocator, &tree);
+ 
+diff --git a/src/project_unused_decl.zig b/src/project_unused_decl.zig
+index 111d9e7..f163a24 100644
+--- a/src/project_unused_decl.zig
++++ b/src/project_unused_decl.zig
+@@ -1,4 +1,5 @@
+ const std = @import("std");
++const NoResizeAllocator = @import("no_resize_allocator.zig");
+ const compat = @import("compat.zig");
+ const ast_walk = @import("ast_walk.zig");
+ const call_resolver = @import("analysis/call_resolver.zig");
+@@ -1227,14 +1228,14 @@ test "project public API closure follows conditional aliases and cycles" {
+         \\const selected = @import("left.zig");
+         \\pub const api = if (@import("condition.zig").enabled) selected else @import("right.zig");
+         \\pub const value = make(@import("hidden.zig"));
+-    , .zig);
++    , compat.ast_parse_zig);
+     defer root.deinit(allocator);
+     var left = try std.zig.Ast.parse(allocator,
+         \\pub const cycle = @import("root.zig");
+         \\pub const leaf = @import("leaf.zig");
+-    , .zig);
++    , compat.ast_parse_zig);
+     defer left.deinit(allocator);
+-    var empty = try std.zig.Ast.parse(allocator, "", .zig);
++    var empty = try std.zig.Ast.parse(allocator, "", compat.ast_parse_zig);
+     defer empty.deinit(allocator);
+     const files = [_]import_resolver.File{
+         .{ .path = "root.zig", .tree = &root },
+@@ -1454,8 +1455,9 @@ test "project unused analysis requires complete source and build syntax" {
+         try directory.writeFile("build.zig", scenario.build);
+         var project = try ProjectSources.init(&io_context, allocator, &paths);
+         defer project.deinit();
++        var no_resize: NoResizeAllocator = .init(allocator);
+         try std.testing.checkAllAllocationFailures(
+-            allocator,
++            no_resize.allocator(),
+             Harness.run,
+             .{ &project, &scenarios, case_index },
+         );
+diff --git a/src/rules/deinit_lifecycle.zig b/src/rules/deinit_lifecycle.zig
+index 73416a4..efb8452 100644
+--- a/src/rules/deinit_lifecycle.zig
++++ b/src/rules/deinit_lifecycle.zig
+@@ -210,7 +210,7 @@ pub const DeinitLifecycleRule = struct {
+         fn extractDeferredMethodCall(self: *const Scanner, stmt: u32) RuleError!?MethodCall {
+             const body: u32 = switch (self.tags[stmt]) {
+                 .@"defer" => @intFromEnum(self.datas[stmt].node),
+-                .@"errdefer" => @intFromEnum(self.datas[stmt].opt_token_and_node[1]),
++                .@"errdefer" => @intFromEnum(self.datas[stmt].node),
+                 else => return null,
+             };
+             if (body == 0 or body >= self.tags.len) return null;
+diff --git a/src/rules/empty_errdefer.zig b/src/rules/empty_errdefer.zig
+index ea11c6e..dd664a7 100644
+--- a/src/rules/empty_errdefer.zig
++++ b/src/rules/empty_errdefer.zig
+@@ -19,7 +19,7 @@ pub const EmptyErrdeferRule = struct {
+         for (tags, 0..) |tag, i| {
+             if (tag == .@"errdefer") {
+                 const errdefer_node: u32 = @intCast(i);
+-                const errdefer_body = data[errdefer_node].opt_token_and_node[1];
++                const errdefer_body = data[errdefer_node].node;
+ 
+                 const errdefer_body_idx = @intFromEnum(errdefer_body);
+                 if (empty_block.isEmptyBlock(tags, data, errdefer_body_idx)) {
+diff --git a/src/rules/identifier_style.zig b/src/rules/identifier_style.zig
+index cce0442..4507847 100644
+--- a/src/rules/identifier_style.zig
++++ b/src/rules/identifier_style.zig
+@@ -101,9 +101,6 @@ pub const IdentifierStyleRule = struct {
+                 .@"catch" => {
+                     try checkCatchPayload(src, allocator, diagnostics, tree, @intCast(i), token_tags, token_starts);
+                 },
+-                .@"errdefer" => {
+-                    try checkErrdeferPayload(src, allocator, diagnostics, tree, @intCast(i), token_tags, token_starts);
+-                },
+                 else => {},
+             }
+         }
+@@ -1289,20 +1286,6 @@ pub const IdentifierStyleRule = struct {
+         try checkPayloadToken(src, allocator, diagnostics, tree, token_tags, token_starts, catch_token + 2, "payload", .value);
+     }
+ 
+-    fn checkErrdeferPayload(
+-        src: *Source,
+-        allocator: std.mem.Allocator,
+-        diagnostics: *std.ArrayList(Diagnostic),
+-        tree: *const std.zig.Ast,
+-        node_idx: u32,
+-        token_tags: []const std.zig.Token.Tag,
+-        token_starts: []const u32,
+-    ) RuleError!void {
+-        const data = tree.nodes.items(.data)[node_idx].opt_token_and_node;
+-        const payload_token = data[0].unwrap() orelse return;
+-        try checkPayloadToken(src, allocator, diagnostics, tree, token_tags, token_starts, payload_token, "payload", .value);
+-    }
+-
+     fn checkPayloadToken(
+         src: *Source,
+         allocator: std.mem.Allocator,
+diff --git a/src/rules/shadowed_variable.zig b/src/rules/shadowed_variable.zig
+index 41b5f4f..598344c 100644
+--- a/src/rules/shadowed_variable.zig
++++ b/src/rules/shadowed_variable.zig
+@@ -435,16 +435,8 @@ pub const ShadowedVariableRule = struct {
+         }
+ 
+         fn scanErrdefer(self: *ShadowScanner, node: u32) RuleError!void {
+-            const data = self.tree.nodes.items(.data)[node].opt_token_and_node;
+-            const payload_token = data[0].unwrap();
+-            const expr_node = data[1];
+-
+-            try self.pushScope();
+-            if (payload_token) |tok| {
+-                try self.addPayloadName(tok);
+-            }
+-            try self.scanNode(@intFromEnum(expr_node));
+-            self.popScope();
++            // Zig 0.17 removed the `errdefer |err|` payload: the node is `errdefer expr`.
++            try self.scanNode(@intFromEnum(self.tree.nodes.items(.data)[node].node));
+         }
+ 
+         fn scanContainer(self: *ShadowScanner, node: u32) RuleError!void {
+diff --git a/src/rules/unused_decl.zig b/src/rules/unused_decl.zig
+index 981f4a3..bd0f7d3 100644
+--- a/src/rules/unused_decl.zig
++++ b/src/rules/unused_decl.zig
+@@ -1093,15 +1093,8 @@ pub const UnusedDeclRule = struct {
+         }
+ 
+         fn scanErrdefer(self: *UsageScanner, node: u32) RuleError!bool {
+-            const data = self.datas[node].opt_token_and_node;
+-            const payload_token = data[0].unwrap();
+-            const expr_node = data[1];
+-
+-            try self.pushScope();
+-            if (payload_token) |tok| self.shadowIfToken(tok);
+-            const used = try self.scanNode(@intFromEnum(expr_node));
+-            self.popScope();
+-            return used;
++            // Zig 0.17 removed the `errdefer |err|` payload: the node is `errdefer expr`.
++            return self.scanNode(@intFromEnum(self.datas[node].node));
+         }
+ 
+         fn scanContainerDecl(self: *UsageScanner, node: u32) RuleError!bool {
+diff --git a/src/source.zig b/src/source.zig
+index 28e831f..3c7b0a8 100644
+--- a/src/source.zig
++++ b/src/source.zig
+@@ -1,4 +1,5 @@
+ const std = @import("std");
++const compat = @import("compat.zig");
+ const diagnostic = @import("diagnostic.zig");
+ const zir_bridge_mod = @import("zir_bridge.zig");
+ const LexicalIndex = @import("analysis/lexical_index.zig").LexicalIndex;
+@@ -94,7 +95,7 @@ pub const Source = struct {
+     pub fn ast(self: *Source) !*const std.zig.Ast {
+         if (self.borrowed_ast) |parsed_ast| return parsed_ast;
+         if (self.cached_ast == null) {
+-            const parsed: std.zig.Ast = try std.zig.Ast.parse(self.allocator, self.content, .zig);
++            const parsed: std.zig.Ast = try std.zig.Ast.parse(self.allocator, self.content, compat.ast_parse_zig);
+             self.cached_ast = parsed;
+         }
+         return &self.cached_ast.?;
+@@ -594,7 +595,7 @@ test "Source type info with parse errors returns null" {
+ 
+ test "Source teardown preserves borrowed lexical queries" {
+     const allocator = std.testing.allocator;
+-    var tree = try std.zig.Ast.parse(allocator, "fn root() void {}", .zig);
++    var tree = try std.zig.Ast.parse(allocator, "fn root() void {}", compat.ast_parse_zig);
+     defer tree.deinit(allocator);
+     var index = try LexicalIndex.init(allocator, &tree);
+     defer index.deinit(allocator);
+diff --git a/src/zir/bridge.zig b/src/zir/bridge.zig
+index d0034da..139b227 100644
+--- a/src/zir/bridge.zig
++++ b/src/zir/bridge.zig
+@@ -310,7 +310,7 @@ pub const ZirBridge = struct {
+             }
+ 
+             zir.findTrackable(allocator, &contents, decl_inst) catch return null;
+-            for (contents.explicit_types.items) |type_inst| {
++            for (contents.type_decls.items) |type_inst| {
+                 compat.zir.appendDecls(allocator, zir, type_inst, &pending) catch return null;
+             }
+         }
+@@ -399,7 +399,7 @@ pub const ZirBridge = struct {
+                         if (src_node == target_offset) return @intFromEnum(inst);
+                     },
+                     .struct_decl, .union_decl, .enum_decl => {
+-                        if (builtin.zig_version.minor == 16) {
++                        if (builtin.zig_version.minor >= 16) {
+                             return findZirInstForNodeInContainer(allocator, zir, target_offset, inst, defers);
+                         }
+                     },
+@@ -465,7 +465,6 @@ pub const ZirBridge = struct {
+ 
+             .block,
+             .block_inline,
+-            .c_import,
+             .typeof_builtin,
+             .loop,
+             => {
+@@ -532,17 +531,6 @@ pub const ZirBridge = struct {
+                 const body = zir.bodySlice(inst_data.index, inst_data.len);
+                 return findZirInstForNodeInBody(allocator, zir, target_offset, body, defers);
+             },
+-            .defer_err_code => {
+-                const inst_data = data.defer_err_code;
+-                const extra = zir.extraData(Zir.Inst.DeferErrCode, inst_data.payload_index).data;
+-                const gop = defers.getOrPut(allocator, extra.index) catch {
+-                    const body = zir.bodySlice(extra.index, extra.len);
+-                    return findZirInstForNodeInBody(allocator, zir, target_offset, body, defers);
+-                };
+-                if (gop.found_existing) return null;
+-                const body = zir.bodySlice(extra.index, extra.len);
+-                return findZirInstForNodeInBody(allocator, zir, target_offset, body, defers);
+-            },
+ 
+             else => return null,
+         }
+@@ -1196,7 +1184,7 @@ test "ZirBridge rejects source with AstGen compile errors" {
+     // Each frontend rejects a builtin introduced by the other frontend. The
+     // parser accepts both spellings, so the error is recorded in ZIR and must
+     // be checked explicitly rather than mistaken for valid type information.
+-    const code: [:0]const u8 = if (builtin.zig_version.minor == 16)
++    const code: [:0]const u8 = if (builtin.zig_version.minor >= 16)
+         "const T = @Type(.{});"
+     else
+         "const T = @Int(.signed, 8);";
+diff --git a/test/fixture_tests.zig b/test/fixture_tests.zig
+index 3d1243f..459b023 100644
+--- a/test/fixture_tests.zig
++++ b/test/fixture_tests.zig
+@@ -30,6 +30,7 @@ fn frontendFixtureName(frontend: compat.Frontend) []const u8 {
+     return switch (frontend) {
+         .zig_0_15 => "zig_0_15.zig",
+         .zig_0_16 => "zig_0_16.zig",
++        .zig_0_17 => "zig_0_17.zig",
+     };
+ }
+ 
+@@ -67,6 +68,8 @@ test "frontend matrix provides type information only for the matching frontend"
+     const mismatching_fixture = frontendFixtureName(switch (compat.frontend) {
+         .zig_0_15 => .zig_0_16,
+         .zig_0_16 => .zig_0_15,
++        // `@Int` from the 0.16 fixture is still valid; `@Type` is not.
++        .zig_0_17 => .zig_0_15,
+     });
+ 
+     try runFrontendTypeInfoFixture(allocator, matching_fixture, true);
+@@ -116,7 +119,8 @@ test "project-wide unused declarations" {
+         "test/fixtures/project_unused_decl/main.zig",
+         "test/fixtures/project_unused_decl/api.zig",
+     };
+-    try analyzer.analyzeProjectUnusedDecls(&files);
++    try analyzer.prepareProject(&files);
++    try analyzer.analyzeProjectUnusedDecls();
+ 
+     try std.testing.expectEqual(@as(usize, 1), analyzer.diagnostics.items.len);
+     try std.testing.expectEqualStrings("unused-decl", analyzer.diagnostics.items[0].rule_id);
+@@ -135,7 +139,8 @@ test "project-wide unused declarations ignore duplicate names and paths" {
+         "test/fixtures/project_unused_decl/duplicate_a.zig",
+         "test/fixtures/project_unused_decl/duplicate_b.zig",
+     };
+-    try analyzer.analyzeProjectUnusedDecls(&files);
++    try analyzer.prepareProject(&files);
++    try analyzer.analyzeProjectUnusedDecls();
+ 
+     try std.testing.expectEqual(@as(usize, 2), analyzer.diagnostics.items.len);
+     try std.testing.expectEqualStrings("test/fixtures/project_unused_decl/duplicate_a.zig", analyzer.diagnostics.items[0].file_path);
+@@ -153,7 +158,8 @@ test "project-wide unused declarations ignore public aliases" {
+         "test/fixtures/project_unused_decl/alias.zig",
+         "test/fixtures/project_unused_decl/alias_inner.zig",
+     };
+-    try analyzer.analyzeProjectUnusedDecls(&files);
++    try analyzer.prepareProject(&files);
++    try analyzer.analyzeProjectUnusedDecls();
+ 
+     try std.testing.expectEqual(@as(usize, 2), analyzer.diagnostics.items.len);
+     try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "RegularType") != null);
+@@ -171,7 +177,8 @@ test "project-wide unused declarations follow public API surfaces" {
+         "test/fixtures/project_unused_decl/api_surface_main.zig",
+         "test/fixtures/project_unused_decl/api_surface.zig",
+     };
+-    try analyzer.analyzeProjectUnusedDecls(&files);
++    try analyzer.prepareProject(&files);
++    try analyzer.analyzeProjectUnusedDecls();
+ 
+     try std.testing.expectEqual(@as(usize, 2), analyzer.diagnostics.items.len);
+     try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "unusedApi") != null);
+@@ -191,7 +198,8 @@ test "project-wide unused declarations ignore package API entrypoints" {
+         "test/fixtures/project_unused_decl/src/public_api.zig",
+         "test/fixtures/project_unused_decl/src/private_api.zig",
+     };
+-    try analyzer.analyzeProjectUnusedDecls(&files);
++    try analyzer.prepareProject(&files);
++    try analyzer.analyzeProjectUnusedDecls();
+ 
+     try std.testing.expectEqual(@as(usize, 1), analyzer.diagnostics.items.len);
+     try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "hiddenUnused") != null);
+@@ -209,7 +217,8 @@ test "project-wide unused declarations ignore package usingnamespace entrypoints
+         "test/fixtures/project_unused_decl/usingnamespace_pkg/src/lib.zig",
+         "test/fixtures/project_unused_decl/usingnamespace_pkg/src/public_api.zig",
+     };
+-    try analyzer.analyzeProjectUnusedDecls(&files);
++    try analyzer.prepareProject(&files);
++    try analyzer.analyzeProjectUnusedDecls();
+ 
+     try std.testing.expectEqual(@as(usize, 0), analyzer.diagnostics.items.len);
+ }
+@@ -227,7 +236,8 @@ test "project-wide unused declarations use build root source file" {
+         "test/fixtures/project_unused_decl/custom_root_pkg/custom_public_api.zig",
+         "test/fixtures/project_unused_decl/custom_root_pkg/custom_private.zig",
+     };
+-    try analyzer.analyzeProjectUnusedDecls(&files);
++    try analyzer.prepareProject(&files);
++    try analyzer.analyzeProjectUnusedDecls();
+ 
+     try std.testing.expectEqual(@as(usize, 1), analyzer.diagnostics.items.len);
+     try std.testing.expectEqualStrings("test/fixtures/project_unused_decl/custom_root_pkg/custom_private.zig", analyzer.diagnostics.items[0].file_path);
+@@ -245,7 +255,8 @@ test "project-wide unused declarations ignore duplicate-only inputs" {
+         "test/fixtures/project_unused_decl/duplicate_a.zig",
+         "test/fixtures/project_unused_decl/duplicate_a.zig",
+     };
+-    try analyzer.analyzeProjectUnusedDecls(&files);
++    try analyzer.prepareProject(&files);
++    try analyzer.analyzeProjectUnusedDecls();
+ 
+     try std.testing.expectEqual(@as(usize, 0), analyzer.diagnostics.items.len);
+ }
+@@ -261,7 +272,8 @@ test "project-wide unused declarations follow typed receiver calls" {
+         "test/fixtures/project_unused_decl/typed_receiver_main.zig",
+         "test/fixtures/project_unused_decl/typed_receiver_api.zig",
+     };
+-    try analyzer.analyzeProjectUnusedDecls(&files);
++    try analyzer.prepareProject(&files);
++    try analyzer.analyzeProjectUnusedDecls();
+ 
+     try std.testing.expectEqual(@as(usize, 1), analyzer.diagnostics.items.len);
+     try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "unused") != null);
+@@ -278,7 +290,8 @@ test "project-wide unused declarations follow result-location method calls" {
+         "test/fixtures/project_unused_decl/result_location_main.zig",
+         "test/fixtures/project_unused_decl/result_location_api.zig",
+     };
+-    try analyzer.analyzeProjectUnusedDecls(&files);
++    try analyzer.prepareProject(&files);
++    try analyzer.analyzeProjectUnusedDecls();
+ 
+     try std.testing.expectEqual(@as(usize, 1), analyzer.diagnostics.items.len);
+     try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "unused") != null);
+@@ -295,7 +308,8 @@ test "project-wide unused declarations normalize quoted identifiers" {
+         "test/fixtures/project_unused_decl/quoted_main.zig",
+         "test/fixtures/project_unused_decl/quoted_api.zig",
+     };
+-    try analyzer.analyzeProjectUnusedDecls(&files);
++    try analyzer.prepareProject(&files);
++    try analyzer.analyzeProjectUnusedDecls();
+ 
+     try std.testing.expectEqual(@as(usize, 1), analyzer.diagnostics.items.len);
+     try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "unused-name") != null);
+@@ -312,7 +326,8 @@ test "project-wide unused declarations ignore externally visible and special pub
+         "test/fixtures/project_unused_decl/ignored_publics.zig",
+         "test/fixtures/project_unused_decl/ignored_publics_main.zig",
+     };
+-    try analyzer.analyzeProjectUnusedDecls(&files);
++    try analyzer.prepareProject(&files);
++    try analyzer.analyzeProjectUnusedDecls();
+ 
+     try std.testing.expectEqual(@as(usize, 0), analyzer.diagnostics.items.len);
+ }
+@@ -329,7 +344,8 @@ test "project-wide unused declarations ignore unrelated field accesses" {
+         "test/fixtures/project_unused_decl/unrelated_field_api.zig",
+         "test/fixtures/project_unused_decl/unrelated_field_other.zig",
+     };
+-    try analyzer.analyzeProjectUnusedDecls(&files);
++    try analyzer.prepareProject(&files);
++    try analyzer.analyzeProjectUnusedDecls();
+ 
+     try std.testing.expectEqual(@as(usize, 1), analyzer.diagnostics.items.len);
+     try std.testing.expectEqualStrings("test/fixtures/project_unused_decl/unrelated_field_api.zig", analyzer.diagnostics.items[0].file_path);
+@@ -347,7 +363,8 @@ test "project-wide unused declarations follow nested public API surfaces" {
+         "test/fixtures/project_unused_decl/nested_surface_main.zig",
+         "test/fixtures/project_unused_decl/nested_surface.zig",
+     };
+-    try analyzer.analyzeProjectUnusedDecls(&files);
++    try analyzer.prepareProject(&files);
++    try analyzer.analyzeProjectUnusedDecls();
+ 
+     try std.testing.expectEqual(@as(usize, 1), analyzer.diagnostics.items.len);
+     try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "UnusedNestedHelper") != null);
+@@ -364,7 +381,8 @@ test "project-wide unused declarations follow tagged union public API surfaces"
+         "test/fixtures/project_unused_decl/union_surface_main.zig",
+         "test/fixtures/project_unused_decl/union_surface.zig",
+     };
+-    try analyzer.analyzeProjectUnusedDecls(&files);
++    try analyzer.prepareProject(&files);
++    try analyzer.analyzeProjectUnusedDecls();
+ 
+     try std.testing.expectEqual(@as(usize, 1), analyzer.diagnostics.items.len);
+     try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "UnusedUnionHelper") != null);
+@@ -381,7 +399,8 @@ test "project-wide unused declarations count same-file function body references"
+         "test/fixtures/project_unused_decl/body_surface_main.zig",
+         "test/fixtures/project_unused_decl/body_surface.zig",
+     };
+-    try analyzer.analyzeProjectUnusedDecls(&files);
++    try analyzer.prepareProject(&files);
++    try analyzer.analyzeProjectUnusedDecls();
+ 
+     try std.testing.expectEqual(@as(usize, 0), analyzer.diagnostics.items.len);
+ }
+@@ -397,7 +416,8 @@ test "project-wide unused declarations report public constants copied from value
+         "test/fixtures/project_unused_decl/value_alias.zig",
+         "test/fixtures/project_unused_decl/value_alias_main.zig",
+     };
+-    try analyzer.analyzeProjectUnusedDecls(&files);
++    try analyzer.prepareProject(&files);
++    try analyzer.analyzeProjectUnusedDecls();
+ 
+     try std.testing.expectEqual(@as(usize, 2), analyzer.diagnostics.items.len);
+     try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "DefaultTimeoutMs") != null);
+@@ -415,7 +435,8 @@ test "project-wide unused declarations follow usingnamespace bare references" {
+         "test/fixtures/project_unused_decl/usingnamespace_main.zig",
+         "test/fixtures/project_unused_decl/usingnamespace_api.zig",
+     };
+-    try analyzer.analyzeProjectUnusedDecls(&files);
++    try analyzer.prepareProject(&files);
++    try analyzer.analyzeProjectUnusedDecls();
+ 
+     try std.testing.expectEqual(@as(usize, 1), analyzer.diagnostics.items.len);
+     try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "unused") != null);
+@@ -432,7 +453,8 @@ test "project-wide unused declarations classify error sets as types" {
+         "test/fixtures/project_unused_decl/error_set_api.zig",
+         "test/fixtures/project_unused_decl/error_set_main.zig",
+     };
+-    try analyzer.analyzeProjectUnusedDecls(&files);
++    try analyzer.prepareProject(&files);
++    try analyzer.analyzeProjectUnusedDecls();
+ 
+     try std.testing.expectEqual(@as(usize, 1), analyzer.diagnostics.items.len);
+     try std.testing.expect(std.mem.indexOf(u8, analyzer.diagnostics.items[0].message, "Type 'ApiError'") != null);
+@@ -449,7 +471,8 @@ test "project-wide unused declarations honor suppressions" {
+         "test/fixtures/project_unused_decl/suppressed_api.zig",
+         "test/fixtures/project_unused_decl/suppressed_main.zig",
+     };
+-    try analyzer.analyzeProjectUnusedDecls(&files);
++    try analyzer.prepareProject(&files);
++    try analyzer.analyzeProjectUnusedDecls();
+ 
+     try std.testing.expectEqual(@as(usize, 0), analyzer.diagnostics.items.len);
+ }
+diff --git a/test/fixtures/frontend_matrix/zig_0_17.zig b/test/fixtures/frontend_matrix/zig_0_17.zig
+new file mode 100644
+index 0000000..abe771b
+--- /dev/null
++++ b/test/fixtures/frontend_matrix/zig_0_17.zig
+@@ -0,0 +1,2 @@
++const E = enum(u8) { a };
++const T = @TypeOf(@backingInt(E.a));
+diff --git a/test/fixtures/identifier_style/allows_snake_case_payloads.zig b/test/fixtures/identifier_style/allows_snake_case_payloads.zig
+index 824337a..9a77444 100644
+--- a/test/fixtures/identifier_style/allows_snake_case_payloads.zig
++++ b/test/fixtures/identifier_style/allows_snake_case_payloads.zig
+@@ -31,10 +31,6 @@ fn foo(opt: ?i32) !void {
+         _ = err;
+     };
+ 
+-    errdefer |err| {
+-        _ = err;
+-    };
+-
+     switch (Value{ .ok = 1 }) {
+         .ok => |value_ok| {
+             _ = value_ok;
+diff --git a/test/fixtures/identifier_style/detects_bad_errdefer_payload_name.zig b/test/fixtures/identifier_style/detects_bad_errdefer_payload_name.zig
+deleted file mode 100644
+index 874fd23..0000000
+--- a/test/fixtures/identifier_style/detects_bad_errdefer_payload_name.zig
++++ /dev/null
+@@ -1,5 +0,0 @@
+-// EXPECT: line=3 rule=identifier-style
+-fn foo() !void {
+-    errdefer |BadErr| {};
+-    return;
+-}
+diff --git a/test/fixtures/shadowed_variable/errdefer_payload_shadowed.zig b/test/fixtures/shadowed_variable/errdefer_payload_shadowed.zig
+deleted file mode 100644
+index bcf02a3..0000000
+--- a/test/fixtures/shadowed_variable/errdefer_payload_shadowed.zig
++++ /dev/null
+@@ -1,8 +0,0 @@
+-// Test: errdefer payload shadowed by inner declaration
+-// EXPECT: line=5 col=15 rule=shadowed-variable message=shadows
+-fn foo() !void {
+-    errdefer |err| {
+-        const err = error.Other;
+-        _ = err;
+-    }
+-}

@@ -41,16 +41,23 @@ deadline fails instead of silently using the compiler's default. CI also
 prints retained per-target logs when the cross job fails; runner scratch is
 deleted after the job.
 
-### Remaining upstream frontend blocker
+### zwanzig's Zig 0.17 frontend
 
 Upstream zwanzig at
 [`bdc10e5`](https://github.com/forketyfork/zwanzig/tree/bdc10e5d00b1218245ff057b0017df9f69dd1f27)
 documents only Zig 0.15.2 and 0.16.0 embedded frontends; its latest release
-line is v0.15.1. The pinned 0.16 frontend rejects the 0.17 formatter's
-`@backingInt` in `bench/bench_vec.zig` with `AstGenFailed`, so its required typed
-checks correctly fail the gate rather than being silently skipped. A 0.17
-frontend port or compatible upstream release is still needed. No check or
-severity has been disabled to hide that incompatibility.
+line is v0.15.1. zwanzig embeds the frontend of the compiler that builds it, so
+the 0.16 build rejected the 0.17 formatter's `@backingInt` in
+`bench/bench_vec.zig` with `AstGenFailed`, which also skipped its project-wide
+analysis. Patch `0008-zig-0.17-port.patch` ports the pinned tree to Zig 0.17.0
+and the manifest now builds it with 0.17.0. With typed checks and project-wide
+analysis running again, zwanzig reported two findings that the frontend error had
+hidden, both in `harness/lib/cross-test/run_policy.zig`: a forced unwrap of
+`resolved_target` (now handled: no resolved target means the host, which never
+needs a foreign runner) and `configure` as unused (its caller is the build
+runner `cross-test` generates, outside every analyzed file list, so that one
+line carries a `zwanzig-disable-next-line: unused-decl` with the reason). No
+check or severity is disabled.
 
 
 zbc is still pinned to the original upstream revision plus its five reviewed
@@ -100,7 +107,7 @@ mutable branch, committing a binary, and committing a build cache.
 | zbc | ericsssan/zbc | `419d153ca411d1698899992d86c51eb9a7e14919` | 0.1.3 | Zig 0.17.0 | 6 |
 | ziglint | rockorager/ziglint | `66709a408f2ea9ac1de91a438a83b13f4691a941` | 0.5.3 | Zig 0.16.0 | 1 |
 | zlint | DonIsaac/zlint | `3ef67af7dfed776cb03012563942cdf3a97f1b59` (tag v0.10.0) | 0.10.0 | Zig 0.16.0 | 0 |
-| zwanzig | forketyfork/zwanzig | `1a0768ccd889d3586ec9482f02ffffe872a99749` | 0.15.1 | Zig 0.16.0 | 7 |
+| zwanzig | forketyfork/zwanzig | `1a0768ccd889d3586ec9482f02ffffe872a99749` | 0.15.1 | Zig 0.17.0 | 8 |
 
 All four commits were `HEAD` of their upstream `main` on 2026-10-02 (`git
 ls-remote`, recorded at capture time). The installer re-verifies each one after a
@@ -110,7 +117,8 @@ hash rather than a name that could move.
 `tool_version` and `compiler` are separate manifest columns because they answer
 different questions. zbc declares version 0.1.3 and is compiled with Zig 0.17.0;
 zwanzig declares 0.15.1 while its own `build.zig.zon` still names a 0.15.2
-minimum, because it is a dual-frontend analyzer. Writing "0.16.0" in a version
+minimum, because upstream is a dual-frontend analyzer; after patch 0008 it is
+built with, and accepts only, Zig 0.17.0. Writing "0.16.0" in a version
 column would have been a claim that no upstream made.
 
 ### The patches, and why each exists
@@ -349,7 +357,7 @@ input, so an open range still refuses a range neighbour.
 entry, exclusion, name, input, benchmark or exported API moves.
 **Coverage and evidence.** 20 tests in `src/flow/worklist.zig` cover it. A post-review run over the bytes this patch now carries passes, and the tree it produces has been built, installed and gated; the runs and their limits are below.
 
-**zwanzig** — six captured patches and one authored completion patch.
+**zwanzig** — six captured patches, one authored completion patch and one authored Zig 0.17 port.
 The captured series exists because the local checkout is at `956bc69`, five
 commits ahead of `origin/main`. `git ls-remote` shows `956bc69` in **no** ref of
 `forketyfork/zwanzig`, and the GitHub API returns HTTP 422 for it. Pinning it
@@ -366,6 +374,17 @@ three AST index conversions, and removal of nonexistent enum/union tags.
 The existing `container_decl` tags cover those declarations in Zig 0.16.
 The six captures remain unchanged. A ReleaseFast artifact build passed after
 these corrections. This build does not prove that the analyzer accepts this project.
+
+`0008` ports the tree `0001`-`0007` produce to Zig 0.17.0 (its header lists each
+change). `compat.zig` then accepts 0.17.0 only: the port drops AST and ZIR tags
+0.17 removed (`array_mult`, `c_import`, `defer_err_code`) and reads `errdefer`
+without its removed payload, so a 0.16 build would analyse wrongly instead of
+failing. Its test suite under 0.17.0 passes 711 of 728; the 17 failures are
+exactly those the `0001`-`0007` tree has under 0.16.0 (with `fixture_tests.zig`
+adapted to the `prepareProject` API `0001`-`0007` introduced, without which that
+file does not compile under either compiler). Installed by
+`install-quality-tools.sh --only zwanzig` and run over this repository's 33 files,
+it exits 0 with no findings.
 
 ### What was deliberately not archived
 
@@ -421,7 +440,7 @@ have not been run, and the default self-dogfood is not part of it.
 | --- | --- | --- |
 | zbc | `ddcb7de4…c868` | upstream + 0001-0005. The apply round-trip through 0004 is byte-for-byte, and `0005` is accepted by `git apply --check` on that base. Two `use_undefined:` runs exist — 29 selected, all passed, the first before the review correction and the second over the bytes as shipped — and the tree has been built with `zig build cli`, installed into a fresh prefix under an empty `HOME`, and gated from that prefix at **exit 0**. **Receipts** below has the numbers. The default dogfood is separate from all of that and still exits 1 on any finding; no `zbc src/` self-run over `0001`–`0005` exists. |
 
-| zwanzig | `50e2cee8…8e23c` | upstream + 0001-0007. The six captures are preserved. The authored completion passed a ReleaseFast artifact build. |
+| zwanzig | `7d7aa2a5…2555c` | upstream + 0001-0008. The six captures are preserved. 0008 is the Zig 0.17.0 port; built and installed with 0.17.0, run over this repository at exit 0. |
 | ziglint | `b70c237d…30211f` | upstream + 0001, identical to the captured working copy |
 | zlint | `c6919ca8…59d9` | (upstream, no patches) |
 
